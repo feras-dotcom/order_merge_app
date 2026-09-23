@@ -72,8 +72,10 @@ export interface MergeResult {
  *   5. Applies a 100 % discount to each transferred item so the primary
  *      balance does not increase (customer already paid on the secondary).
  *   6. Commits the edit silently.
- *   7. Cancels every secondary with reason OTHER, no restock, no refund.
- *   8. Appends a [Merge] timeline note to the primary.
+ *   7. Cancels every secondary with reason OTHER, restock, no refund, then
+ *      closes it.
+ *   8. Appends a [Merge] note plus any secondary notes to the primary and
+ *      merges all tags into a unique list on the primary.
  *
  * @param admin  Shopify admin GraphQL client (from authenticate.admin or
  *               authenticate.webhook).
@@ -97,6 +99,7 @@ export async function executeMerge(
             name
             createdAt
             note
+            tags
             lineItems(first: 50) {
               nodes {
                 quantity
@@ -339,9 +342,27 @@ export async function executeMerge(
     }
   }
 
-  // 6 ── Append a [Merge] timeline note to the primary order ────────────────
-  const existingNote = primary.note ? `${primary.note}\n` : "";
-  await admin.graphql(
+  // 6 ── Append a [Merge] note, carry over secondary notes, and union tags ──
+  const primaryNote = (primary.note ?? "").trim();
+  const noteParts = [
+    primaryNote,
+    `[Merge] Absorbed ${secondaryNames}. All line items transferred to this order.`,
+    ...secondaries
+      .map((o: any) => ({ name: o.name, note: (o.note ?? "").trim() }))
+      .filter(({ note }) => note && !primaryNote.includes(note))
+      .map(({ name, note }) => `Note from ${name}: ${note}`),
+  ].filter(Boolean);
+
+  // Shopify tags are case-insensitive; keep the first-seen casing of each
+  const tagMap = new Map<string, string>();
+  for (const tag of orders.flatMap((o: any) => (o.tags ?? []) as string[])) {
+    const trimmed = tag.trim();
+    if (trimmed && !tagMap.has(trimmed.toLowerCase())) {
+      tagMap.set(trimmed.toLowerCase(), trimmed);
+    }
+  }
+
+  const updateRes = await admin.graphql(
     `#graphql
       mutation orderUpdate($input: OrderInput!) {
         orderUpdate(input: $input) {
@@ -353,11 +374,19 @@ export async function executeMerge(
       variables: {
         input: {
           id: primary.id,
-          note: `${existingNote}[Merge] Absorbed ${secondaryNames}. All line items transferred to this order.`,
+          note: noteParts.join("\n"),
+          tags: [...tagMap.values()],
         },
       },
     },
   );
+  const updateErrors = (await updateRes.json()).data?.orderUpdate?.userErrors ?? [];
+  if (updateErrors.length) {
+    console.error(
+      `orderUpdate errors for ${primary.name}:`,
+      updateErrors.map((e: any) => e.message).join("; "),
+    );
+  }
 
   return {
     success: true,
