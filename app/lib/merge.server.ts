@@ -280,7 +280,7 @@ export async function executeMerge(
           variables: {
             orderId: secondary.id,
             reason: "OTHER",
-            restock: false,
+            restock: true,
             refund: false,
             staffNote: `Duplicate — merged into ${primary.name}. Line items transferred; no restock.`,
           },
