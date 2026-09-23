@@ -65,16 +65,18 @@ export interface MergeResult {
 
 /**
  * Executes a full merge of the supplied order IDs:
- *   1. Fetches full details (createdAt, lineItems) for all orders.
+ *   1. Fetches full details (createdAt, lineItems, customAttributes) for all orders.
  *   2. Sorts oldest-first; the oldest becomes the primary.
- *   3. Opens an order-edit session on the primary.
- *   4. Adds every secondary line item to the primary.
- *   5. Applies a 100 % discount to each transferred item so the primary
+ *   3. Guards: returns immediately if any order has line items with custom
+ *      properties — Shopify's order-edit API cannot carry these over.
+ *   4. Opens an order-edit session on the primary.
+ *   5. Adds every secondary line item to the primary.
+ *   6. Applies a 100 % discount to each transferred item so the primary
  *      balance does not increase (customer already paid on the secondary).
- *   6. Commits the edit silently.
- *   7. Cancels every secondary with reason OTHER, restock, no refund, then
+ *   7. Commits the edit silently.
+ *   8. Cancels every secondary with reason OTHER, restock, no refund, then
  *      closes it.
- *   8. Appends any secondary customer notes to the primary note and merges
+ *   9. Appends any secondary customer notes to the primary note and merges
  *      all tags (plus "merged") into a unique list on the primary.
  *
  * @param admin  Shopify admin GraphQL client (from authenticate.admin or
@@ -104,6 +106,7 @@ export async function executeMerge(
               nodes {
                 quantity
                 variant { id }
+                customAttributes { key value }
               }
             }
           }
@@ -126,7 +129,26 @@ export async function executeMerge(
   const secondaries = orders.slice(1);
   const secondaryNames = secondaries.map((o: any) => o.name).join(", ");
 
-  // 2 ── Begin an order-edit session on the primary order ───────────────────
+  // 2 ── Guard: skip any merge that involves orders with line item properties ─
+  // Shopify's order-edit API (orderEditAddVariant) has no argument for
+  // customAttributes, so properties on personalized products cannot be carried
+  // over to the primary. Skip the entire merge to leave those orders untouched.
+  for (const order of orders) {
+    const hasProperties = (order.lineItems?.nodes ?? []).some(
+      (item: any) => (item.customAttributes ?? []).length > 0,
+    );
+    if (hasProperties) {
+      console.log(
+        `Skipping merge for order ${order.name}: contains custom line item properties that cannot be edited via Shopify API.`,
+      );
+      return {
+        success: false,
+        error: `Order ${order.name} has line items with custom properties. These orders were left untouched to preserve fulfillment details.`,
+      };
+    }
+  }
+
+  // 3 ── Begin an order-edit session on the primary order ───────────────────
   const editBeginRes = await admin.graphql(
     `#graphql
       mutation orderEditBegin($id: ID!) {
@@ -150,7 +172,7 @@ export async function executeMerge(
     };
   }
 
-  // 3 ── Transfer every line item and zero-out the added price ──────────────
+  // 4 ── Transfer every line item and zero-out the added price ──────────────
   for (const secondary of secondaries) {
     for (const item of secondary.lineItems.nodes) {
       if (!item.variant?.id) continue;
@@ -229,7 +251,7 @@ export async function executeMerge(
     }
   }
 
-  // 4 ── Commit the edit (no customer notification) ─────────────────────────
+  // 5 ── Commit the edit (no customer notification) ─────────────────────────
   const commitRes = await admin.graphql(
     `#graphql
       mutation orderEditCommit($id: ID!, $staffNote: String) {
@@ -255,7 +277,7 @@ export async function executeMerge(
     };
   }
 
-  // 5 ── Cancel each secondary, then close it so the Orders badge decrements ──
+  // 6 ── Cancel each secondary, then close it so the Orders badge decrements ──
   const cancelResults: { name: string; cancelled: boolean; error?: string }[] = [];
   for (const secondary of secondaries) {
     try {
@@ -342,7 +364,7 @@ export async function executeMerge(
     }
   }
 
-  // 6 ── Carry over secondary customer notes and union tags (+ "merged") ────
+  // 7 ── Carry over secondary customer notes and union tags (+ "merged") ────
   const primaryNote = (primary.note ?? "").trim();
   const secondaryNotes = secondaries
     .map((o: any) => ({ name: o.name, note: (o.note ?? "").trim() }))
