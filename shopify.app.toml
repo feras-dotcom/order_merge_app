@@ -24,10 +24,10 @@ api_version = "2026-10"
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
-  # customers/data_request, customers/redact, and shop/redact are mandatory
-  # privacy webhooks. Shopify does not allow them as regular subscriptions here.
-  # Configure their endpoint URLs manually in the Partner Dashboard:
-  # Apps → order-merge-app → Configuration → GDPR webhooks
+  [webhooks.privacy_compliance]
+  customer_data_request_url = "https://upbeat-reflection-production.up.railway.app/webhooks/customers/data_request"
+  customer_deletion_url = "https://upbeat-reflection-production.up.railway.app/webhooks/customers/redact"
+  shop_deletion_url = "https://upbeat-reflection-production.up.railway.app/webhooks/shop/redact"
 
 [auth]
 redirect_urls = [ "https://upbeat-reflection-production.up.railway.app/auth/callback" ]
