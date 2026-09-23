@@ -4,6 +4,13 @@ import db from "../db.server";
 import { buildGroupKey, executeMerge } from "../lib/merge.server";
 import { getSettings } from "../lib/settings.server";
 
+// ── In-memory lock: prevents two concurrent webhook deliveries from merging
+// the same address+shipping group simultaneously. Keyed on the normalized
+// group key so independent groups are never blocked by each other.
+// This is sufficient for a single-instance Railway deployment. If the app
+// ever runs multiple replicas, replace this with a database advisory lock.
+const activeGroupMerges = new Set<string>();
+
 // ── ORDERS_CREATE webhook handler ─────────────────────────────────────────────
 //
 // When a new paid, unfulfilled order arrives this handler:
@@ -69,6 +76,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // ── Guardrail: only process paid orders ────────────────────────────────────
   if (order.financial_status !== "paid") {
     console.log(`[orders/create] ${orderId} is not paid (${order.financial_status}) — skipping.`);
+    return new Response();
+  }
+
+  // ── Guardrail: only process unfulfilled orders ─────────────────────────────
+  // For orders/create this is always null, but guard explicitly so the handler
+  // stays correct if Shopify ever fires the webhook for a pre-fulfilled import.
+  const fulfillmentStatus = order.fulfillment_status as string | null;
+  if (fulfillmentStatus !== null && fulfillmentStatus !== "unfulfilled") {
+    console.log(
+      `[orders/create] ${orderId} has fulfillment status "${fulfillmentStatus}" — skipping.`,
+    );
     return new Response();
   }
 
@@ -194,17 +212,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     ...eligibleSiblings,
   ];
 
+  // ── In-memory lock: guard against concurrent merges for the same group ────
+  if (activeGroupMerges.has(newOrderGroupKey)) {
+    console.log(
+      `[orders/create] Merge already in progress for group key of ${orderId} — skipping to avoid race condition.`,
+    );
+    return new Response();
+  }
+
   // ── Execute merge ──────────────────────────────────────────────────────────
   const orderIds = allCandidates.map((o) => o.id);
   console.log(`[orders/create] Auto-merging orders: ${orderIds.join(", ")}`);
 
-  const result = await executeMerge(admin, orderIds);
-  if (result.success) {
-    console.log(
-      `[orders/create] Auto-merge OK — merged ${result.mergedCount} order(s) into ${result.primaryName}.`,
-    );
-  } else {
-    console.error(`[orders/create] Auto-merge failed: ${result.error}`);
+  activeGroupMerges.add(newOrderGroupKey);
+  try {
+    const result = await executeMerge(admin, orderIds);
+    if (result.success) {
+      console.log(
+        `[orders/create] Auto-merge OK — merged ${result.mergedCount} order(s) into ${result.primaryName}.`,
+      );
+    } else {
+      console.error(`[orders/create] Auto-merge failed: ${result.error}`);
+    }
+  } finally {
+    activeGroupMerges.delete(newOrderGroupKey);
   }
 
   return new Response();
