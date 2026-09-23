@@ -317,7 +317,7 @@ export default function Index() {
 
   return (
     <Page>
-      <TitleBar title="Unfulfilled orders" />
+      <TitleBar title="Orders" />
       <BlockStack gap="500">
         <Text as="p" variant="bodyMd">
           The 50 most recent orders awaiting fulfillment, grouped by shipping
