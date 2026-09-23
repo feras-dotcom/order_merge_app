@@ -1,6 +1,6 @@
 import { json } from "@remix-run/node";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useFetcher } from "@remix-run/react";
+import { useLoaderData, useFetcher, useNavigate } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import {
   BlockStack,
@@ -64,6 +64,7 @@ export default function SettingsPage() {
   const { settings } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
+  const navigate = useNavigate();
   const handledRef = useRef<object | null>(null);
 
   const [autoMergeEnabled, setAutoMergeEnabled] = useState(
@@ -94,7 +95,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <Page>
+    <Page backAction={{ content: "Orders", onAction: () => navigate("/app") }}>
       <TitleBar title="Settings" />
       <Card>
         <BlockStack gap="400">

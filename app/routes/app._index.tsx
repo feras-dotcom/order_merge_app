@@ -1,6 +1,6 @@
 import { json } from "@remix-run/node";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useFetcher } from "@remix-run/react";
+import { useLoaderData, useFetcher, useNavigate } from "@remix-run/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BlockStack,
@@ -314,9 +314,14 @@ export default function Index() {
   const loaderIds = new Set(unmatchedOrders.map((o) => o.id));
   const uniquePromoted = promotedOrders.filter((o) => !loaderIds.has(o.id));
   const allUnmatched = [...unmatchedOrders, ...uniquePromoted];
+  const navigate = useNavigate();
 
   return (
-    <Page>
+    <Page
+      secondaryActions={[
+        { content: "Settings", onAction: () => navigate("/app/settings") },
+      ]}
+    >
       <TitleBar title="Orders" />
       <BlockStack gap="500">
         <Text as="p" variant="bodyMd">
