@@ -74,8 +74,8 @@ export interface MergeResult {
  *   6. Commits the edit silently.
  *   7. Cancels every secondary with reason OTHER, restock, no refund, then
  *      closes it.
- *   8. Appends a [Merge] note plus any secondary notes to the primary and
- *      merges all tags into a unique list on the primary.
+ *   8. Appends any secondary customer notes to the primary note and merges
+ *      all tags (plus "merged") into a unique list on the primary.
  *
  * @param admin  Shopify admin GraphQL client (from authenticate.admin or
  *               authenticate.webhook).
@@ -342,20 +342,17 @@ export async function executeMerge(
     }
   }
 
-  // 6 ── Append a [Merge] note, carry over secondary notes, and union tags ──
+  // 6 ── Carry over secondary customer notes and union tags (+ "merged") ────
   const primaryNote = (primary.note ?? "").trim();
-  const noteParts = [
-    primaryNote,
-    `[Merge] Absorbed ${secondaryNames}. All line items transferred to this order.`,
-    ...secondaries
-      .map((o: any) => ({ name: o.name, note: (o.note ?? "").trim() }))
-      .filter(({ note }) => note && !primaryNote.includes(note))
-      .map(({ name, note }) => `Note from ${name}: ${note}`),
-  ].filter(Boolean);
+  const secondaryNotes = secondaries
+    .map((o: any) => ({ name: o.name, note: (o.note ?? "").trim() }))
+    .filter(({ note }) => note && !primaryNote.includes(note))
+    .map(({ name, note }) => `Note from ${name}: ${note}`);
 
   // Shopify tags are case-insensitive; keep the first-seen casing of each
   const tagMap = new Map<string, string>();
-  for (const tag of orders.flatMap((o: any) => (o.tags ?? []) as string[])) {
+  const allTags = orders.flatMap((o: any) => (o.tags ?? []) as string[]);
+  for (const tag of [...allTags, "merged"]) {
     const trimmed = tag.trim();
     if (trimmed && !tagMap.has(trimmed.toLowerCase())) {
       tagMap.set(trimmed.toLowerCase(), trimmed);
@@ -374,8 +371,11 @@ export async function executeMerge(
       variables: {
         input: {
           id: primary.id,
-          note: noteParts.join("\n"),
           tags: [...tagMap.values()],
+          // Only touch the note when there is a customer note to carry over
+          ...(secondaryNotes.length > 0 && {
+            note: [primaryNote, ...secondaryNotes].filter(Boolean).join("\n"),
+          }),
         },
       },
     },
