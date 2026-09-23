@@ -252,7 +252,7 @@ export async function executeMerge(
     };
   }
 
-  // 5 ── Cancel each secondary (duplicate, no restock) ──────────────────────
+  // 5 ── Cancel each secondary, then close it so the Orders badge decrements ──
   const cancelResults: { name: string; cancelled: boolean; error?: string }[] = [];
   for (const secondary of secondaries) {
     try {
@@ -282,7 +282,7 @@ export async function executeMerge(
             reason: "OTHER",
             restock: true,
             refund: false,
-            staffNote: `Duplicate — merged into ${primary.name}. Line items transferred; no restock.`,
+            staffNote: `Duplicate — merged into ${primary.name}. Line items transferred; inventory restocked.`,
           },
         },
       );
@@ -296,6 +296,37 @@ export async function executeMerge(
         cancelResults.push({ name: secondary.name, cancelled: false, error: msg });
       } else {
         console.log(`orderCancel OK for ${secondary.name}`);
+
+        // Close the cancelled order so Shopify finalises its lifecycle and the
+        // Orders sidebar badge decrements immediately. Without this step the
+        // badge stays elevated when restock:true is used (Shopify leaves the
+        // order in a pending-inventory state that keeps it in the active count).
+        try {
+          const closeRes = await admin.graphql(
+            `#graphql
+              mutation orderClose($input: OrderCloseInput!) {
+                orderClose(input: $input) {
+                  order { id }
+                  userErrors { field message }
+                }
+              }`,
+            { variables: { input: { id: secondary.id } } },
+          );
+          const closeJson = await closeRes.json();
+          const closeErrors = closeJson.data?.orderClose?.userErrors ?? [];
+          if (closeErrors.length) {
+            console.warn(
+              `orderClose warnings for ${secondary.name}:`,
+              closeErrors.map((e: any) => e.message).join("; "),
+            );
+          } else {
+            console.log(`orderClose OK for ${secondary.name}`);
+          }
+        } catch (closeErr: any) {
+          // Non-fatal: cancel already succeeded, close is a best-effort badge fix
+          console.warn(`orderClose threw for ${secondary.name}:`, closeErr?.message);
+        }
+
         cancelResults.push({ name: secondary.name, cancelled: true });
       }
     } catch (err: any) {
