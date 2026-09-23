@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "04b77142ce8ad421f49735b05c7d0a86"
-application_url = "https://example.com"
+application_url = "https://upbeat-reflection-production.up.railway.app"
 embedded = true
 name = "order-merge-app"
 
@@ -25,7 +25,7 @@ api_version = "2026-10"
   topics = [ "app/scopes_update" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://upbeat-reflection-production.up.railway.app/auth/callback" ]
 
 [build]
 automatically_update_urls_on_dev = true
