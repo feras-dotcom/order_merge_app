@@ -142,7 +142,7 @@ export default function SettingsPage() {
   return (
     <Page
       title="Settings"
-      backAction={{ content: "Orders", onAction: () => navigate("/app") }}
+      backAction={{ content: "MergeShip", onAction: () => navigate("/app") }}
     >
       <TitleBar title="Settings" />
       <BlockStack gap="500">

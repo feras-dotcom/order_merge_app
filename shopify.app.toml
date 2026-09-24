@@ -3,7 +3,7 @@
 client_id = "04b77142ce8ad421f49735b05c7d0a86"
 application_url = "https://upbeat-reflection-production.up.railway.app"
 embedded = true
-name = "order-merge-app"
+name = "MergeShip"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes

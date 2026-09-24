@@ -6,6 +6,7 @@ import {
   Badge,
   BlockStack,
   Box,
+  Button,
   Card,
   Divider,
   EmptyState,
@@ -282,11 +283,15 @@ export default function Index() {
           </Badge>
         )
       }
-      primaryAction={{
-        content: "Sync Orders",
-        onAction: () => revalidator.revalidate(),
-        loading: revalidator.state === "loading",
-      }}
+      primaryAction={
+        <Button
+          variant="secondary"
+          onClick={() => revalidator.revalidate()}
+          loading={revalidator.state === "loading"}
+        >
+          Sync Orders
+        </Button>
+      }
     >
       <TitleBar title="MergeShip" />
       <BlockStack gap="600">
