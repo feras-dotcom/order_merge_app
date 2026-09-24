@@ -5,11 +5,13 @@ import db from "../db.server";
 export interface MergeSettings {
   autoMergeEnabled: boolean;
   mergeWindowHours: number;
+  shippingCostSavings: number;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
   autoMergeEnabled: true,
   mergeWindowHours: 24,
+  shippingCostSavings: 8.5,
 };
 
 /**

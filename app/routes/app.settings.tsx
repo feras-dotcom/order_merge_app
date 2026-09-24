@@ -13,6 +13,7 @@ import {
   Page,
   Select,
   Text,
+  TextField,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, PLAN_PRO } from "../shopify.server";
@@ -80,7 +81,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // Validate against the allowed set so arbitrary values can't be stored.
   const mergeWindowHours = [1, 12, 24].includes(rawHours) ? rawHours : 24;
 
-  await upsertSettings(session.shop, { autoMergeEnabled, mergeWindowHours });
+  const rawSavings = parseFloat(formData.get("shippingCostSavings") as string);
+  // Clamp to a sensible range; fall back to the default if invalid.
+  const shippingCostSavings =
+    Number.isFinite(rawSavings) && rawSavings >= 0 && rawSavings <= 9999
+      ? Math.round(rawSavings * 100) / 100
+      : 8.5;
+
+  await upsertSettings(session.shop, { autoMergeEnabled, mergeWindowHours, shippingCostSavings });
   return json({ success: true });
 };
 
@@ -118,6 +126,9 @@ export default function SettingsPage() {
   const [mergeWindowHours, setMergeWindowHours] = useState(
     String(settings.mergeWindowHours),
   );
+  const [shippingCostSavings, setShippingCostSavings] = useState(
+    String(settings.shippingCostSavings ?? 8.5),
+  );
 
   // Show a success toast once per completed save — the ref guard prevents
   // re-firing if the component re-renders while fetcher.data is unchanged.
@@ -134,6 +145,7 @@ export default function SettingsPage() {
       {
         autoMergeEnabled: String(autoMergeEnabled),
         mergeWindowHours,
+        shippingCostSavings,
       },
       { method: "post" },
     );
@@ -166,6 +178,44 @@ export default function SettingsPage() {
               options={WINDOW_OPTIONS}
               value={mergeWindowHours}
               onChange={setMergeWindowHours}
+            />
+
+            <InlineStack align="end">
+              <Button
+                variant="primary"
+                onClick={handleSave}
+                loading={fetcher.state !== "idle"}
+              >
+                Save
+              </Button>
+            </InlineStack>
+          </BlockStack>
+        </Card>
+
+        {/* ── Savings Estimate ────────────────────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <BlockStack gap="100">
+              <Text as="h2" variant="headingMd">
+                Savings Estimate
+              </Text>
+              <Text as="p" variant="bodyMd" tone="subdued">
+                Enter your average shipping label cost. MergeShip uses this
+                amount to calculate the Total Shipping Saved metric on the
+                dashboard.
+              </Text>
+            </BlockStack>
+
+            <TextField
+              label="Estimated shipping label savings"
+              helpText="Average cost per label saved when orders are consolidated (USD)."
+              type="number"
+              prefix="$"
+              value={shippingCostSavings}
+              onChange={setShippingCostSavings}
+              autoComplete="off"
+              min="0"
+              step={0.01}
             />
 
             <InlineStack align="end">
