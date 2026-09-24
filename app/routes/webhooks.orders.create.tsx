@@ -232,7 +232,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   activeGroupMerges.add(newOrderGroupKey);
   try {
-    const result = await executeMerge(admin, orderIds);
+    const result = await executeMerge(admin, shop, orderIds);
     if (result.success) {
       console.log(
         `[orders/create] Auto-merge OK — merged ${result.mergedCount} order(s) into ${result.primaryName}.`,

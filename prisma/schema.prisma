@@ -34,6 +34,24 @@ model ProcessedWebhook {
   @@index([createdAt])
 }
 
+// One row per order absorbed by a successful merge (Consolidation History).
+// Stores Shopify IDs and order names only; customer names are fetched live
+// from Shopify so no personal customer data is persisted.
+model MergeRecord {
+  id               String   @id @default(cuid())
+  shop             String
+  primaryOrderId   String
+  primaryOrderName String
+  mergedOrderId    String
+  mergedOrderName  String
+  customerId       String?
+  itemsCombined    Int
+  createdAt        DateTime @default(now())
+
+  @@unique([shop, mergedOrderId])
+  @@index([shop, createdAt])
+}
+
 model Session {
   id                  String    @id
   shop                String

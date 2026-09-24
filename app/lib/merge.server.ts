@@ -1,7 +1,9 @@
-// ── Shared merge utilities ────────────────────────────────────────────────────
-// Used by both the UI route (app._index.tsx) and the background webhook handler
-// (webhooks.orders.create.tsx) so grouping rules and merge execution are
-// identical in both paths.
+// ── Merge utilities ───────────────────────────────────────────────────────────
+// Grouping rules and merge execution used by the background webhook handler
+// (webhooks.orders.create.tsx). Successful consolidations are recorded in the
+// MergeRecord table, which feeds the dashboard (app._index.tsx).
+
+import db from "../db.server";
 
 // ── Address normalization ─────────────────────────────────────────────────────
 
@@ -69,144 +71,6 @@ export function buildGroupKey(
 }
 
 export const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-
-// ── Candidate evaluation (UI) ─────────────────────────────────────────────────
-
-export type ConflictReason =
-  | "SHIPPING_MISMATCH"
-  | "OUTSIDE_WINDOW"
-  | "PAYMENT_PENDING"
-  | "FULFILLMENT_MISMATCH"
-  | "NO_ELIGIBLE_MATCH";
-
-export interface EvaluableOrder {
-  id: string;
-  createdAt: string;
-  cancelledAt?: string | null;
-  displayFinancialStatus?: string | null;
-  displayFulfillmentStatus?: string | null;
-  customer?: { id: string } | null;
-  shippingAddress?: AddressFields | null;
-  shippingLine?: { title?: string | null } | null;
-}
-
-export interface OrderEvaluation<T> {
-  evaluatedCount: number;
-  readyGroups: { key: string; orders: T[] }[];
-  conflictGroups: {
-    key: string;
-    orders: { order: T; reasons: ConflictReason[] }[];
-  }[];
-  singleOrders: T[];
-}
-
-const toTime = (iso: string) => new Date(iso).getTime();
-
-/**
- * Classifies open orders into three buckets:
- *   • readyGroups    — same customer + address + shipping method, all paid and
- *                      unfulfilled, created within mergeWindowMs of the
- *                      cluster's oldest order.
- *   • conflictGroups — orders that share a customer + address with at least one
- *                      other order but were held back, with the reasons why.
- *   • singleOrders   — orders with no same-customer duplicate at their address
- *                      (or with no customer / no usable address at all).
- * Cancelled orders are ignored entirely.
- */
-export function evaluateOrders<T extends EvaluableOrder>(
-  orders: T[],
-  mergeWindowMs: number,
-): OrderEvaluation<T> {
-  const active = orders.filter((o) => !o.cancelledAt);
-  const buckets = new Map<string, T[]>();
-  const singleOrders: T[] = [];
-
-  for (const order of active) {
-    const key = buildAddressKey(order.customer?.id, order.shippingAddress);
-    if (!key) {
-      singleOrders.push(order);
-      continue;
-    }
-    buckets.set(key, [...(buckets.get(key) ?? []), order]);
-  }
-
-  const readyGroups: OrderEvaluation<T>["readyGroups"] = [];
-  const conflictGroups: OrderEvaluation<T>["conflictGroups"] = [];
-
-  for (const [key, bucket] of buckets) {
-    if (bucket.length < 2) {
-      singleOrders.push(...bucket);
-      continue;
-    }
-
-    // Per-order safety rules: only paid, fully unfulfilled orders may merge
-    const held: { order: T; reasons: ConflictReason[] }[] = [];
-    const eligible: T[] = [];
-    for (const order of bucket) {
-      const reasons: ConflictReason[] = [];
-      if (order.displayFinancialStatus !== "PAID") reasons.push("PAYMENT_PENDING");
-      if (order.displayFulfillmentStatus !== "UNFULFILLED") {
-        reasons.push("FULFILLMENT_MISMATCH");
-      }
-      if (reasons.length) held.push({ order, reasons });
-      else eligible.push(order);
-    }
-
-    const byShipping = new Map<string, T[]>();
-    for (const order of eligible) {
-      const shipping = normalizeShippingTitle(order.shippingLine?.title);
-      byShipping.set(shipping, [...(byShipping.get(shipping) ?? []), order]);
-    }
-
-    // For each shipping method, sort by createdAt and greedily build temporal
-    // sub-clusters where the span from the anchor (oldest order) to every
-    // other order in the cluster is ≤ mergeWindowMs. A single stale open order
-    // therefore only holds itself back; it cannot disqualify a recent pair.
-    for (const [shipping, group] of byShipping) {
-      const sorted = [...group].sort(
-        (a, b) => toTime(a.createdAt) - toTime(b.createdAt),
-      );
-      let start = 0;
-      while (start < sorted.length) {
-        const anchorTime = toTime(sorted[start].createdAt);
-        let end = start;
-        while (
-          end + 1 < sorted.length &&
-          toTime(sorted[end + 1].createdAt) - anchorTime <= mergeWindowMs
-        ) {
-          end++;
-        }
-        const cluster = sorted.slice(start, end + 1);
-        if (cluster.length >= 2) {
-          readyGroups.push({
-            key: `${key}\0${shipping}\0${sorted[start].createdAt}`,
-            orders: cluster,
-          });
-        } else {
-          const [order] = cluster;
-          const others = eligible.filter((o) => o !== order);
-          const reasons: ConflictReason[] = [];
-          if (others.some((o) => normalizeShippingTitle(o.shippingLine?.title) !== shipping)) {
-            reasons.push("SHIPPING_MISMATCH");
-          }
-          if (others.some((o) => normalizeShippingTitle(o.shippingLine?.title) === shipping)) {
-            reasons.push("OUTSIDE_WINDOW");
-          }
-          if (!reasons.length) reasons.push("NO_ELIGIBLE_MATCH");
-          held.push({ order, reasons });
-        }
-        start = end + 1;
-      }
-    }
-
-    if (held.length) {
-      held.sort((a, b) => toTime(a.order.createdAt) - toTime(b.order.createdAt));
-      conflictGroups.push({ key, orders: held });
-    }
-  }
-
-  return { evaluatedCount: active.length, readyGroups, conflictGroups, singleOrders };
-}
 
 // ── Merge result type ─────────────────────────────────────────────────────────
 
@@ -287,15 +151,20 @@ async function fetchAllLineItems(
  *   6. Commits the edit silently.
  *   7. Cancels every secondary with reason OTHER, restock, no refund, then
  *      closes it.
- *   8. Appends any secondary customer notes to the primary note and merges
+ *   8. Records every successfully cancelled secondary in MergeRecord
+ *      (Consolidation History). A database failure here is logged only; it
+ *      never affects the merge that already happened in Shopify.
+ *   9. Appends any secondary customer notes to the primary note and merges
  *      all tags (plus "merged") into a unique list on the primary.
  *
  * @param admin  Shopify admin GraphQL client (from authenticate.admin or
  *               authenticate.webhook).
+ * @param shop  Shop domain the orders belong to (used for history records).
  * @param orderIds  Array of Shopify Order GIDs to merge (minimum 2).
  */
 export async function executeMerge(
   admin: AdminClient,
+  shop: string,
   orderIds: string[],
 ): Promise<MergeResult> {
   if (orderIds.length < 2) {
@@ -561,6 +430,7 @@ export async function executeMerge(
 
   // 7 ── Cancel each secondary, then close it so the Orders badge decrements ──
   const cancelResults: { name: string; cancelled: boolean; error?: string }[] = [];
+  const consolidated: string[] = [];
   for (const secondary of secondaries) {
     try {
       const cancelRes = await admin.graphql(
@@ -635,6 +505,7 @@ export async function executeMerge(
         }
 
         cancelResults.push({ name: secondary.name, cancelled: true });
+        consolidated.push(secondary.id);
       }
     } catch (err: any) {
       console.error(`orderCancel threw for ${secondary.name}:`, err?.message);
@@ -646,7 +517,34 @@ export async function executeMerge(
     }
   }
 
-  // 8 ── Carry over secondary customer notes and union tags (+ "merged") ────
+  // 8 ── Record consolidations for the dashboard ─────────────────────────────
+  if (consolidated.length) {
+    try {
+      await db.mergeRecord.createMany({
+        data: secondaries
+          .filter((s: any) => consolidated.includes(s.id))
+          .map((s: any) => ({
+            shop,
+            primaryOrderId: primary.id,
+            primaryOrderName: primary.name,
+            mergedOrderId: s.id,
+            mergedOrderName: s.name,
+            customerId: primary.customer?.id ?? null,
+            itemsCombined: lineItemsById
+              .get(s.id)!
+              .reduce((n, item) => n + Math.max(item.currentQuantity, 0), 0),
+          })),
+        skipDuplicates: true,
+      });
+    } catch (err: any) {
+      console.error(
+        `Failed to record consolidation history for ${primary.name}:`,
+        err?.message,
+      );
+    }
+  }
+
+  // 9 ── Carry over secondary customer notes and union tags (+ "merged") ────
   const primaryNote = (primary.note ?? "").trim();
   const secondaryNotes = secondaries
     .map((o: any) => ({ name: o.name, note: (o.note ?? "").trim() }))

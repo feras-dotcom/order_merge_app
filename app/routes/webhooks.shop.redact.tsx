@@ -12,8 +12,9 @@ import db from "../db.server";
 //   • Session          — OAuth tokens for the shop
 //   • Settings         — per-shop auto-merge preferences
 //   • ProcessedWebhook — idempotency log of processed ORDERS_CREATE events
+//   • MergeRecord      — consolidation history shown on the dashboard
 //
-// All three are deleted in parallel. Individual failures are logged but do not
+// All four are deleted in parallel. Individual failures are logged but do not
 // prevent the other deletions from completing, and a 200 is always returned so
 // Shopify does not retry unnecessarily. Manual reconciliation can be performed
 // from the Railway PostgreSQL console using the logged shop domain.
@@ -23,31 +24,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   console.log(`[${topic}] Redact request for shop ${shop} — erasing all stored data.`);
 
-  const [sessions, settings, processedWebhooks] = await Promise.allSettled([
-    db.session.deleteMany({ where: { shop } }),
-    db.settings.deleteMany({ where: { shop } }),
-    db.processedWebhook.deleteMany({ where: { shop } }),
-  ]);
+  const deletions = [
+    ["session", db.session.deleteMany({ where: { shop } })],
+    ["settings", db.settings.deleteMany({ where: { shop } })],
+    ["processed-webhook", db.processedWebhook.deleteMany({ where: { shop } })],
+    ["merge-history", db.mergeRecord.deleteMany({ where: { shop } })],
+  ] as const;
 
-  if (sessions.status === "rejected") {
-    console.error(`[${topic}] Failed to delete sessions for ${shop}:`, sessions.reason);
-  } else {
-    console.log(`[${topic}] Deleted ${sessions.value.count} session(s) for ${shop}.`);
-  }
-
-  if (settings.status === "rejected") {
-    console.error(`[${topic}] Failed to delete settings for ${shop}:`, settings.reason);
-  } else {
-    console.log(`[${topic}] Deleted ${settings.value.count} settings row(s) for ${shop}.`);
-  }
-
-  if (processedWebhooks.status === "rejected") {
-    console.error(`[${topic}] Failed to delete processed webhooks for ${shop}:`, processedWebhooks.reason);
-  } else {
-    console.log(
-      `[${topic}] Deleted ${processedWebhooks.value.count} processed-webhook record(s) for ${shop}.`,
-    );
-  }
+  const results = await Promise.allSettled(deletions.map(([, op]) => op));
+  results.forEach((result, i) => {
+    const label = deletions[i][0];
+    if (result.status === "rejected") {
+      console.error(`[${topic}] Failed to delete ${label} records for ${shop}:`, result.reason);
+    } else {
+      console.log(`[${topic}] Deleted ${result.value.count} ${label} record(s) for ${shop}.`);
+    }
+  });
 
   return new Response();
 };

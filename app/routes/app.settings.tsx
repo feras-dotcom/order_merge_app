@@ -148,7 +148,7 @@ export default function SettingsPage() {
 
             <Select
               label="Merge time window"
-              helpText="Only orders created within this window of each other are merge candidates, both for automatic merging and on the dashboard."
+              helpText="Only orders created within this window of each other are merged automatically."
               options={WINDOW_OPTIONS}
               value={mergeWindowHours}
               onChange={setMergeWindowHours}
@@ -191,9 +191,9 @@ export default function SettingsPage() {
             />
 
             <Text as="p" variant="bodySm" tone="subdued">
-              These rules protect your shipments and cannot be turned off. Orders
-              held back by them appear under Orders with Merge Conflicts on the
-              dashboard.
+              These rules protect your shipments and cannot be turned off.
+              Orders that fail them are never merged and stay exactly as the
+              customer placed them.
             </Text>
           </BlockStack>
         </Card>
