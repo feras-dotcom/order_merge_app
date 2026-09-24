@@ -74,54 +74,62 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
-  // Customer names are looked up live so no personal data is stored locally.
-  const customerIds = [
-    ...new Set(records.map((r) => r.customerId).filter((id): id is string => !!id)),
+  // Look up customer names and each primary order's current item count live
+  // in one request, so no personal data is stored locally and the item total
+  // reflects the consolidated package (original + transferred items).
+  const lookupIds = [
+    ...new Set([
+      ...records.map((r) => r.primaryOrderId),
+      ...records.map((r) => r.customerId).filter((id): id is string => !!id),
+    ]),
   ];
   const customerNames = new Map<string, string>();
-  if (customerIds.length) {
+  const itemsToFulfill = new Map<string, number>();
+  if (lookupIds.length) {
     try {
       const res = await admin.graphql(
         `#graphql
-          query CustomerNames($ids: [ID!]!) {
+          query ConsolidationLookups($ids: [ID!]!) {
             nodes(ids: $ids) {
+              ... on Order {
+                id
+                currentSubtotalLineItemsQuantity
+              }
               ... on Customer {
                 id
                 displayName
               }
             }
           }`,
-        { variables: { ids: customerIds } },
+        { variables: { ids: lookupIds } },
       );
       for (const node of (await res.json()).data?.nodes ?? []) {
-        if (node?.id) customerNames.set(node.id, node.displayName);
+        if (!node?.id) continue;
+        if (typeof node.currentSubtotalLineItemsQuantity === "number") {
+          itemsToFulfill.set(node.id, node.currentSubtotalLineItemsQuantity);
+        }
+        if (node.displayName) customerNames.set(node.id, node.displayName);
       }
     } catch (err) {
-      console.error("Could not load customer names for consolidation history:", err);
+      console.error("Could not load consolidation history details:", err);
     }
   }
 
-  // Rows written by one merge share the primary order and timestamp (a single
-  // createMany INSERT), so group them into one consolidation event each.
-  const events = new Map<string, ConsolidationEvent>();
+  // One card per primary order, combining every order it has absorbed.
+  // Records arrive newest first, so the first row seen is the latest merge
+  // and cards stay ordered by most recent activity.
+  const groups = new Map<string, ConsolidationGroup>();
   for (const r of records) {
-    const mergedAt = r.createdAt.toISOString();
-    const key = `${r.primaryOrderId}|${mergedAt}`;
-    const event = events.get(key) ?? {
-      id: key,
+    const group = groups.get(r.primaryOrderId) ?? {
       primaryOrderId: r.primaryOrderId,
       primaryOrderName: r.primaryOrderName,
       customerName: (r.customerId && customerNames.get(r.customerId)) || "—",
-      mergedAt,
+      itemsToFulfill: itemsToFulfill.get(r.primaryOrderId) ?? null,
+      latestMergeAt: r.createdAt.toISOString(),
       absorbed: [],
     };
-    event.absorbed.push({
-      id: r.id,
-      orderId: r.mergedOrderId,
-      orderName: r.mergedOrderName,
-      itemsCombined: r.itemsCombined,
-    });
-    events.set(key, event);
+    group.absorbed.push({ id: r.id, orderId: r.mergedOrderId, orderName: r.mergedOrderName });
+    groups.set(r.primaryOrderId, group);
   }
 
   return {
@@ -129,29 +137,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     historyLimit: HISTORY_LIMIT,
     recordsShown: records.length,
     consolidatedCount,
-    events: [...events.values()],
+    groups: [...groups.values()],
   };
 };
 
-interface ConsolidationEvent {
-  id: string;
+interface ConsolidationGroup {
   primaryOrderId: string;
   primaryOrderName: string;
   customerName: string;
-  mergedAt: string;
-  absorbed: {
-    id: string;
-    orderId: string;
-    orderName: string;
-    itemsCombined: number;
-  }[];
+  itemsToFulfill: number | null;
+  latestMergeAt: string;
+  absorbed: { id: string; orderId: string; orderName: string }[];
 }
 
 // ── Components ───────────────────────────────────────────
 
-type SerializedEvent = ReturnType<
+type SerializedGroup = ReturnType<
   typeof useLoaderData<typeof loader>
->["events"][number];
+>["groups"][number];
 
 function MetricCard({
   label,
@@ -192,9 +195,9 @@ function MetaItem({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function ConsolidationCard({ event }: { event: SerializedEvent }) {
-  const items = event.absorbed.reduce((n, a) => n + a.itemsCombined, 0);
-  const saved = event.absorbed.length * SHIPPING_SAVINGS_PER_MERGE;
+function ConsolidationCard({ group }: { group: SerializedGroup }) {
+  const saved = group.absorbed.length * SHIPPING_SAVINGS_PER_MERGE;
+  const items = group.itemsToFulfill;
 
   return (
     <Card>
@@ -202,12 +205,12 @@ function ConsolidationCard({ event }: { event: SerializedEvent }) {
         <InlineStack align="space-between" blockAlign="center" gap="300">
           <InlineStack gap="300" blockAlign="center">
             <Link
-              url={orderAdminUrl(event.primaryOrderId)}
+              url={orderAdminUrl(group.primaryOrderId)}
               target="_blank"
               removeUnderline
             >
               <Text as="span" variant="headingMd" fontWeight="bold">
-                {event.primaryOrderName}
+                {group.primaryOrderName}
               </Text>
             </Link>
             <Badge tone="success">Primary (Fulfill this)</Badge>
@@ -218,7 +221,7 @@ function ConsolidationCard({ event }: { event: SerializedEvent }) {
         </InlineStack>
 
         <BlockStack gap="200">
-          {event.absorbed.map((a) => (
+          {group.absorbed.map((a) => (
             <Box key={a.id} paddingInlineStart="400">
               <InlineStack gap="300" blockAlign="center">
                 <Text as="span" variant="bodyLg" tone="subdued">
@@ -229,7 +232,7 @@ function ConsolidationCard({ event }: { event: SerializedEvent }) {
                     {a.orderName}
                   </Link>
                 </Text>
-                <Badge>{"Merged & Cancelled"}</Badge>
+                <Badge>Merged into Primary</Badge>
               </InlineStack>
             </Box>
           ))}
@@ -238,11 +241,11 @@ function ConsolidationCard({ event }: { event: SerializedEvent }) {
         <Divider />
 
         <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
-          <MetaItem label="Customer">{event.customerName}</MetaItem>
-          <MetaItem label="Items combined">
-            {items} {items === 1 ? "item" : "items"}
+          <MetaItem label="Customer">{group.customerName}</MetaItem>
+          <MetaItem label="Total items to fulfill">
+            {items === null ? "—" : `${items} ${items === 1 ? "item" : "items"}`}
           </MetaItem>
-          <MetaItem label="Merged">{formatDate(event.mergedAt)}</MetaItem>
+          <MetaItem label="Latest merge">{formatDate(group.latestMergeAt)}</MetaItem>
         </InlineGrid>
       </BlockStack>
     </Card>
@@ -250,19 +253,19 @@ function ConsolidationCard({ event }: { event: SerializedEvent }) {
 }
 
 export default function Index() {
-  const { autoMergeEnabled, historyLimit, recordsShown, consolidatedCount, events } =
+  const { autoMergeEnabled, historyLimit, recordsShown, consolidatedCount, groups } =
     useLoaderData<typeof loader>();
   const revalidator = useRevalidator();
   const [query, setQuery] = useState("");
 
   const needle = query.trim().toLowerCase();
-  const visibleEvents = needle
-    ? events.filter((e) =>
-        [e.primaryOrderName, e.customerName, ...e.absorbed.map((a) => a.orderName)].some(
+  const visibleGroups = needle
+    ? groups.filter((g) =>
+        [g.primaryOrderName, g.customerName, ...g.absorbed.map((a) => a.orderName)].some(
           (value) => value.toLowerCase().includes(needle),
         ),
       )
-    : events;
+    : groups;
 
   return (
     <Page
@@ -305,7 +308,7 @@ export default function Index() {
           />
         </InlineGrid>
 
-        {events.length === 0 ? (
+        {groups.length === 0 ? (
           <Card>
             <EmptyState heading="No orders merged yet" image={EMPTY_STATE_IMAGE}>
               <p>
@@ -322,8 +325,9 @@ export default function Index() {
                 Consolidation History
               </Text>
               <Text as="p" variant="bodyMd" tone="subdued">
-                Each card is one automatic merge. Fulfill the primary order;
-                absorbed orders were cancelled and their items moved over.
+                Each card is one primary order and every order merged into it.
+                Fulfill the primary order; merged orders were cancelled and
+                their items moved over.
               </Text>
             </BlockStack>
 
@@ -338,9 +342,9 @@ export default function Index() {
               autoComplete="off"
             />
 
-            {visibleEvents.length > 0 ? (
-              visibleEvents.map((event) => (
-                <ConsolidationCard key={event.id} event={event} />
+            {visibleGroups.length > 0 ? (
+              visibleGroups.map((group) => (
+                <ConsolidationCard key={group.primaryOrderId} group={group} />
               ))
             ) : (
               <Card>

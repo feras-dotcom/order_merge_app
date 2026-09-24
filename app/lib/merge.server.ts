@@ -152,6 +152,7 @@ async function fetchAllLineItems(
  *   3. Guards (any failure aborts before anything is changed):
  *      • every order is not cancelled, PAID and UNFULFILLED;
  *      • every order has the same customer, address and shipping method;
+ *      • every order has the same shop currency and presentment currency;
  *      • no line item has custom properties (Shopify's order-edit API cannot
  *        carry these over);
  *      • every secondary line item still on the order has a variant, so it can
@@ -197,6 +198,8 @@ export async function executeMerge(
             cancelledAt
             displayFinancialStatus
             displayFulfillmentStatus
+            currencyCode
+            presentmentCurrencyCode
             note
             tags
             customer { id }
@@ -261,7 +264,19 @@ export async function executeMerge(
     );
   }
 
-  // 3c ── Load every line item (paginated) ────────────────────────────────────
+  // 3c ── Guard: same shop currency and customer (presentment) currency ──────
+  const currencyMismatch = orders.find(
+    (o: any) =>
+      o.currencyCode !== primary.currencyCode ||
+      o.presentmentCurrencyCode !== primary.presentmentCurrencyCode,
+  );
+  if (currencyMismatch) {
+    return abort(
+      `Order ${currencyMismatch.name} uses ${currencyMismatch.currencyCode}/${currencyMismatch.presentmentCurrencyCode}, but ${primary.name} uses ${primary.currencyCode}/${primary.presentmentCurrencyCode}. Orders in different currencies are never merged.`,
+    );
+  }
+
+  // 3d ── Load every line item (paginated) ────────────────────────────────────
   const lineItemsById = new Map<string, MergeLineItem[]>();
   try {
     for (const order of orders) {
@@ -271,7 +286,7 @@ export async function executeMerge(
     return abort(err?.message ?? "Could not load line items.");
   }
 
-  // 3d ── Guard: line item properties ─────────────────────────────────────────
+  // 3e ── Guard: line item properties ─────────────────────────────────────────
   // Shopify's order-edit API (orderEditAddVariant) has no argument for
   // customAttributes, so properties on personalized products cannot be carried
   // over to the primary. Skip the entire merge to leave those orders untouched.
@@ -290,7 +305,7 @@ export async function executeMerge(
     }
   }
 
-  // 3e ── Guard: every secondary item must be transferable ────────────────────
+  // 3f ── Guard: every secondary item must be transferable ────────────────────
   // Items with currentQuantity 0 were already removed from the order and are
   // not transferred. Anything else without a variant (custom items, deleted
   // products) cannot be added via orderEditAddVariant, so abort rather than

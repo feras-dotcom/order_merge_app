@@ -145,6 +145,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               name
               createdAt
               note
+              currencyCode
+              presentmentCurrencyCode
               shippingAddress {
                 address1
                 address2
@@ -169,7 +171,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // Primary orders that previously absorbed other orders carry a [Merge] note
   // but are still status:open and should remain eligible to receive more orders.
   // Cancelled secondaries are already excluded by the status:open query filter.
-  const matchGroup: { id: string; createdAt: string }[] = [];
+  const matchGroup: {
+    id: string;
+    name: string;
+    createdAt: string;
+    currencyCode: string;
+    presentmentCurrencyCode: string;
+  }[] = [];
   for (const sibling of siblings) {
     // The new order itself may already be indexed — skip it to avoid duplication
     if (sibling.id === orderId) continue;
@@ -179,7 +187,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       sibling.shippingLine?.title,
     );
     if (key === newOrderGroupKey) {
-      matchGroup.push({ id: sibling.id, createdAt: sibling.createdAt });
+      matchGroup.push({
+        id: sibling.id,
+        name: sibling.name,
+        createdAt: sibling.createdAt,
+        currencyCode: sibling.currencyCode,
+        presentmentCurrencyCode: sibling.presentmentCurrencyCode,
+      });
     }
   }
 
@@ -209,6 +223,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (eligibleSiblings.length === 0) {
     console.log(
       `[orders/create] No siblings within the ${settings.mergeWindowHours}h window for ${orderId} — skipping.`,
+    );
+    return new Response();
+  }
+
+  // ── Currency guard: every candidate must share the same currencies ────────
+  // Both the shop currency and the currency the customer paid in must match,
+  // otherwise transferred items and their 100 % discounts would be recorded in
+  // a different currency than the one the customer was charged in.
+  const newOrderCurrency = order.currency as string;
+  const newOrderPresentmentCurrency =
+    (order.presentment_currency as string | undefined) ?? newOrderCurrency;
+  const currencyMismatch = eligibleSiblings.find(
+    (s) =>
+      s.currencyCode !== newOrderCurrency ||
+      s.presentmentCurrencyCode !== newOrderPresentmentCurrency,
+  );
+  if (currencyMismatch) {
+    console.log(
+      `[orders/create] Currency mismatch between ${orderId} (${newOrderCurrency}/${newOrderPresentmentCurrency}) and ${currencyMismatch.name} (${currencyMismatch.currencyCode}/${currencyMismatch.presentmentCurrencyCode}) — skipping merge.`,
     );
     return new Response();
   }
