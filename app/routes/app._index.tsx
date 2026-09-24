@@ -1,12 +1,11 @@
 import type { LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useRevalidator } from "@remix-run/react";
+import { useLoaderData } from "@remix-run/react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   Badge,
   BlockStack,
   Box,
-  Button,
   Card,
   Divider,
   EmptyState,
@@ -24,7 +23,6 @@ import { getSettings } from "../lib/settings.server";
 
 // ── Helpers ──────────────────────────────────────────────
 
-const SHIPPING_SAVINGS_PER_MERGE = 8.5;
 const HISTORY_LIMIT = 100;
 const EMPTY_STATE_IMAGE =
   "https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png";
@@ -135,6 +133,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     autoMergeEnabled: settings.autoMergeEnabled,
+    shippingCostSavings: settings.shippingCostSavings ?? 8.5,
     historyLimit: HISTORY_LIMIT,
     recordsShown: records.length,
     consolidatedCount,
@@ -196,8 +195,14 @@ function MetaItem({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function ConsolidationCard({ group }: { group: SerializedGroup }) {
-  const saved = group.absorbed.length * SHIPPING_SAVINGS_PER_MERGE;
+function ConsolidationCard({
+  group,
+  savingsPerMerge,
+}: {
+  group: SerializedGroup;
+  savingsPerMerge: number;
+}) {
+  const saved = group.absorbed.length * savingsPerMerge;
   const items = group.itemsToFulfill;
 
   return (
@@ -254,9 +259,8 @@ function ConsolidationCard({ group }: { group: SerializedGroup }) {
 }
 
 export default function Index() {
-  const { autoMergeEnabled, historyLimit, recordsShown, consolidatedCount, groups } =
+  const { autoMergeEnabled, shippingCostSavings, historyLimit, recordsShown, consolidatedCount, groups } =
     useLoaderData<typeof loader>();
-  const revalidator = useRevalidator();
   const [query, setQuery] = useState("");
 
   const needle = query.trim().toLowerCase();
@@ -283,15 +287,6 @@ export default function Index() {
           </Badge>
         )
       }
-      primaryAction={
-        <Button
-          variant="secondary"
-          onClick={() => revalidator.revalidate()}
-          loading={revalidator.state === "loading"}
-        >
-          Sync Orders
-        </Button>
-      }
     >
       <TitleBar title="MergeShip" />
       <BlockStack gap="600">
@@ -303,8 +298,8 @@ export default function Index() {
           />
           <MetricCard
             label="Total Shipping Saved"
-            value={formatCurrency(consolidatedCount * SHIPPING_SAVINGS_PER_MERGE)}
-            helpText={`Based on ${formatCurrency(SHIPPING_SAVINGS_PER_MERGE)} per consolidation`}
+            value={formatCurrency(consolidatedCount * shippingCostSavings)}
+            helpText={`Based on ${formatCurrency(shippingCostSavings)} per consolidation`}
           />
           <MetricCard
             label="Boxes Saved"
@@ -349,12 +344,12 @@ export default function Index() {
 
             {visibleGroups.length > 0 ? (
               visibleGroups.map((group) => (
-                <ConsolidationCard key={group.primaryOrderId} group={group} />
+                <ConsolidationCard key={group.primaryOrderId} group={group} savingsPerMerge={shippingCostSavings} />
               ))
             ) : (
               <Card>
                 <Text as="p" variant="bodyMd" tone="subdued" alignment="center">
-                  No consolidations match “{query.trim()}”.
+                  No consolidations match "{query.trim()}".
                 </Text>
               </Card>
             )}
