@@ -8,6 +8,7 @@ import {
   Button,
   Card,
   Checkbox,
+  Divider,
   InlineStack,
   Page,
   Select,
@@ -84,6 +85,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 // ── Component ─────────────────────────────────────────────
+
+const SAFETY_RULES = [
+  {
+    title: "Require identical shipping method",
+    description:
+      "Orders merge only when their shipping methods match (ignoring letter case and extra spaces), so no customer loses a shipping upgrade they paid for.",
+  },
+  {
+    title: "Require paid status",
+    description:
+      "Only fully paid, non-cancelled orders are merged, so unpaid items are never absorbed into a paid order.",
+  },
+];
 
 const WINDOW_OPTIONS = [
   { label: "1 hour", value: "1" },
@@ -169,28 +183,29 @@ export default function SettingsPage() {
         {/* ── Safety Filters (always enforced) ────────────────────────────── */}
         <Card>
           <BlockStack gap="400">
-            <InlineStack align="space-between" blockAlign="center">
-              <Text as="h2" variant="headingMd">
-                Safety Filters
-              </Text>
-              <Badge tone="info">Always on</Badge>
-            </InlineStack>
+            <Text as="h2" variant="headingMd">
+              Safety Filters
+            </Text>
 
-            <Checkbox
-              label="Require identical shipping method"
-              helpText="Orders merge only when their shipping methods match (ignoring letter case and extra spaces), so no customer loses a shipping upgrade they paid for."
-              checked
-              disabled
-            />
+            {SAFETY_RULES.map((rule, i) => (
+              <BlockStack key={rule.title} gap="400">
+                {i > 0 && <Divider />}
+                <BlockStack gap="100">
+                  <InlineStack gap="200" blockAlign="center">
+                    <Text as="h3" variant="headingSm">
+                      {rule.title}
+                    </Text>
+                    <Badge tone="success">Active</Badge>
+                  </InlineStack>
+                  <Text as="p" variant="bodyMd">
+                    {rule.description}
+                  </Text>
+                </BlockStack>
+              </BlockStack>
+            ))}
 
-            <Checkbox
-              label="Require paid status"
-              helpText="Only fully paid, non-cancelled orders are merged, so unpaid items are never absorbed into a paid order."
-              checked
-              disabled
-            />
-
-            <Text as="p" variant="bodySm" tone="subdued">
+            <Divider />
+            <Text as="p" variant="bodyMd">
               These rules protect your shipments and cannot be turned off.
               Orders that fail them are never merged and stay exactly as the
               customer placed them.

@@ -72,6 +72,18 @@ export function buildGroupKey(
 
 export const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
+/** Shopify tags are case-insensitive; keep the first-seen casing of each. */
+function uniqueTags(tags: string[]): string[] {
+  const tagMap = new Map<string, string>();
+  for (const tag of tags) {
+    const trimmed = tag.trim();
+    if (trimmed && !tagMap.has(trimmed.toLowerCase())) {
+      tagMap.set(trimmed.toLowerCase(), trimmed);
+    }
+  }
+  return [...tagMap.values()];
+}
+
 // ── Merge result type ─────────────────────────────────────────────────────────
 
 export interface MergeResult {
@@ -155,7 +167,9 @@ async function fetchAllLineItems(
  *      (Consolidation History). A database failure here is logged only; it
  *      never affects the merge that already happened in Shopify.
  *   9. Appends any secondary customer notes to the primary note and merges
- *      all tags (plus "merged") into a unique list on the primary.
+ *      all tags (plus "Consolidated") into a unique list on the primary.
+ *      Each cancelled secondary is tagged "Merged" and noted with the primary
+ *      order it was consolidated into.
  *
  * @param admin  Shopify admin GraphQL client (from authenticate.admin or
  *               authenticate.webhook).
@@ -474,6 +488,45 @@ export async function executeMerge(
       } else {
         console.log(`orderCancel OK for ${secondary.name}`);
 
+        // Tag and annotate the absorbed order so it is clearly identifiable in
+        // the Shopify admin order list. Non-fatal: the merge already happened.
+        try {
+          const existingNote = (secondary.note ?? "").trim();
+          const tagRes = await admin.graphql(
+            `#graphql
+              mutation absorbedOrderUpdate($input: OrderInput!) {
+                orderUpdate(input: $input) {
+                  order { id }
+                  userErrors { field message }
+                }
+              }`,
+            {
+              variables: {
+                input: {
+                  id: secondary.id,
+                  tags: uniqueTags([...(secondary.tags ?? []), "Merged"]),
+                  note: [
+                    existingNote,
+                    `Consolidated into primary order ${primary.name} by MergeShip`,
+                  ]
+                    .filter(Boolean)
+                    .join("\n"),
+                },
+              },
+            },
+          );
+          const tagErrors =
+            (await tagRes.json()).data?.orderUpdate?.userErrors ?? [];
+          if (tagErrors.length) {
+            console.warn(
+              `Tagging warnings for ${secondary.name}:`,
+              tagErrors.map((e: any) => e.message).join("; "),
+            );
+          }
+        } catch (tagErr: any) {
+          console.warn(`Tagging threw for ${secondary.name}:`, tagErr?.message);
+        }
+
         // Close the cancelled order so Shopify finalises its lifecycle and the
         // Orders sidebar badge decrements immediately. Without this step the
         // badge stays elevated when restock:true is used (Shopify leaves the
@@ -544,22 +597,14 @@ export async function executeMerge(
     }
   }
 
-  // 9 ── Carry over secondary customer notes and union tags (+ "merged") ────
+  // 9 ── Carry over secondary customer notes and union tags (+ "Consolidated")
   const primaryNote = (primary.note ?? "").trim();
   const secondaryNotes = secondaries
     .map((o: any) => ({ name: o.name, note: (o.note ?? "").trim() }))
     .filter(({ note }) => note && !primaryNote.includes(note))
     .map(({ name, note }) => `Note from ${name}: ${note}`);
 
-  // Shopify tags are case-insensitive; keep the first-seen casing of each
-  const tagMap = new Map<string, string>();
   const allTags = orders.flatMap((o: any) => (o.tags ?? []) as string[]);
-  for (const tag of [...allTags, "merged"]) {
-    const trimmed = tag.trim();
-    if (trimmed && !tagMap.has(trimmed.toLowerCase())) {
-      tagMap.set(trimmed.toLowerCase(), trimmed);
-    }
-  }
 
   const updateRes = await admin.graphql(
     `#graphql
@@ -573,7 +618,7 @@ export async function executeMerge(
       variables: {
         input: {
           id: primary.id,
-          tags: [...tagMap.values()],
+          tags: uniqueTags([...allTags, "Consolidated"]),
           // Only touch the note when there is a customer note to carry over
           ...(secondaryNotes.length > 0 && {
             note: [primaryNote, ...secondaryNotes].filter(Boolean).join("\n"),
