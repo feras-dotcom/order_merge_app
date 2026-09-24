@@ -126,98 +126,135 @@ export default function SettingsPage() {
   };
 
   return (
-    <Page backAction={{ content: "Orders", onAction: () => navigate("/app") }}>
+    <Page
+      title="Settings"
+      backAction={{ content: "Orders", onAction: () => navigate("/app") }}
+    >
       <TitleBar title="Settings" />
-      <Card>
-        <BlockStack gap="400">
-          <Text as="h2" variant="headingMd">
-            Auto-merge preferences
-          </Text>
+      <BlockStack gap="500">
+        {/* ── Automation Rules ────────────────────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <Text as="h2" variant="headingMd">
+              Automation Rules
+            </Text>
 
-          <Checkbox
-            label="Enable automatic order merging"
-            helpText="When enabled, new paid orders are automatically merged with matching open orders for the same customer."
-            checked={autoMergeEnabled}
-            onChange={setAutoMergeEnabled}
-          />
+            <Checkbox
+              label="Enable automatic order merging"
+              helpText="When enabled, new paid orders are automatically merged with matching open orders for the same customer."
+              checked={autoMergeEnabled}
+              onChange={setAutoMergeEnabled}
+            />
 
-          <Select
-            label="Merge window"
-            helpText="Only orders created within this window of each other will be considered merge candidates."
-            options={WINDOW_OPTIONS}
-            value={mergeWindowHours}
-            onChange={setMergeWindowHours}
-            disabled={!autoMergeEnabled}
-          />
+            <Select
+              label="Merge time window"
+              helpText="Only orders created within this window of each other are merge candidates, both for automatic merging and on the dashboard."
+              options={WINDOW_OPTIONS}
+              value={mergeWindowHours}
+              onChange={setMergeWindowHours}
+            />
 
-          <InlineStack align="end">
-            <Button
-              variant="primary"
-              onClick={handleSave}
-              loading={fetcher.state !== "idle"}
-            >
-              Save
-            </Button>
-          </InlineStack>
-        </BlockStack>
-      </Card>
+            <InlineStack align="end">
+              <Button
+                variant="primary"
+                onClick={handleSave}
+                loading={fetcher.state !== "idle"}
+              >
+                Save
+              </Button>
+            </InlineStack>
+          </BlockStack>
+        </Card>
 
-      {/* ── Plan and Billing ────────────────────────────────────────────── */}
-      <Card>
-        <BlockStack gap="400">
-          <Text as="h2" variant="headingMd">
-            Plan and Billing
-          </Text>
-
-          <BlockStack gap="200">
-            <InlineStack gap="200" align="start" blockAlign="center">
-              <Text as="span" variant="bodyMd" fontWeight="semibold">
-                Current plan:
+        {/* ── Safety Filters (always enforced) ────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <InlineStack align="space-between" blockAlign="center">
+              <Text as="h2" variant="headingMd">
+                Safety Filters
               </Text>
-              <Text as="span" variant="bodyMd">
-                Pro Plan
-              </Text>
-              <Badge tone={billingStatus === "trial" ? "attention" : "success"}>
-                {billingStatus === "trial" ? "Trial" : "Active"}
-              </Badge>
+              <Badge tone="info">Always on</Badge>
             </InlineStack>
 
-            <InlineStack gap="200" align="start">
-              <Text as="span" variant="bodyMd" fontWeight="semibold">
-                Price:
-              </Text>
-              <Text as="span" variant="bodyMd">
-                $19 / month
-              </Text>
-            </InlineStack>
+            <Checkbox
+              label="Require identical shipping method"
+              helpText="Orders merge only when their shipping methods match (ignoring letter case and extra spaces), so no customer loses a shipping upgrade they paid for."
+              checked
+              disabled
+            />
 
-            <InlineStack gap="200" align="start">
-              <Text as="span" variant="bodyMd" fontWeight="semibold">
-                Free trial:
-              </Text>
-              <Text as="span" variant="bodyMd">
-                14 days
-              </Text>
-            </InlineStack>
+            <Checkbox
+              label="Require paid status"
+              helpText="Only fully paid, non-cancelled orders are merged, so unpaid items are never absorbed into a paid order."
+              checked
+              disabled
+            />
 
             <Text as="p" variant="bodySm" tone="subdued">
-              Billing is managed securely through Shopify. Your payment details
-              are never shared with us.
+              These rules protect your shipments and cannot be turned off. Orders
+              held back by them appear under Orders with Merge Conflicts on the
+              dashboard.
             </Text>
           </BlockStack>
+        </Card>
 
-          <InlineStack align="end">
-            {/* Use a plain Form so the billing.request redirect navigates
-                correctly rather than being swallowed by a fetcher. */}
-            <Form method="post">
-              <input type="hidden" name="intent" value="manage-billing" />
-              <Button submit variant="secondary">
-                Manage subscription
-              </Button>
-            </Form>
-          </InlineStack>
-        </BlockStack>
-      </Card>
+        {/* ── Plan and Billing ────────────────────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <Text as="h2" variant="headingMd">
+              Plan and Billing
+            </Text>
+
+            <BlockStack gap="200">
+              <InlineStack gap="200" align="start" blockAlign="center">
+                <Text as="span" variant="bodyMd" fontWeight="semibold">
+                  Current plan:
+                </Text>
+                <Text as="span" variant="bodyMd">
+                  Pro Plan
+                </Text>
+                <Badge tone={billingStatus === "trial" ? "attention" : "success"}>
+                  {billingStatus === "trial" ? "Trial" : "Active"}
+                </Badge>
+              </InlineStack>
+
+              <InlineStack gap="200" align="start">
+                <Text as="span" variant="bodyMd" fontWeight="semibold">
+                  Price:
+                </Text>
+                <Text as="span" variant="bodyMd">
+                  $19 / month
+                </Text>
+              </InlineStack>
+
+              <InlineStack gap="200" align="start">
+                <Text as="span" variant="bodyMd" fontWeight="semibold">
+                  Free trial:
+                </Text>
+                <Text as="span" variant="bodyMd">
+                  14 days
+                </Text>
+              </InlineStack>
+
+              <Text as="p" variant="bodySm" tone="subdued">
+                Billing is managed securely through Shopify. Your payment details
+                are never shared with us.
+              </Text>
+            </BlockStack>
+
+            <InlineStack align="end">
+              {/* Use a plain Form so the billing.request redirect navigates
+                  correctly rather than being swallowed by a fetcher. */}
+              <Form method="post">
+                <input type="hidden" name="intent" value="manage-billing" />
+                <Button submit variant="secondary">
+                  Manage subscription
+                </Button>
+              </Form>
+            </InlineStack>
+          </BlockStack>
+        </Card>
+      </BlockStack>
     </Page>
   );
 }

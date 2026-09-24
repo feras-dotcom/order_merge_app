@@ -1,23 +1,30 @@
 import { json } from "@remix-run/node";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useFetcher, useNavigate } from "@remix-run/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useFetcher, useLoaderData, useRevalidator } from "@remix-run/react";
+import { useEffect, useRef, useState } from "react";
 import {
+  Badge,
   BlockStack,
+  Box,
   Button,
   Card,
   IndexTable,
+  InlineGrid,
   InlineStack,
   Link,
   Page,
   Text,
 } from "@shopify/polaris";
+import type { BadgeProps } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, PLAN_PRO } from "../shopify.server";
-import { buildGroupKey, executeMerge } from "../lib/merge.server";
+import { evaluateOrders, executeMerge } from "../lib/merge.server";
+import type { ConflictReason } from "../lib/merge.server";
 import { getSettings } from "../lib/settings.server";
 
 // ── Helpers ──────────────────────────────────────────────
+
+const SHIPPING_SAVINGS_PER_MERGE = 8.5;
 
 const orderAdminUrl = (gid: string) =>
   `shopify:admin/orders/${gid.replace("gid://shopify/Order/", "")}`;
@@ -25,6 +32,11 @@ const orderAdminUrl = (gid: string) =>
 // Returns "YYYY-MM-DD HH:MM UTC" — stable across server and client renders
 const formatDate = (iso: string) =>
   `${iso.replace("T", " ").slice(0, 16)} UTC`;
+
+const formatCurrency = (amount: number) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(
+    amount,
+  );
 
 // Programmatically clicks an <a> attached to the DOM so App Bridge intercepts
 // it the same way it intercepts a real link click.
@@ -37,6 +49,17 @@ function openAdminOrder(gid: string) {
   a.click();
   document.body.removeChild(a);
 }
+
+const REASON_BADGES: Record<
+  ConflictReason,
+  { label: string; tone: BadgeProps["tone"] }
+> = {
+  SHIPPING_MISMATCH: { label: "Shipping method mismatch", tone: "warning" },
+  OUTSIDE_WINDOW: { label: "Time window exceeded", tone: "warning" },
+  PAYMENT_PENDING: { label: "Payment pending", tone: "critical" },
+  FULFILLMENT_MISMATCH: { label: "Fulfillment status mismatch", tone: "attention" },
+  NO_ELIGIBLE_MATCH: { label: "No eligible match", tone: "info" },
+};
 
 // ── Loader ───────────────────────────────────────────────
 
@@ -62,16 +85,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const { mergeWindowHours } = await getSettings(session.shop);
-  const mergeWindowMs = mergeWindowHours * 60 * 60 * 1000;
+
+  // Partially fulfilled and unpaid orders are fetched on purpose so they can
+  // be surfaced as conflicts; evaluateOrders never marks them as mergeable.
   const response = await admin.graphql(
     `#graphql
-      query UnfulfilledOrders {
-        orders(first: 50, query: "fulfillment_status:unfulfilled status:open", sortKey: CREATED_AT, reverse: true) {
+      query OpenOrders {
+        orders(
+          first: 100
+          query: "status:open (fulfillment_status:unfulfilled OR fulfillment_status:partial)"
+          sortKey: CREATED_AT
+          reverse: true
+        ) {
           nodes {
             id
             name
             createdAt
+            cancelledAt
+            displayFinancialStatus
+            displayFulfillmentStatus
             customer {
+              id
               displayName
             }
             shippingAddress {
@@ -91,64 +125,25 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }`,
   );
   const responseJson = await response.json();
-  const orders = responseJson.data?.orders.nodes ?? [];
-  const ordersByKey = new Map<string, typeof orders>();
-  const unmatchedOrders: typeof orders = [];
+  const orders: OrderNode[] = responseJson.data?.orders.nodes ?? [];
 
-  for (const order of orders) {
-    const groupKey = buildGroupKey(
-      order.shippingAddress,
-      order.shippingLine?.title,
-    );
-    if (!groupKey) {
-      unmatchedOrders.push(order);
-      continue;
-    }
-    const bucket = ordersByKey.get(groupKey) ?? [];
-    bucket.push(order);
-    ordersByKey.set(groupKey, bucket);
-  }
+  const { evaluatedCount, readyGroups, conflictGroups, singleOrders } =
+    evaluateOrders(orders, mergeWindowHours * 60 * 60 * 1000);
 
-  // For each address+shipping bucket, sort by createdAt and greedily build
-  // temporal sub-clusters where the span from the anchor (oldest order) to
-  // every other order in the cluster is ≤ mergeWindowMs.
-  // A single stale open order from days ago therefore only makes itself
-  // unmatched; it cannot disqualify a recent pair that is well within the
-  // window.
-  const mergeCandidates = [];
-  for (const [groupKey, rawOrders] of ordersByKey) {
-    const sorted = [...rawOrders].sort(
-      (a, b) =>
-        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-    );
+  const readyToMerge = readyGroups.reduce((n, g) => n + g.orders.length, 0);
+  const mergedAway = readyGroups.reduce((n, g) => n + g.orders.length - 1, 0);
 
-    let start = 0;
-    while (start < sorted.length) {
-      const anchorTime = new Date(sorted[start].createdAt).getTime();
-      let end = start;
-      while (
-        end + 1 < sorted.length &&
-        new Date(sorted[end + 1].createdAt).getTime() - anchorTime <=
-          mergeWindowMs
-      ) {
-        end++;
-      }
-      const cluster = sorted.slice(start, end + 1);
-      if (cluster.length >= 2) {
-        // Append the anchor timestamp to make the key unique per sub-cluster
-        // so mergedKeys state in the client can track each cluster independently.
-        mergeCandidates.push({
-          normalizedAddress: `${groupKey}\0${sorted[start].createdAt}`,
-          orders: cluster,
-        });
-      } else {
-        unmatchedOrders.push(...cluster);
-      }
-      start = end + 1;
-    }
-  }
-
-  return { mergeCandidates, unmatchedOrders };
+  return {
+    mergeWindowHours,
+    metrics: {
+      evaluated: evaluatedCount,
+      readyToMerge,
+      estimatedSavings: mergedAway * SHIPPING_SAVINGS_PER_MERGE,
+    },
+    readyGroups,
+    conflictGroups,
+    singleOrders,
+  };
 };
 
 // ── Action (merge orders) ────────────────────────────────
@@ -179,67 +174,157 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   });
 };
 
-// ── Merge-candidate card (one per address group) ─────────
+// ── Types ────────────────────────────────────────────────
 
-type OrderNode = ReturnType<
-  typeof useLoaderData<typeof loader>
->["unmatchedOrders"][number];
+interface OrderNode {
+  id: string;
+  name: string;
+  createdAt: string;
+  cancelledAt: string | null;
+  displayFinancialStatus: string | null;
+  displayFulfillmentStatus: string | null;
+  customer: { id: string; displayName: string } | null;
+  shippingAddress: {
+    address1: string | null;
+    address2: string | null;
+    city: string | null;
+    provinceCode: string | null;
+    zip: string | null;
+    countryCodeV2: string | null;
+    formatted: string[];
+  } | null;
+  shippingLine: { title: string } | null;
+}
 
-type MergeGroup = ReturnType<
-  typeof useLoaderData<typeof loader>
->["mergeCandidates"][number];
+type LoaderData = ReturnType<typeof useLoaderData<typeof loader>>;
+type ReadyGroup = LoaderData["readyGroups"][number];
+type ConflictGroup = LoaderData["conflictGroups"][number];
+type SerializedOrder = LoaderData["singleOrders"][number];
 
-function MergeGroupCard({
-  group,
-  onMerged,
+const customerName = (o: SerializedOrder) =>
+  o.customer?.displayName ?? "Guest customer";
+const addressText = (o: SerializedOrder) =>
+  o.shippingAddress?.formatted.join(", ") ?? "No shipping address";
+
+// ── Shared pieces ────────────────────────────────────────
+
+function OrderLink({ order }: { order: SerializedOrder }) {
+  // stopPropagation so clicking the link doesn't also fire the row onClick
+  return (
+    <span onClick={(e) => e.stopPropagation()}>
+      <Link url={orderAdminUrl(order.id)} target="_blank" removeUnderline>
+        {order.name}
+      </Link>
+    </span>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  helpText,
 }: {
-  group: MergeGroup;
-  onMerged: (primaryOrder: OrderNode) => void;
+  label: string;
+  value: string;
+  helpText: string;
 }) {
-  const fetcher = useFetcher<typeof action>();
-  const shopify = useAppBridge();
-  const busy = fetcher.state !== "idle";
-  const result = fetcher.data;
-  const handledRef = useRef<typeof result>(null);
+  return (
+    <Card>
+      <BlockStack gap="200">
+        <Text as="h3" variant="headingSm" tone="subdued">
+          {label}
+        </Text>
+        <Text as="p" variant="heading2xl">
+          {value}
+        </Text>
+        <Text as="p" variant="bodySm" tone="subdued">
+          {helpText}
+        </Text>
+      </BlockStack>
+    </Card>
+  );
+}
 
-  useEffect(() => {
-    if (!result || result === handledRef.current) return;
-    handledRef.current = result;
+function SectionHeading({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <BlockStack gap="100">
+      <Text as="h2" variant="headingLg">
+        {title}
+      </Text>
+      <Text as="p" variant="bodyMd" tone="subdued">
+        {description}
+      </Text>
+    </BlockStack>
+  );
+}
 
-    if ("success" in result && result.success) {
-      shopify.toast.show(
-        `Merged ${result.mergedCount} order(s) into ${result.primaryName}`,
-      );
-      const primary = group.orders.find(
-        (o) => o.id === result.primaryOrderId,
-      );
-      if (primary) onMerged(primary);
-    } else if ("error" in result) {
-      shopify.toast.show(result.error, { isError: true });
-    }
-  });
+function EmptyCard({ message }: { message: string }) {
+  return (
+    <Card>
+      <Text as="p" variant="bodyMd" tone="subdued" alignment="center">
+        {message}
+      </Text>
+    </Card>
+  );
+}
 
-  // Hide after merge -- parent handles showing the primary in unmatched
-  if (result && "success" in result && result.success) {
-    return null;
-  }
+// ── Ready to Merge card ──────────────────────────────────
 
+function ReadyGroupCard({
+  group,
+  loading,
+  disabled,
+  onMerge,
+}: {
+  group: ReadyGroup;
+  loading: boolean;
+  disabled: boolean;
+  onMerge: () => void;
+}) {
+  const [first] = group.orders;
   return (
     <Card>
       <BlockStack gap="400">
-        <Text as="h3" variant="headingMd">
-          {group.orders[0]?.shippingAddress?.formatted.join(", ") ??
-            "Unknown address"}
-        </Text>
+        <InlineStack align="space-between" blockAlign="center" gap="200">
+          <Text as="h3" variant="headingMd">
+            {customerName(first)}
+          </Text>
+          <Badge tone="success">Eligible for Merge</Badge>
+        </InlineStack>
+
+        <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
+          <BlockStack gap="100">
+            <Text as="p" variant="bodySm" tone="subdued">
+              Shipping address
+            </Text>
+            <Text as="p" variant="bodyMd">
+              {addressText(first)}
+            </Text>
+          </BlockStack>
+          <BlockStack gap="100">
+            <Text as="p" variant="bodySm" tone="subdued">
+              Shipping method
+            </Text>
+            <Text as="p" variant="bodyMd">
+              {first.shippingLine?.title ?? "—"}
+            </Text>
+          </BlockStack>
+        </InlineGrid>
+
         <IndexTable
           resourceName={{ singular: "order", plural: "orders" }}
           itemCount={group.orders.length}
           selectable={false}
           headings={[
-            { title: "Order ID" },
-            { title: "Customer" },
+            { title: "Order" },
             { title: "Created (UTC)" },
-            { title: "Shipping method" },
+            { title: "Role" },
           ]}
         >
           {group.orders.map((o, i) => (
@@ -250,39 +335,91 @@ function MergeGroupCard({
               onClick={() => openAdminOrder(o.id)}
             >
               <IndexTable.Cell>
-                {/* stopPropagation so clicking the link doesn't also fire the row onClick */}
-                <span onClick={(e) => e.stopPropagation()}>
-                  <Link
-                    url={orderAdminUrl(o.id)}
-                    target="_blank"
-                    removeUnderline
-                  >
-                    {o.name || o.id.replace("gid://shopify/Order/", "")}
-                  </Link>
-                </span>
-              </IndexTable.Cell>
-              <IndexTable.Cell>
-                {o.customer?.displayName ?? "Guest customer"}
+                <OrderLink order={o} />
               </IndexTable.Cell>
               <IndexTable.Cell>{formatDate(o.createdAt)}</IndexTable.Cell>
               <IndexTable.Cell>
-                {o.shippingLine?.title ?? "—"}
+                {i === 0 ? (
+                  <Badge tone="info">Primary</Badge>
+                ) : (
+                  <Text as="span" variant="bodyMd" tone="subdued">
+                    Merges into {first.name}
+                  </Text>
+                )}
               </IndexTable.Cell>
             </IndexTable.Row>
           ))}
         </IndexTable>
+
         <InlineStack align="end">
-          <fetcher.Form method="post">
-            <input
-              type="hidden"
-              name="orderIds"
-              value={JSON.stringify(group.orders.map((o) => o.id))}
-            />
-            <Button variant="primary" submit loading={busy}>
-              Merge Orders
-            </Button>
-          </fetcher.Form>
+          <Button
+            variant="primary"
+            onClick={onMerge}
+            loading={loading}
+            disabled={disabled}
+          >
+            Merge Orders
+          </Button>
         </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
+// ── Conflict card ────────────────────────────────────────
+
+function ConflictGroupCard({ group }: { group: ConflictGroup }) {
+  const first = group.orders[0].order;
+  return (
+    <Card>
+      <BlockStack gap="400">
+        <InlineStack align="space-between" blockAlign="center" gap="200">
+          <BlockStack gap="100">
+            <Text as="h3" variant="headingMd">
+              {customerName(first)}
+            </Text>
+            <Text as="p" variant="bodySm" tone="subdued">
+              {addressText(first)}
+            </Text>
+          </BlockStack>
+          <Badge tone="warning">Held back</Badge>
+        </InlineStack>
+
+        <IndexTable
+          resourceName={{ singular: "order", plural: "orders" }}
+          itemCount={group.orders.length}
+          selectable={false}
+          headings={[
+            { title: "Order" },
+            { title: "Created (UTC)" },
+            { title: "Shipping method" },
+            { title: "Reason" },
+          ]}
+        >
+          {group.orders.map(({ order, reasons }, i) => (
+            <IndexTable.Row
+              key={order.id}
+              id={order.id}
+              position={i}
+              onClick={() => openAdminOrder(order.id)}
+            >
+              <IndexTable.Cell>
+                <OrderLink order={order} />
+              </IndexTable.Cell>
+              <IndexTable.Cell>{formatDate(order.createdAt)}</IndexTable.Cell>
+              <IndexTable.Cell>{order.shippingLine?.title ?? "—"}</IndexTable.Cell>
+              <IndexTable.Cell>
+                <InlineStack gap="100" wrap>
+                  {reasons.map((reason) => (
+                    <Badge key={reason} tone={REASON_BADGES[reason].tone}>
+                      {REASON_BADGES[reason].label}
+                    </Badge>
+                  ))}
+                </InlineStack>
+              </IndexTable.Cell>
+            </IndexTable.Row>
+          ))}
+        </IndexTable>
       </BlockStack>
     </Card>
   );
@@ -291,78 +428,124 @@ function MergeGroupCard({
 // ── Page ─────────────────────────────────────────────────
 
 export default function Index() {
-  const { mergeCandidates, unmatchedOrders } = useLoaderData<typeof loader>();
+  const { mergeWindowHours, metrics, readyGroups, conflictGroups, singleOrders } =
+    useLoaderData<typeof loader>();
+  const revalidator = useRevalidator();
+  const fetcher = useFetcher<typeof action>();
+  const shopify = useAppBridge();
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const handledRef = useRef<unknown>(null);
+  const merging = fetcher.state !== "idle";
 
-  // Client-side state: track which groups were merged and their primary orders
-  const [promotedOrders, setPromotedOrders] = useState<OrderNode[]>([]);
-  const [mergedKeys, setMergedKeys] = useState<Set<string>>(new Set());
+  // One page-level fetcher handles every merge so the toast still fires after
+  // Remix revalidates the loader and the merged group's card unmounts.
+  useEffect(() => {
+    const result = fetcher.data;
+    if (fetcher.state !== "idle" || !result || result === handledRef.current) {
+      return;
+    }
+    handledRef.current = result;
+    setPendingKey(null);
+    if ("success" in result) {
+      shopify.toast.show(
+        `Merged ${result.mergedCount} order(s) into ${result.primaryName}`,
+      );
+    } else {
+      shopify.toast.show(result.error, { isError: true });
+    }
+  }, [fetcher.state, fetcher.data, shopify]);
 
-  const handleMerged = useCallback(
-    (key: string, primaryOrder: OrderNode) => {
-      setMergedKeys((prev) => new Set(prev).add(key));
-      setPromotedOrders((prev) => [...prev, primaryOrder]);
-    },
-    [],
-  );
-
-  // Hide merged groups from candidates
-  const visibleCandidates = mergeCandidates.filter(
-    (g) => !mergedKeys.has(g.normalizedAddress),
-  );
-
-  // Combine loader unmatched + promoted primaries, deduplicated by ID
-  const loaderIds = new Set(unmatchedOrders.map((o) => o.id));
-  const uniquePromoted = promotedOrders.filter((o) => !loaderIds.has(o.id));
-  const allUnmatched = [...unmatchedOrders, ...uniquePromoted];
-  const navigate = useNavigate();
+  const mergeGroup = (group: ReadyGroup) => {
+    setPendingKey(group.key);
+    fetcher.submit(
+      { orderIds: JSON.stringify(group.orders.map((o) => o.id)) },
+      { method: "post" },
+    );
+  };
 
   return (
     <Page
-      secondaryActions={[
-        { content: "Settings", onAction: () => navigate("/app/settings") },
-      ]}
+      title="MergeShip"
+      primaryAction={{
+        content: "Scan Orders",
+        onAction: () => revalidator.revalidate(),
+        loading: revalidator.state === "loading",
+        disabled: merging,
+      }}
     >
-      <TitleBar title="Orders" />
-      <BlockStack gap="500">
-        <Text as="p" variant="bodyMd">
-          The 50 most recent orders awaiting fulfillment, grouped by shipping
-          address.
-        </Text>
-
-        {visibleCandidates.length > 0 && (
-          <BlockStack gap="300">
-            <Text as="h2" variant="headingLg">
-              Merge Candidates
-            </Text>
-            {visibleCandidates.map((group) => (
-              <MergeGroupCard
-                key={group.normalizedAddress}
-                group={group}
-                onMerged={(primary) =>
-                  handleMerged(group.normalizedAddress, primary)
-                }
-              />
-            ))}
-          </BlockStack>
-        )}
+      <TitleBar title="MergeShip" />
+      <BlockStack gap="600">
+        <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
+          <MetricCard
+            label="Orders Evaluated"
+            value={String(metrics.evaluated)}
+            helpText="Open orders awaiting fulfillment (latest 100)"
+          />
+          <MetricCard
+            label="Ready to Merge"
+            value={String(metrics.readyToMerge)}
+            helpText="Orders meeting every merge rule"
+          />
+          <MetricCard
+            label="Estimated Shipping Saved"
+            value={formatCurrency(metrics.estimatedSavings)}
+            helpText={`Based on ${formatCurrency(SHIPPING_SAVINGS_PER_MERGE)} per merged order`}
+          />
+        </InlineGrid>
 
         <BlockStack gap="300">
-          <Text as="h2" variant="headingLg">
-            Unmatched Orders
-          </Text>
+          <SectionHeading
+            title="Ready to Merge"
+            description={`Same customer, address and shipping method, fully paid and unfulfilled, placed within ${mergeWindowHours}h of each other.`}
+          />
+          {readyGroups.length > 0 ? (
+            readyGroups.map((group) => (
+              <ReadyGroupCard
+                key={group.key}
+                group={group}
+                loading={merging && pendingKey === group.key}
+                disabled={merging && pendingKey !== group.key}
+                onMerge={() => mergeGroup(group)}
+              />
+            ))
+          ) : (
+            <EmptyCard message="No orders currently meet every merge rule." />
+          )}
+        </BlockStack>
+
+        <BlockStack gap="300">
+          <SectionHeading
+            title="Orders with Merge Conflicts"
+            description="Duplicate orders for the same customer and address that were held back by a safety rule."
+          />
+          {conflictGroups.length > 0 ? (
+            conflictGroups.map((group) => (
+              <ConflictGroupCard key={group.key} group={group} />
+            ))
+          ) : (
+            <EmptyCard message="No duplicate orders are being held back." />
+          )}
+        </BlockStack>
+
+        <BlockStack gap="300">
+          <SectionHeading
+            title="Single Orders"
+            description="Orders with no matching duplicate from the same customer."
+          />
           <Card padding="0">
-            {allUnmatched.length > 0 ? (
+            {singleOrders.length > 0 ? (
               <IndexTable
                 resourceName={{ singular: "order", plural: "orders" }}
-                itemCount={allUnmatched.length}
+                itemCount={singleOrders.length}
                 selectable={false}
                 headings={[
                   { title: "Order ID" },
                   { title: "Customer" },
+                  { title: "Created (UTC)" },
                   { title: "Shipping address" },
                 ]}
               >
-                {allUnmatched.map((o, i) => (
+                {singleOrders.map((o, i) => (
                   <IndexTable.Row
                     key={o.id}
                     id={o.id}
@@ -370,30 +553,20 @@ export default function Index() {
                     onClick={() => openAdminOrder(o.id)}
                   >
                     <IndexTable.Cell>
-                      <span onClick={(e) => e.stopPropagation()}>
-                        <Link
-                          url={orderAdminUrl(o.id)}
-                          target="_blank"
-                          removeUnderline
-                        >
-                          {o.name || o.id.replace("gid://shopify/Order/", "")}
-                        </Link>
-                      </span>
+                      <OrderLink order={o} />
                     </IndexTable.Cell>
-                    <IndexTable.Cell>
-                      {o.customer?.displayName ?? "Guest customer"}
-                    </IndexTable.Cell>
-                    <IndexTable.Cell>
-                      {o.shippingAddress?.formatted.join(", ") ??
-                        "No shipping address"}
-                    </IndexTable.Cell>
+                    <IndexTable.Cell>{customerName(o)}</IndexTable.Cell>
+                    <IndexTable.Cell>{formatDate(o.createdAt)}</IndexTable.Cell>
+                    <IndexTable.Cell>{addressText(o)}</IndexTable.Cell>
                   </IndexTable.Row>
                 ))}
               </IndexTable>
             ) : (
-              <Text as="p" alignment="center">
-                No unmatched unfulfilled orders.
-              </Text>
+              <Box padding="400">
+                <Text as="p" variant="bodyMd" tone="subdued" alignment="center">
+                  No single orders.
+                </Text>
+              </Box>
             )}
           </Card>
         </BlockStack>

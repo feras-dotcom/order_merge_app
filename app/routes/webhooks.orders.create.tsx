@@ -21,8 +21,9 @@ const activeGroupMerges = new Set<string>();
 //      Primary orders that previously absorbed other orders are included —
 //      they are still open and eligible to absorb additional orders.
 //      Cancelled secondaries are excluded automatically by status:open.
-//   4. Applies the same grouping rules as the UI: matching normalized address,
-//      identical shipping method title, and a 24-hour creation window.
+//   4. Applies the same grouping rules as the UI: same customer, matching
+//      normalized address, same shipping method (case/whitespace-insensitive),
+//      and the merchant's configured creation window.
 //   5. Calls executeMerge(), which adds only the NEW order's line items to the
 //      primary and leaves the primary's existing items untouched.
 //
@@ -112,7 +113,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     : null;
   const newOrderShippingTitle =
     (order.shipping_lines as any[])?.[0]?.title ?? null;
-  const newOrderGroupKey = buildGroupKey(newOrderAddress, newOrderShippingTitle);
+  const newOrderGroupKey = buildGroupKey(
+    customerId,
+    newOrderAddress,
+    newOrderShippingTitle,
+  );
 
   if (!newOrderGroupKey) {
     console.log(`[orders/create] ${orderId} has no usable shipping address — skipping.`);
@@ -169,6 +174,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // The new order itself may already be indexed — skip it to avoid duplication
     if (sibling.id === orderId) continue;
     const key = buildGroupKey(
+      customerId,
       sibling.shippingAddress,
       sibling.shippingLine?.title,
     );
