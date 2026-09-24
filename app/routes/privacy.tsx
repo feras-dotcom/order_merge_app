@@ -118,10 +118,10 @@ export default function PrivacyPage() {
             <p>
               For privacy questions or data deletion requests, contact:{" "}
               <a
-                href="mailto:support@mergeship.app"
+                href="mailto:alhroobferas@gmail.com"
                 style={{ color: "#2c6ecb", textDecoration: "none" }}
               >
-                support@mergeship.app
+                alhroobferas@gmail.com
               </a>
             </p>
           </div>
