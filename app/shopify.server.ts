@@ -2,16 +2,10 @@ import "@shopify/shopify-app-remix/adapters/node";
 import {
   ApiVersion,
   AppDistribution,
-  BillingInterval,
-  BillingReplacementBehavior,
   shopifyApp,
 } from "@shopify/shopify-app-remix/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
-
-/** Name of the single paid plan — kept here so routes import the constant
- *  rather than repeating the string literal. */
-export const PLAN_PRO = "Pro Plan";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
@@ -22,26 +16,6 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
-  billing: {
-    // The library version installed requires the "line items" plan shape.
-    // Top-level amount/currencyCode/interval are rejected; fields must be
-    // inside lineItems[].
-    // replacementBehavior:ApplyImmediately ensures that if the loader fires
-    // twice before the merchant approves (e.g. two navigations), each new
-    // pending subscription cancels the previous one so the merchant is always
-    // approving the most-recent charge rather than a stale one.
-    [PLAN_PRO]: {
-      trialDays: 14,
-      replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
-      lineItems: [
-        {
-          amount: 19,
-          currencyCode: "USD",
-          interval: BillingInterval.Every30Days,
-        },
-      ],
-    },
-  },
   future: {
     unstable_newEmbeddedAuthStrategy: true,
     expiringOfflineAccessTokens: true,

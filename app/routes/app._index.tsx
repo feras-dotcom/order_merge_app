@@ -17,7 +17,7 @@ import {
   TextField,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { authenticate, PLAN_PRO } from "../shopify.server";
+import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getSettings } from "../lib/settings.server";
 
@@ -42,26 +42,7 @@ const formatCurrency = (amount: number) =>
 // ── Loader ───────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session, billing } = await authenticate.admin(request);
-
-  // BYPASS_BILLING=true in .env skips the billing gate entirely so local
-  // development can continue without hitting Shopify billing API limits.
-  if (process.env.BYPASS_BILLING !== "true") {
-    // isTest:true on both require (to find test subscriptions in the check)
-    // and request (to create a test charge on dev stores).
-    // returnUrl points to the Shopify admin embedded URL so the merchant
-    // lands back inside the admin after approving rather than hitting a bare
-    // tunnel URL and re-triggering the OAuth flow.
-    const shopName = session.shop.replace(".myshopify.com", "");
-    const returnUrl = `https://admin.shopify.com/store/${shopName}/apps/${process.env.SHOPIFY_API_KEY}`;
-    await billing.require({
-      plans: [PLAN_PRO],
-      isTest: true,
-      onFailure: async () =>
-        billing.request({ plan: PLAN_PRO, isTest: true, returnUrl }),
-    });
-  }
-
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
   const [settings, consolidatedCount, records] = await Promise.all([
     getSettings(shop),

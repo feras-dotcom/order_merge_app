@@ -1,6 +1,6 @@
 import { json } from "@remix-run/node";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
-import { Form, useLoaderData, useFetcher, useNavigate } from "@remix-run/react";
+import { useLoaderData, useFetcher, useNavigate } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import {
   Badge,
@@ -16,63 +16,22 @@ import {
   TextField,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
-import { authenticate, PLAN_PRO } from "../shopify.server";
+import { authenticate } from "../shopify.server";
 import { getSettings, upsertSettings } from "../lib/settings.server";
 
 // ── Loader ────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session, billing } = await authenticate.admin(request);
-
-  if (process.env.BYPASS_BILLING !== "true") {
-    const shopName = session.shop.replace(".myshopify.com", "");
-    const returnUrl = `https://admin.shopify.com/store/${shopName}/apps/${process.env.SHOPIFY_API_KEY}`;
-    await billing.require({
-      plans: [PLAN_PRO],
-      isTest: true,
-      onFailure: async () =>
-        billing.request({ plan: PLAN_PRO, isTest: true, returnUrl }),
-    });
-  }
-
+  const { session } = await authenticate.admin(request);
   const settings = await getSettings(session.shop);
-
-  // Retrieve live subscription status for the billing card.
-  // billing.require above already guarantees an active subscription exists;
-  // check is best-effort and falls back gracefully if the API is unavailable.
-  let billingStatus: "active" | "trial" | "unknown" = "active";
-  try {
-    const check = await billing.check({ plans: [PLAN_PRO], isTest: true });
-    const sub = (check.appSubscriptions as any[]).find(
-      (s) => s.name === PLAN_PRO,
-    );
-    if (sub?.status === "ACTIVE" && sub?.trialDays && sub.trialDays > 0) {
-      billingStatus = "trial";
-    }
-  } catch {
-    // non-fatal — status stays "active" since billing.require already passed
-  }
-
-  return json({ settings, billingStatus });
+  return json({ settings });
 };
 
 // ── Action ────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session, billing } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const formData = await request.formData();
-  const intent = formData.get("intent");
-
-  // ── Billing management: redirect to Shopify's subscription confirmation ───
-  if (intent === "manage-billing") {
-    const shopName = session.shop.replace(".myshopify.com", "");
-    const returnUrl = `https://admin.shopify.com/store/${shopName}/apps/${process.env.SHOPIFY_API_KEY}/settings`;
-    // billing.request throws a Remix redirect Response that App Bridge intercepts
-    // and handles correctly inside the embedded admin iframe.
-    await billing.request({ plan: PLAN_PRO, isTest: true, returnUrl });
-    // The line below is never reached; billing.request always throws.
-    return json({ success: false });
-  }
 
   // ── Settings save ─────────────────────────────────────────────────────────
   const autoMergeEnabled = formData.get("autoMergeEnabled") === "true";
@@ -114,7 +73,7 @@ const WINDOW_OPTIONS = [
 ];
 
 export default function SettingsPage() {
-  const { settings, billingStatus } = useLoaderData<typeof loader>();
+  const { settings } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const navigate = useNavigate();
@@ -278,9 +237,7 @@ export default function SettingsPage() {
                 <Text as="span" variant="bodyMd">
                   Pro Plan
                 </Text>
-                <Badge tone={billingStatus === "trial" ? "attention" : "success"}>
-                  {billingStatus === "trial" ? "Trial" : "Active"}
-                </Badge>
+                <Badge tone="success">Managed by Shopify</Badge>
               </InlineStack>
 
               <InlineStack gap="200" align="start">
@@ -306,17 +263,6 @@ export default function SettingsPage() {
                 are never shared with us.
               </Text>
             </BlockStack>
-
-            <InlineStack align="end">
-              {/* Use a plain Form so the billing.request redirect navigates
-                  correctly rather than being swallowed by a fetcher. */}
-              <Form method="post">
-                <input type="hidden" name="intent" value="manage-billing" />
-                <Button submit variant="secondary">
-                  Manage subscription
-                </Button>
-              </Form>
-            </InlineStack>
           </BlockStack>
         </Card>
       </BlockStack>
