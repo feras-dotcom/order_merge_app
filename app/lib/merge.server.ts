@@ -72,6 +72,15 @@ export function buildGroupKey(
 
 export const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
+/** Compare two Sets of primitive values for equality (same members, any order). */
+function setsEqual<T>(a: Set<T>, b: Set<T>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
+}
+
 /** Shopify tags are case-insensitive; keep the first-seen casing of each. */
 function uniqueTags(tags: string[]): string[] {
   const tagMap = new Map<string, string>();
@@ -92,6 +101,7 @@ export interface MergeResult {
   primaryName?: string;
   mergedCount?: number;
   cancelResults?: { name: string; cancelled: boolean; error?: string }[];
+  splitFulfillment?: boolean;
   error?: string;
 }
 
@@ -107,6 +117,33 @@ interface MergeLineItem {
   currentQuantity: number;
   variant: { id: string } | null;
   customAttributes: { key: string; value: string | null }[];
+}
+
+// ── Fulfillment location inspection ───────────────────────────────────────────
+
+async function fetchFulfillmentLocationIds(
+  admin: AdminClient,
+  orderId: string,
+): Promise<Set<string>> {
+  const res = await admin.graphql(
+    `#graphql
+      query OrderFulfillmentLocations($id: ID!) {
+        order(id: $id) {
+          fulfillmentOrders(first: 50) {
+            nodes {
+              location { id }
+            }
+          }
+        }
+      }`,
+    { variables: { id: orderId } },
+  );
+  const nodes = (await res.json()).data?.order?.fulfillmentOrders?.nodes ?? [];
+  const ids = new Set<string>();
+  for (const node of nodes) {
+    if (node?.location?.id) ids.add(node.location.id);
+  }
+  return ids;
 }
 
 // ── Line item loading (paginated — never truncates) ───────────────────────────
@@ -168,6 +205,9 @@ async function fetchAllLineItems(
  *   8. Records every successfully cancelled secondary in MergeRecord
  *      (Consolidation History). A database failure here is logged only; it
  *      never affects the merge that already happened in Shopify.
+ *      When location matching is disabled and the resulting primary order
+ *      has split fulfillment locations, shippingSavedAmount is set to 0 so
+ *      the dashboard does not claim a box that is still being shipped.
  *   9. Appends any secondary customer notes to the primary note and merges
  *      all tags (plus "Consolidated") into a unique list on the primary.
  *      Each cancelled secondary is tagged "Merged" and noted with the primary
@@ -177,11 +217,17 @@ async function fetchAllLineItems(
  *               authenticate.webhook).
  * @param shop  Shop domain the orders belong to (used for history records).
  * @param orderIds  Array of Shopify Order GIDs to merge (minimum 2).
+ * @param locationMatchEnabled  When true, only merge orders whose items share
+ *                              the exact same fulfillment location(s).
+ * @param shippingCostSavings  Dollar value used for dashboard savings when a
+ *                             merge genuinely saves a shipping box.
  */
 export async function executeMerge(
   admin: AdminClient,
   shop: string,
   orderIds: string[],
+  locationMatchEnabled: boolean = true,
+  shippingCostSavings: number = 8.5,
 ): Promise<MergeResult> {
   if (orderIds.length < 2) {
     return { success: false, error: "At least two orders are required to merge." };
@@ -290,7 +336,32 @@ export async function executeMerge(
     );
   }
 
-  // 3e ── Load every line item (paginated) ────────────────────────────────────
+  // 3e ── Guard: fulfillment locations match (when enabled) ──────────────────
+  // When location matching is on, every order must use the exact same set of
+  // fulfillment location IDs. When it is off we still record whether the merge
+  // results in split fulfillments, so savings are not claimed for two boxes.
+  let splitFulfillment = false;
+  if (locationMatchEnabled) {
+    let locationSets: Set<string>[];
+    try {
+      locationSets = await Promise.all(
+        orders.map((o) => fetchFulfillmentLocationIds(admin, o.id)),
+      );
+    } catch (err: any) {
+      return abort(`Could not verify fulfillment locations: ${err?.message ?? "unknown error"}`);
+    }
+    const first = locationSets[0];
+    if (
+      first.size === 0 ||
+      locationSets.some((set) => set.size === 0 || !setsEqual(set, first))
+    ) {
+      return abort(
+        "Orders are assigned to different fulfillment locations. Enable cross-location merging in Settings, or ensure all items share the same location.",
+      );
+    }
+  }
+
+  // 3f ── Load every line item (paginated) ────────────────────────────────────
   const lineItemsById = new Map<string, MergeLineItem[]>();
   try {
     for (const order of orders) {
@@ -300,7 +371,7 @@ export async function executeMerge(
     return abort(err?.message ?? "Could not load line items.");
   }
 
-  // 3f ── Guard: line item properties ─────────────────────────────────────────
+  // 3g ── Guard: line item properties ─────────────────────────────────────────
   // Shopify's order-edit API (orderEditAddVariant) has no argument for
   // customAttributes, so properties on personalized products cannot be carried
   // over to the primary. Skip the entire merge to leave those orders untouched.
@@ -319,7 +390,7 @@ export async function executeMerge(
     }
   }
 
-  // 3g ── Guard: every secondary item must be transferable ────────────────────
+  // 3h ── Guard: every secondary item must be transferable ────────────────────
   // Items with currentQuantity 0 were already removed from the order and are
   // not transferred. Anything else without a variant (custom items, deleted
   // products) cannot be added via orderEditAddVariant, so abort rather than
@@ -471,6 +542,26 @@ export async function executeMerge(
     };
   }
 
+  // 6.5 ── When location matching is off, detect whether the merge still ships
+  // in multiple boxes. If so, do not claim shipping savings in the dashboard.
+  if (!locationMatchEnabled) {
+    try {
+      const primaryLocations = await fetchFulfillmentLocationIds(admin, primary.id);
+      splitFulfillment = primaryLocations.size > 1;
+      if (splitFulfillment) {
+        console.log(
+          `Merge for ${primary.name} resulted in ${primaryLocations.size} fulfillment locations. Shipping savings will not be recorded.`,
+        );
+      }
+    } catch (locErr: any) {
+      console.warn(
+        `Could not determine fulfillment locations for ${primary.name}:`,
+        locErr?.message,
+      );
+      splitFulfillment = true;
+    }
+  }
+
   // 7 ── Cancel each secondary, then close it so the Orders badge decrements ──
   const cancelResults: { name: string; cancelled: boolean; error?: string }[] = [];
   const consolidated: string[] = [];
@@ -615,6 +706,7 @@ export async function executeMerge(
             itemsCombined: lineItemsById
               .get(s.id)!
               .reduce((n, item) => n + Math.max(item.currentQuantity, 0), 0),
+            shippingSavedAmount: splitFulfillment ? 0 : shippingCostSavings,
           })),
         skipDuplicates: true,
       });
@@ -669,6 +761,7 @@ export async function executeMerge(
     primaryOrderId: primary.id as string,
     primaryName: primary.name as string,
     mergedCount: secondaries.length,
+    splitFulfillment,
     cancelResults,
   };
 }
