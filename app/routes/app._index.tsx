@@ -125,11 +125,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       customerName: (r.customerId && customerNames.get(r.customerId)) || "—",
       itemsToFulfill: itemsToFulfill.get(r.primaryOrderId) ?? null,
       latestMergeAt: r.createdAt.toISOString(),
+      savedAmount: 0,
       absorbed: [],
     };
+    group.savedAmount += r.shippingSavedAmount ?? 0;
     group.absorbed.push({ id: r.id, orderId: r.mergedOrderId, orderName: r.mergedOrderName });
     groups.set(r.primaryOrderId, group);
   }
+
+  const totalSaved = records.reduce(
+    (sum, r) => sum + (r.shippingSavedAmount ?? 0),
+    0,
+  );
 
   return {
     autoMergeEnabled: settings.autoMergeEnabled,
@@ -137,6 +144,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     historyLimit: HISTORY_LIMIT,
     recordsShown: records.length,
     consolidatedCount,
+    totalSaved,
     groups: [...groups.values()],
   };
 };
@@ -147,6 +155,7 @@ interface ConsolidationGroup {
   customerName: string;
   itemsToFulfill: number | null;
   latestMergeAt: string;
+  savedAmount: number;
   absorbed: { id: string; orderId: string; orderName: string }[];
 }
 
@@ -197,12 +206,10 @@ function MetaItem({ label, children }: { label: string; children: ReactNode }) {
 
 function ConsolidationCard({
   group,
-  savingsPerMerge,
 }: {
   group: SerializedGroup;
-  savingsPerMerge: number;
 }) {
-  const saved = group.absorbed.length * savingsPerMerge;
+  const saved = group.savedAmount;
   const items = group.itemsToFulfill;
 
   return (
@@ -259,7 +266,7 @@ function ConsolidationCard({
 }
 
 export default function Index() {
-  const { autoMergeEnabled, shippingCostSavings, historyLimit, recordsShown, consolidatedCount, groups } =
+  const { autoMergeEnabled, shippingCostSavings, historyLimit, recordsShown, consolidatedCount, totalSaved, groups } =
     useLoaderData<typeof loader>();
   const [query, setQuery] = useState("");
 
@@ -298,8 +305,8 @@ export default function Index() {
           />
           <MetricCard
             label="Total Shipping Saved"
-            value={formatCurrency(consolidatedCount * shippingCostSavings)}
-            helpText={`Based on ${formatCurrency(shippingCostSavings)} per consolidation`}
+            value={formatCurrency(totalSaved)}
+            helpText={`Based on ${formatCurrency(shippingCostSavings)} per box saved; split fulfillments excluded`}
           />
           <MetricCard
             label="Boxes Saved"
@@ -344,7 +351,7 @@ export default function Index() {
 
             {visibleGroups.length > 0 ? (
               visibleGroups.map((group) => (
-                <ConsolidationCard key={group.primaryOrderId} group={group} savingsPerMerge={shippingCostSavings} />
+                <ConsolidationCard key={group.primaryOrderId} group={group} />
               ))
             ) : (
               <Card>

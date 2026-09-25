@@ -265,10 +265,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   activeGroupMerges.add(newOrderGroupKey);
   try {
-    const result = await executeMerge(admin, shop, orderIds);
+    const result = await executeMerge(
+      admin,
+      shop,
+      orderIds,
+      settings.locationMatchEnabled ?? true,
+      settings.shippingCostSavings ?? 8.5,
+    );
     if (result.success) {
       console.log(
-        `[orders/create] Auto-merge OK — merged ${result.mergedCount} order(s) into ${result.primaryName}.`,
+        `[orders/create] Auto-merge OK — merged ${result.mergedCount} order(s) into ${result.primaryName}.${result.splitFulfillment ? " Split fulfillment detected; savings not recorded." : ""}`,
       );
     } else {
       console.error(`[orders/create] Auto-merge failed: ${result.error}`);

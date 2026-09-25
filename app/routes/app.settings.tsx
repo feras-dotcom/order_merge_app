@@ -76,6 +76,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   // ── Settings save ─────────────────────────────────────────────────────────
   const autoMergeEnabled = formData.get("autoMergeEnabled") === "true";
+  const locationMatchEnabled = formData.get("locationMatchEnabled") === "true";
 
   const rawHours = parseInt(formData.get("mergeWindowHours") as string, 10);
   // Validate against the allowed set so arbitrary values can't be stored.
@@ -88,7 +89,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ? Math.round(rawSavings * 100) / 100
       : 8.5;
 
-  await upsertSettings(session.shop, { autoMergeEnabled, mergeWindowHours, shippingCostSavings });
+  await upsertSettings(session.shop, {
+    autoMergeEnabled,
+    mergeWindowHours,
+    shippingCostSavings,
+    locationMatchEnabled,
+  });
   return json({ success: true });
 };
 
@@ -123,6 +129,9 @@ export default function SettingsPage() {
   const [autoMergeEnabled, setAutoMergeEnabled] = useState(
     settings.autoMergeEnabled,
   );
+  const [locationMatchEnabled, setLocationMatchEnabled] = useState(
+    settings.locationMatchEnabled ?? true,
+  );
   const [mergeWindowHours, setMergeWindowHours] = useState(
     String(settings.mergeWindowHours),
   );
@@ -144,6 +153,7 @@ export default function SettingsPage() {
     fetcher.submit(
       {
         autoMergeEnabled: String(autoMergeEnabled),
+        locationMatchEnabled: String(locationMatchEnabled),
         mergeWindowHours,
         shippingCostSavings,
       },
@@ -170,6 +180,13 @@ export default function SettingsPage() {
               helpText="When enabled, new paid orders are automatically merged with matching open orders for the same customer."
               checked={autoMergeEnabled}
               onChange={setAutoMergeEnabled}
+            />
+
+            <Checkbox
+              label="Only merge orders from the same warehouse location"
+              helpText="When enabled, orders whose items are assigned to different fulfillment locations are never merged. This prevents split shipments and keeps savings accurate."
+              checked={locationMatchEnabled}
+              onChange={setLocationMatchEnabled}
             />
 
             <Select

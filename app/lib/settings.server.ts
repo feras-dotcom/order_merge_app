@@ -6,12 +6,14 @@ export interface MergeSettings {
   autoMergeEnabled: boolean;
   mergeWindowHours: number;
   shippingCostSavings: number;
+  locationMatchEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
   autoMergeEnabled: true,
   mergeWindowHours: 24,
   shippingCostSavings: 8.5,
+  locationMatchEnabled: true,
 };
 
 /**
