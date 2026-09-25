@@ -151,6 +151,7 @@ async function fetchAllLineItems(
  *   2. Sorts oldest-first; the oldest becomes the primary.
  *   3. Guards (any failure aborts before anything is changed):
  *      • every order is not cancelled, PAID and UNFULFILLED;
+ *      • every order has a LOW Shopify fraud risk level;
  *      • every order has the same customer, address and shipping method;
  *      • every order has the same shop currency and presentment currency;
  *      • no line item has custom properties (Shopify's order-edit API cannot
@@ -198,6 +199,7 @@ export async function executeMerge(
             cancelledAt
             displayFinancialStatus
             displayFulfillmentStatus
+            riskLevel
             currencyCode
             presentmentCurrencyCode
             note
@@ -254,7 +256,19 @@ export async function executeMerge(
     }
   }
 
-  // 3b ── Guard: same customer, address and shipping method ──────────────────
+  // 3b ── Guard: Shopify fraud risk must be LOW ───────────────────────────────
+  const riskyOrder = orders.find((order: any) => order.riskLevel !== "LOW");
+  if (riskyOrder) {
+    const riskLevel = riskyOrder.riskLevel ?? "UNKNOWN";
+    console.warn(
+      `[MergeShip] Merge skipped: ${riskyOrder.name} has Shopify fraud risk ${riskLevel}. Only LOW-risk orders can be consolidated.`,
+    );
+    return abort(
+      `Order ${riskyOrder.name} has Shopify fraud risk ${riskLevel}. Only LOW-risk orders can be merged.`,
+    );
+  }
+
+  // 3c ── Guard: same customer, address and shipping method ──────────────────
   const groupKeys = orders.map((o: any) =>
     buildGroupKey(o.customer?.id, o.shippingAddress, o.shippingLine?.title),
   );
@@ -264,7 +278,7 @@ export async function executeMerge(
     );
   }
 
-  // 3c ── Guard: same shop currency and customer (presentment) currency ──────
+  // 3d ── Guard: same shop currency and customer (presentment) currency ──────
   const currencyMismatch = orders.find(
     (o: any) =>
       o.currencyCode !== primary.currencyCode ||
@@ -276,7 +290,7 @@ export async function executeMerge(
     );
   }
 
-  // 3d ── Load every line item (paginated) ────────────────────────────────────
+  // 3e ── Load every line item (paginated) ────────────────────────────────────
   const lineItemsById = new Map<string, MergeLineItem[]>();
   try {
     for (const order of orders) {
@@ -286,7 +300,7 @@ export async function executeMerge(
     return abort(err?.message ?? "Could not load line items.");
   }
 
-  // 3e ── Guard: line item properties ─────────────────────────────────────────
+  // 3f ── Guard: line item properties ─────────────────────────────────────────
   // Shopify's order-edit API (orderEditAddVariant) has no argument for
   // customAttributes, so properties on personalized products cannot be carried
   // over to the primary. Skip the entire merge to leave those orders untouched.
@@ -305,7 +319,7 @@ export async function executeMerge(
     }
   }
 
-  // 3f ── Guard: every secondary item must be transferable ────────────────────
+  // 3g ── Guard: every secondary item must be transferable ────────────────────
   // Items with currentQuantity 0 were already removed from the order and are
   // not transferred. Anything else without a variant (custom items, deleted
   // products) cannot be added via orderEditAddVariant, so abort rather than
