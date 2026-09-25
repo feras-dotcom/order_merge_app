@@ -1,0 +1,15 @@
+<svg width="240" height="160" viewBox="0 0 240 160" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
+  <title id="title">Orders ready for consolidation</title>
+  <desc id="description">Two order boxes moving into one shipment</desc>
+  <rect width="240" height="160" rx="20" fill="#F1F2F4"/>
+  <path d="M56 55L86 39L116 55L86 71L56 55Z" fill="#B5B5B5"/>
+  <path d="M56 55V89L86 106V71L56 55Z" fill="#8C9196"/>
+  <path d="M116 55V89L86 106V71L116 55Z" fill="#6D7175"/>
+  <path d="M124 55L154 39L184 55L154 71L124 55Z" fill="#AEE9D1"/>
+  <path d="M124 55V89L154 106V71L124 55Z" fill="#65D6AD"/>
+  <path d="M184 55V89L154 106V71L184 55Z" fill="#008060"/>
+  <path d="M99 119H141" stroke="#5C5F62" stroke-width="4" stroke-linecap="round"/>
+  <path d="M133 111L141 119L133 127" stroke="#5C5F62" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="187" cy="119" r="15" fill="#008060"/>
+  <path d="M180 119L185 124L194 114" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

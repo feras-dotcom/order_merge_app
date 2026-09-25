@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   Badge,
+  Banner,
   BlockStack,
   Box,
   Card,
@@ -24,8 +25,7 @@ import { getSettings } from "../lib/settings.server";
 // ── Helpers ──────────────────────────────────────────────
 
 const HISTORY_LIMIT = 100;
-const EMPTY_STATE_IMAGE =
-  "https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png";
+const EMPTY_STATE_IMAGE = "/empty-state-orders.svg";
 
 const orderAdminUrl = (gid: string) =>
   `shopify:admin/orders/${gid.replace("gid://shopify/Order/", "")}`;
@@ -266,18 +266,46 @@ export default function Index() {
       subtitle="Automated order consolidation"
       titleMetadata={
         autoMergeEnabled ? (
-          <Badge tone="success" progress="complete">
-            Auto Merge Active
-          </Badge>
+          <InlineStack gap="150" blockAlign="center">
+            <Badge.Pip
+              tone="success"
+              progress="complete"
+              accessibilityLabelOverride="Auto merge active"
+            />
+            <Text as="span" variant="bodySm" fontWeight="medium">
+              Auto Merge Active
+            </Text>
+          </InlineStack>
         ) : (
-          <Badge tone="attention" progress="incomplete">
-            Auto Merge Paused
-          </Badge>
+          <InlineStack gap="150" blockAlign="center">
+            <Badge.Pip
+              tone="attention"
+              progress="incomplete"
+              accessibilityLabelOverride="Auto merge paused"
+            />
+            <Text as="span" variant="bodySm" fontWeight="medium">
+              Auto Merge Paused
+            </Text>
+          </InlineStack>
         )
       }
     >
       <TitleBar title="MergeShip" />
       <BlockStack gap="600">
+        {consolidatedCount === 0 && (
+          <Banner
+            title="Configure your merge rules"
+            tone="info"
+            action={{ content: "Configure Settings", url: "/app/settings" }}
+          >
+            <p>
+              MergeShip is actively monitoring new orders with default rules.
+              Adjust your merge time window, warehouse matching, and savings
+              estimates to fit your workflow.
+            </p>
+          </Banner>
+        )}
+
         <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
           <MetricCard
             label="Orders Consolidated"
