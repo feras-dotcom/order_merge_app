@@ -1,0 +1,16 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "website-static/Dockerfile"
+watchPatterns = [
+  "website-static/**",
+  "app/routes/_index/styles.module.css",
+  "public/brand/**",
+  "public/favicon.ico",
+  "public/apple-touch-icon.png"
+]
+
+[deploy]
+healthcheckPath = "/"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

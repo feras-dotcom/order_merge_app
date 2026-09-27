@@ -1,8 +1,8 @@
-:global(*) {
+* {
   box-sizing: border-box;
 }
 
-:global(html) {
+html {
   background: #070b14;
   color: #eef2fa;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -10,7 +10,7 @@
   text-rendering: optimizeLegibility;
 }
 
-:global(body) {
+body {
   margin: 0;
 }
 
