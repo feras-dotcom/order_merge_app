@@ -1,5 +1,11 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "@remix-run/node";
-import { Link, Outlet, useLoaderData, useRouteError } from "@remix-run/react";
+import {
+  isRouteErrorResponse,
+  Link,
+  Outlet,
+  useLoaderData,
+  useRouteError,
+} from "@remix-run/react";
 import { boundary } from "@shopify/shopify-app-remix/server";
 import { AppProvider } from "@shopify/shopify-app-remix/react";
 import { NavMenu } from "@shopify/app-bridge-react";
@@ -12,7 +18,7 @@ import db from "../db.server";
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { admin, session, redirect } = await authenticate.admin(request);
 
   // BYPASS_BILLING=true is a local-development escape hatch only — never set it
   // in production. Shopify App Pricing is the source of truth: if the Partner
@@ -34,20 +40,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   if (!subscription.subscribed) {
-    // Navigate the top frame to Shopify's hosted plan-selection page. The
-    // library's redirect helper briefly flashes a bare "200" bounce page, so
-    // we emit our own interstitial instead — same mechanism (top-frame
-    // navigation), with a proper message while it happens.
-    const planUrl = planSelectionUrl(session.shop);
-    throw new Response(
-      `<!doctype html><html><head><meta charset="utf-8"><title>MergeShip</title>` +
-        `<meta http-equiv="refresh" content="1;url=${planUrl}"></head>` +
-        `<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">` +
-        `<p>Redirecting to plan selection&hellip;</p>` +
-        `<script>window.top.location.href=${JSON.stringify(planUrl)};</script>` +
-        `</body></html>`,
-      { status: 200, headers: { "Content-Type": "text/html" } },
-    );
+    throw redirect(planSelectionUrl(session.shop), { target: "_top" });
   }
 
   return {
@@ -74,7 +67,18 @@ export default function App() {
 
 // Shopify needs Remix to catch some thrown responses, so that their headers are included in the response.
 export function ErrorBoundary() {
-  return boundary.error(useRouteError());
+  const error = useRouteError();
+  // boundary.error() detects the App Bridge response thrown by redirect() via
+  // error.constructor.name, which the client minifier renames — so on
+  // hydration it rethrows and Remix's default boundary flashes "200" before
+  // the top-frame navigation completes. isRouteErrorResponse is Remix's
+  // minification-safe check; render the same App Bridge markup for it.
+  if (isRouteErrorResponse(error)) {
+    return (
+      <div dangerouslySetInnerHTML={{ __html: error.data || "Handling response" }} />
+    );
+  }
+  return boundary.error(error);
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
