@@ -11,6 +11,7 @@
 
 interface ActiveSubscription {
   billingPeriod: string | null;
+  cancelAtEndOfCycle: boolean;
   trialEndsAt: string | null;
   items: { handle: string }[];
 }
@@ -27,6 +28,7 @@ const ACTIVE_SUBSCRIPTION_QUERY = /* GraphQL */ `
   query ActiveSubscription($appId: ID!, $shopId: ID!) {
     activeSubscription(appId: $appId, shopId: $shopId) {
       billingPeriod
+      cancelAtEndOfCycle
       trialEndsAt
       items {
         handle
@@ -125,7 +127,14 @@ export async function getActiveSubscription(
     }
 
     const subscription = body.data?.activeSubscription;
-    if (!subscription) {
+
+    // Shopify does NOT terminate a Shopify App Pricing contract on uninstall —
+    // it marks it cancelAtEndOfCycle and leaves it "active" until the billing
+    // cycle ends. If we treated that as subscribed, a reinstall would silently
+    // resume the old plan without re-approval. A subscription that is pending
+    // cancellation is therefore treated as no subscription: the merchant is
+    // sent to the hosted plan page and must approve a plan again.
+    if (!subscription || subscription.cancelAtEndOfCycle) {
       return { subscribed: false, planHandle: null };
     }
 
