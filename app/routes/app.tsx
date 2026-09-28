@@ -12,7 +12,7 @@ import db from "../db.server";
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session, redirect } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   // BYPASS_BILLING=true is a local-development escape hatch only — never set it
   // in production. Shopify App Pricing is the source of truth: if the Partner
@@ -34,7 +34,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   if (!subscription.subscribed) {
-    throw redirect(planSelectionUrl(session.shop), { target: "_top" });
+    // Navigate the top frame to Shopify's hosted plan-selection page. The
+    // library's redirect helper briefly flashes a bare "200" bounce page, so
+    // we emit our own interstitial instead — same mechanism (top-frame
+    // navigation), with a proper message while it happens.
+    const planUrl = planSelectionUrl(session.shop);
+    throw new Response(
+      `<!doctype html><html><head><meta charset="utf-8"><title>MergeShip</title>` +
+        `<meta http-equiv="refresh" content="1;url=${planUrl}"></head>` +
+        `<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">` +
+        `<p>Redirecting to plan selection&hellip;</p>` +
+        `<script>window.top.location.href=${JSON.stringify(planUrl)};</script>` +
+        `</body></html>`,
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    );
   }
 
   return {
