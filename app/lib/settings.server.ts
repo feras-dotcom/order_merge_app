@@ -6,12 +6,16 @@ export interface MergeSettings {
   autoMergeEnabled: boolean;
   mergeWindowHours: number;
   shippingCostSavings: number;
+  /** gid://shopify/Shop/<id> — persisted so the uninstall webhook can act on
+   *  the shop after its Admin API token is revoked. Not merchant-facing. */
+  shopifyShopGid: string | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
   autoMergeEnabled: true,
   mergeWindowHours: 24,
   shippingCostSavings: 8.5,
+  shopifyShopGid: null,
 };
 
 /**

@@ -7,6 +7,7 @@ import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
 
 import { authenticate } from "../shopify.server";
 import { getActiveSubscription, planSelectionUrl } from "../lib/billing.server";
+import db from "../db.server";
 
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
@@ -20,8 +21,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // selection page instead of granting access.
   const subscription =
     process.env.BYPASS_BILLING === "true"
-      ? { subscribed: true, planHandle: "dev-bypass" }
+      ? { subscribed: true, planHandle: "dev-bypass", shopGid: null }
       : await getActiveSubscription(admin, session.shop);
+
+  // Persist the resolved shop GID so the app/uninstalled webhook can still
+  // reference the shop after its Admin API token is revoked.
+  if (subscription.shopGid) {
+    await db.settings.updateMany({
+      where: { shop: session.shop, NOT: { shopifyShopGid: subscription.shopGid } },
+      data: { shopifyShopGid: subscription.shopGid },
+    });
+  }
 
   if (!subscription.subscribed) {
     throw redirect(planSelectionUrl(session.shop), { target: "_top" });

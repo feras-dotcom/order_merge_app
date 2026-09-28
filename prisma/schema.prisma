@@ -20,6 +20,7 @@ model Settings {
   autoMergeEnabled    Boolean @default(true)
   mergeWindowHours    Int     @default(24)
   shippingCostSavings Float   @default(8.5)
+  shopifyShopGid      String?
 }
 
 // Tracks webhook deliveries that have already been processed.
