@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData } from "@remix-run/react";
+import { useLoaderData, useOutletContext } from "@remix-run/react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -242,6 +242,7 @@ function ConsolidationCard({
 export default function Index() {
   const { autoMergeEnabled, shippingCostSavings, historyLimit, recordsShown, consolidatedCount, groups } =
     useLoaderData<typeof loader>();
+  const { planHandle } = useOutletContext<{ planHandle: string | null }>();
   const [query, setQuery] = useState("");
 
   const needle = query.trim().toLowerCase();
@@ -258,15 +259,22 @@ export default function Index() {
       title="MergeShip"
       subtitle="Automated order consolidation"
       titleMetadata={
-        autoMergeEnabled ? (
-          <Badge tone="success" progress="complete">
-            Auto Merge Active
-          </Badge>
-        ) : (
-          <Badge tone="attention" progress="incomplete">
-            Auto Merge Paused
-          </Badge>
-        )
+        <InlineStack gap="300" blockAlign="center">
+          {planHandle && (
+            <Badge tone="info">{`${
+              planHandle.charAt(0).toUpperCase() + planHandle.slice(1)
+            } plan`}</Badge>
+          )}
+          {autoMergeEnabled ? (
+            <Badge tone="success" progress="complete">
+              Auto Merge Active
+            </Badge>
+          ) : (
+            <Badge tone="attention" progress="incomplete">
+              Auto Merge Paused
+            </Badge>
+          )}
+        </InlineStack>
       }
     >
       <TitleBar title="MergeShip" />

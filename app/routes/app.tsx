@@ -6,17 +6,35 @@ import { NavMenu } from "@shopify/app-bridge-react";
 import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
 
 import { authenticate } from "../shopify.server";
+import { getActiveSubscription, planSelectionUrl } from "../lib/billing.server";
 
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { admin, session, redirect } = await authenticate.admin(request);
 
-  return { apiKey: process.env.SHOPIFY_API_KEY || "" };
+  // BYPASS_BILLING=true is a local-development escape hatch only — never set it
+  // in production. Shopify App Pricing is the source of truth: if the Partner
+  // API reports no active subscription for this shop (fresh install, or
+  // reinstall after uninstall), send the merchant to Shopify's hosted plan
+  // selection page instead of granting access.
+  const subscription =
+    process.env.BYPASS_BILLING === "true"
+      ? { subscribed: true, planHandle: "dev-bypass" }
+      : await getActiveSubscription(admin, session.shop);
+
+  if (!subscription.subscribed) {
+    throw redirect(planSelectionUrl(session.shop), { target: "_top" });
+  }
+
+  return {
+    apiKey: process.env.SHOPIFY_API_KEY || "",
+    planHandle: subscription.planHandle,
+  };
 };
 
 export default function App() {
-  const { apiKey } = useLoaderData<typeof loader>();
+  const { apiKey, planHandle } = useLoaderData<typeof loader>();
 
   return (
     <AppProvider isEmbeddedApp apiKey={apiKey}>
@@ -26,7 +44,7 @@ export default function App() {
         </Link>
         <Link to="/app/settings">Settings</Link>
       </NavMenu>
-      <Outlet />
+      <Outlet context={{ planHandle }} />
     </AppProvider>
   );
 }
