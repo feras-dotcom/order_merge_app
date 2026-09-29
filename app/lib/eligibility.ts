@@ -169,6 +169,94 @@ export function lineItemIneligibility(
   return null;
 }
 
+// ── Fulfillment location ──────────────────────────────────────────────────────
+
+/** Optional scope (shopify.app.toml) a multi-location shop grants from
+ *  Settings so fulfillment-order locations can be verified. */
+export const FULFILLMENT_ORDERS_SCOPE = "read_merchant_managed_fulfillment_orders";
+
+export interface FulfillmentOrderInfo {
+  status: string;
+  requestStatus: string;
+  fulfillmentHolds: { reason: string | null }[];
+  assignedLocation: { location: { id: string } | null } | null;
+  lineItems: {
+    nodes: { remainingQuantity: number; lineItem: { id: string } | null }[];
+    pageInfo?: { hasNextPage: boolean };
+  };
+}
+
+export interface OrderFulfillmentOrders {
+  /** false when Shopify reported more fulfillment orders than were loaded. */
+  complete: boolean;
+  nodes: FulfillmentOrderInfo[];
+}
+
+export type LocationEvaluation = { ok: true; locationId: string } | { ok: false; reason: string };
+
+const INACTIVE_FO_STATUSES = new Set(["CLOSED", "CANCELLED"]);
+
+/**
+ * Multi-location rule: every open fulfillment order of every order must be
+ * untouched (OPEN, request UNSUBMITTED, no holds) and assigned to one and the
+ * same location, and those fulfillment orders must account for every
+ * unfulfilled unit of every line item. The completeness check matters because
+ * the app can only see fulfillment orders at merchant-managed locations; units
+ * routed to a fulfillment service are invisible, so any shortfall means the
+ * picture is incomplete and the merge is skipped.
+ */
+export function evaluateFulfillmentLocation(
+  orders: Pick<OrderState, "id" | "name">[],
+  fulfillmentOrdersById: Map<string, OrderFulfillmentOrders>,
+  lineItemsById: Map<string, MergeLineItem[]>,
+): LocationEvaluation {
+  let locationId: string | null = null;
+
+  for (const order of orders) {
+    const fos = fulfillmentOrdersById.get(order.id);
+    const items = lineItemsById.get(order.id);
+    if (!fos || !items) return { ok: false, reason: `Fulfillment details for ${order.name} were not loaded.` };
+    if (!fos.complete) return { ok: false, reason: `Order ${order.name} has too many fulfillment orders to verify.` };
+
+    const remainingByLineItem = new Map<string, number>();
+    for (const fo of fos.nodes) {
+      if (INACTIVE_FO_STATUSES.has(fo.status)) continue;
+      if (fo.status !== "OPEN" || fo.requestStatus !== "UNSUBMITTED" || fo.fulfillmentHolds.length > 0) {
+        return { ok: false, reason: `Order ${order.name} has fulfillment that is on hold, scheduled, requested or in progress.` };
+      }
+      if (fo.lineItems.pageInfo?.hasNextPage) {
+        return { ok: false, reason: `Order ${order.name} has too many fulfillment line items to verify.` };
+      }
+      const foLocation = fo.assignedLocation?.location?.id;
+      if (!foLocation) return { ok: false, reason: `Order ${order.name} has a fulfillment order with no assigned location.` };
+      if (locationId && foLocation !== locationId) {
+        return { ok: false, reason: "Orders are assigned to different fulfillment locations." };
+      }
+      locationId = foLocation;
+      for (const foItem of fo.lineItems.nodes) {
+        if (!foItem.lineItem?.id) continue;
+        remainingByLineItem.set(
+          foItem.lineItem.id,
+          (remainingByLineItem.get(foItem.lineItem.id) ?? 0) + foItem.remainingQuantity,
+        );
+      }
+    }
+
+    for (const item of items) {
+      if (item.currentQuantity <= 0) continue;
+      if (!item.id || remainingByLineItem.get(item.id) !== item.currentQuantity) {
+        return {
+          ok: false,
+          reason: `Could not confirm where every item in ${order.name} ships from (it may be handled by a fulfillment service).`,
+        };
+      }
+    }
+  }
+
+  if (!locationId) return { ok: false, reason: "No fulfillment location could be determined." };
+  return { ok: true, locationId };
+}
+
 // ── Group evaluation ──────────────────────────────────────────────────────────
 
 export type GroupEvaluation<T extends OrderState> =

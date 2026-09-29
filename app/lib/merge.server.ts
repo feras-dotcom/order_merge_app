@@ -5,8 +5,10 @@
 //
 // Safety model
 //   • Nothing is changed until every eligibility rule passes on freshly loaded
-//     state (see eligibility.ts), the shop has exactly one active location, and
-//     the state is re-verified immediately before the commit.
+//     state (see eligibility.ts), the location rule passes (every order's items
+//     verifiably assigned to one shared location, or a single-location shop —
+//     see resolveMergeLocation), and the state is re-verified immediately
+//     before the commit.
 //   • Every Shopify call goes through gql(), which fails on transport errors,
 //     top-level GraphQL errors, missing payloads and userErrors.
 //   • A MergeOperation journal row is written BEFORE the primary's order edit
@@ -21,7 +23,9 @@
 
 import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
 import {
+  evaluateFulfillmentLocation,
   evaluateMergeGroup,
+  type OrderFulfillmentOrders,
   type MergeLineItem,
   type OrderState,
 } from "./eligibility";
@@ -187,13 +191,7 @@ async function fetchLineItemsById(admin: AdminClient, orders: OrderState[]) {
   return map;
 }
 
-/**
- * Initial-launch location rule: merge only in shops with exactly one active
- * location. With the app's current scopes MergeShip cannot read which location
- * each order's items are assigned to, so any multi-location shop is skipped
- * rather than risk combining items that ship from different places.
- */
-async function hasSingleActiveLocation(admin: AdminClient): Promise<boolean> {
+async function countActiveLocations(admin: AdminClient): Promise<number> {
   const result = await gql<{ count: number }>(
     admin,
     "Count locations",
@@ -205,7 +203,99 @@ async function hasSingleActiveLocation(admin: AdminClient): Promise<boolean> {
     "locationsCount",
     null,
   );
-  return result.count === 1;
+  return result.count;
+}
+
+const FULFILLMENT_ORDERS_QUERY = `#graphql
+  query MergeFulfillmentOrders($id: ID!) {
+    order(id: $id) {
+      fulfillmentOrders(first: 20) {
+        nodes {
+          status
+          requestStatus
+          fulfillmentHolds { reason }
+          assignedLocation { location { id } }
+          lineItems(first: 100) {
+            nodes { remainingQuantity lineItem { id } }
+            pageInfo { hasNextPage }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+  }`;
+
+async function fetchFulfillmentOrdersById(admin: AdminClient, orders: OrderState[]) {
+  const map = new Map<string, OrderFulfillmentOrders>();
+  for (const order of orders) {
+    const result: any = await gql(admin, "Load fulfillment orders", FULFILLMENT_ORDERS_QUERY, { id: order.id }, "order", null);
+    const connection = result.fulfillmentOrders;
+    if (!connection?.nodes || !connection.pageInfo) {
+      throw new ShopifyGraphqlError(`Could not load fulfillment orders for ${order.name}.`, false);
+    }
+    map.set(order.id, { complete: !connection.pageInfo.hasNextPage, nodes: connection.nodes });
+  }
+  return map;
+}
+
+const isAccessDenied = (err: unknown) =>
+  err instanceof ShopifyGraphqlError && !err.rejected && /access denied/i.test(err.message);
+
+/** Observability only: reports whether the transferred items stayed at the
+ *  shared location. Never throws and never affects the merge. */
+async function logMergedLocation(admin: AdminClient, primary: OrderState, locationId: string) {
+  try {
+    const fos = await fetchFulfillmentOrdersById(admin, [primary]);
+    const locations = new Set(
+      fos
+        .get(primary.id)!
+        .nodes.filter((fo) => !["CLOSED", "CANCELLED"].includes(fo.status))
+        .map((fo) => fo.assignedLocation?.location?.id ?? "unassigned"),
+    );
+    if (locations.size === 1 && locations.has(locationId)) {
+      console.log(`[merge] ${primary.name}: all items assigned to ${locationId}.`);
+    } else {
+      console.warn(`[merge] ${primary.name}: items now assigned to ${[...locations].join(", ")} (expected ${locationId}).`);
+    }
+  } catch (err: any) {
+    console.warn(`[merge] Could not check locations after commit for ${primary.name}: ${err?.message}`);
+  }
+}
+
+type LocationDecision = { ok: true; locationId: string | null } | { ok: false; reason: string };
+
+/**
+ * Location rule.
+ *   • With the optional read_merchant_managed_fulfillment_orders scope: every
+ *     open fulfillment order of every order must be untouched and assigned to
+ *     one and the same location, and must account for every unfulfilled unit
+ *     (see evaluateFulfillmentLocation). Applies to single-location shops too.
+ *   • Without it: only shops with exactly one active location qualify.
+ * Anything that cannot be verified is skipped.
+ */
+async function resolveMergeLocation(
+  admin: AdminClient,
+  orders: OrderState[],
+  lineItems: Map<string, MergeLineItem[]>,
+): Promise<LocationDecision> {
+  let fulfillmentOrders: Map<string, OrderFulfillmentOrders> | null = null;
+  try {
+    fulfillmentOrders = await fetchFulfillmentOrdersById(admin, orders);
+  } catch (err) {
+    if (!isAccessDenied(err)) throw err;
+  }
+
+  if (fulfillmentOrders) {
+    const result = evaluateFulfillmentLocation(orders, fulfillmentOrders, lineItems);
+    return result.ok ? { ok: true, locationId: result.locationId } : result;
+  }
+
+  if ((await countActiveLocations(admin)) === 1) return { ok: true, locationId: null };
+  return {
+    ok: false,
+    reason:
+      "Shop has more than one active location and MergeShip has not been allowed to read fulfillment locations (grant it in Settings).",
+  };
 }
 
 // ── Best-effort annotations (never affect merge correctness) ──────────────────
@@ -575,9 +665,6 @@ export async function executeMerge(
   let orders: OrderState[];
   let lineItems: Map<string, MergeLineItem[]>;
   try {
-    if (!(await hasSingleActiveLocation(admin))) {
-      return skip("Shop has more than one active location; multi-location merging is not supported yet.");
-    }
     orders = await fetchOrderStates(admin, orderIds);
     lineItems = await fetchLineItemsById(admin, orders);
   } catch (err: any) {
@@ -588,6 +675,15 @@ export async function executeMerge(
   if (!evaluation.ok) return skip(evaluation.reason);
   const { primary, secondaries } = evaluation;
   const primaryCountBefore = lineItems.get(primary.id)!.length;
+
+  let location: LocationDecision;
+  try {
+    location = await resolveMergeLocation(admin, orders, lineItems);
+  } catch (err: any) {
+    return fail(err?.message ?? "Could not verify fulfillment locations.");
+  }
+  if (!location.ok) return skip(location.reason);
+  const locationId = location.locationId;
 
   // 3 ── Build the order edit (uncommitted — abandoning it changes nothing) ──
   let calcId: string;
@@ -616,13 +712,20 @@ export async function executeMerge(
           admin,
           `Add "${item.name}" from ${secondary.name}`,
           `#graphql
-            mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
-              orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, allowDuplicates: true) {
+            mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
+              orderEditAddVariant(
+                id: $id
+                variantId: $variantId
+                quantity: $quantity
+                locationId: $locationId
+                allowDuplicates: true
+              ) {
                 calculatedLineItem { id }
                 userErrors { field message }
               }
             }`,
-          { id: calcId, variantId: item.variant!.id, quantity: item.currentQuantity },
+          // Anchor transferred items to the orders' shared location.
+          { id: calcId, variantId: item.variant!.id, quantity: item.currentQuantity, locationId },
           "orderEditAddVariant",
         );
         const calcLineItemId = added.calculatedLineItem?.id;
@@ -663,6 +766,9 @@ export async function executeMerge(
     if (fingerprint(freshItems) !== fingerprint(lineItems)) {
       return skip("Order line items changed during the merge.");
     }
+    const freshLocation = await resolveMergeLocation(admin, freshOrders, freshItems);
+    if (!freshLocation.ok) return skip(`Orders changed during the merge: ${freshLocation.reason}`);
+    if (freshLocation.locationId !== locationId) return skip("Fulfillment location changed during the merge.");
   } catch (err: any) {
     return fail(err?.message ?? "Could not re-verify orders.");
   }
@@ -720,6 +826,8 @@ export async function executeMerge(
       await deps.journal.update(op.id, { lastError: err?.message ?? String(err) });
       return inProgress(op, `Commit outcome unknown: ${err?.message}`);
     }
+
+    if (locationId) await logMergedLocation(admin, primary, locationId);
 
     // 7 ── Cancel secondaries and confirm ──────────────────────────────────────
     try {
