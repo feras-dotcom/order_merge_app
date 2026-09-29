@@ -19,4 +19,5 @@ Use the [Shopify AI Toolkit](https://shopify.dev/docs/apps/build/ai-toolkit) for
 - Every merge-path Shopify call goes through `gql()` in `app/lib/graphql.server.ts` (fails on transport/top-level errors, missing payload, userErrors).
 - A `MergeOperation` journal row is written before `orderEditCommit`; orders in PENDING_COMMIT / COMMITTED / NEEDS_REVIEW ops are never merged again.
 - `orderCancel` is asynchronous — cancellations are confirmed by reading `cancelledAt` back.
-- Automatic merging is opt-in (`Settings.autoMergeEnabled` defaults to false) and only runs in shops with exactly one active location.
+- Automatic merging is opt-in (`Settings.autoMergeEnabled` defaults to false).
+- Location rule (`resolveMergeLocation`): with the optional `read_merchant_managed_fulfillment_orders` scope (merchant grants it from Settings), every open fulfillment order of every order must be OPEN/UNSUBMITTED/unheld, share one assigned location, and account for every unfulfilled unit; without the scope, only single-active-location shops qualify. The `FulfillmentOrder.location` field does not exist — use `assignedLocation { location { id } }`.
