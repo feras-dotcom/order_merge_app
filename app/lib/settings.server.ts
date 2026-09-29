@@ -11,6 +11,8 @@ export interface MergeSettings {
    *  the shop after its Admin API token is revoked. Not merchant-facing. */
   shopifyShopGid: string | null;
   autoMergeAcknowledgedAt: Date | null;
+  onboardingStartedAt: Date | null;
+  onboardingCompletedAt: Date | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
@@ -19,6 +21,8 @@ export const DEFAULT_SETTINGS: MergeSettings = {
   shippingCostSavings: 8.5,
   shopifyShopGid: null,
   autoMergeAcknowledgedAt: null,
+  onboardingStartedAt: null,
+  onboardingCompletedAt: null,
 };
 
 /**

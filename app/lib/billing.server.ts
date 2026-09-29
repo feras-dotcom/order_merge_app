@@ -20,13 +20,21 @@ interface ActiveSubscription {
   billingPeriod: string | null;
   cancelAtEndOfCycle: boolean;
   trialEndsAt: string | null;
-  items: { handle: string }[];
+  items: { handle: string; price?: { amount?: string; currency?: string } | null }[];
+}
+
+/** Display-only plan price (development stores report $0 while testing). */
+export interface PlanPrice {
+  amount: string;
+  currency: string;
+  billingPeriod: string | null;
 }
 
 interface ShopSubscriptionInfo {
   subscribed: boolean;
   /** Plan handle from the active subscription (e.g. "pro", "starter"), or null. */
   planHandle: string | null;
+  planPrice: PlanPrice | null;
   /** gid://shopify/Shop/<id> resolved via the Admin API — persisted so the
    *  uninstall webhook can act on it after the Admin token is revoked. */
   shopGid: string | null;
@@ -42,6 +50,12 @@ const ACTIVE_SUBSCRIPTION_QUERY = /* GraphQL */ `
       trialEndsAt
       items {
         handle
+        price {
+          currency
+          ... on FlatRatePrice {
+            amount
+          }
+        }
       }
     }
   }
@@ -183,6 +197,7 @@ export async function getActiveSubscription(
   const none: ShopSubscriptionInfo = {
     subscribed: false,
     planHandle: null,
+    planPrice: null,
     shopGid: null,
   };
 
@@ -209,9 +224,14 @@ export async function getActiveSubscription(
       | undefined;
     if (!subscription) return { ...none };
 
+    const item = subscription.items?.[0];
     return {
       subscribed: true,
-      planHandle: subscription.items?.[0]?.handle ?? null,
+      planHandle: item?.handle ?? null,
+      planPrice:
+        item?.price?.amount && item.price.currency
+          ? { amount: item.price.amount, currency: item.price.currency, billingPeriod: subscription.billingPeriod }
+          : null,
       shopGid,
     };
   } catch (error) {

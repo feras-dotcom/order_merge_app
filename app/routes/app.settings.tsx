@@ -5,11 +5,11 @@ import { useEffect, useRef, useState } from "react";
 import {
   Banner,
   BlockStack,
-  Button,
+  Box,
   Card,
   Checkbox,
   InlineStack,
-  Layout,
+  Link,
   List,
   Page,
   Select,
@@ -20,7 +20,16 @@ import { authenticate } from "../shopify.server";
 import { getSettings, upsertSettings } from "../lib/settings.server";
 import { getLocationAccess } from "../lib/location-access.server";
 import { REVIEW_TAG } from "../lib/eligibility";
+import {
+  isOnboardingComplete,
+  isValidMergeWindow,
+  MERGE_WINDOW_HOURS,
+  SAFETY_RULES,
+  WHAT_HAPPENS,
+} from "../lib/onboarding";
+import type { PlanPrice } from "../lib/billing.server";
 import { StatusDot } from "../components/StatusDot";
+import { SettingsSection } from "../components/SettingsSection";
 import { useLocationAccessRequest } from "../components/useLocationAccessRequest";
 
 // ── Loader ────────────────────────────────────────────────
@@ -36,6 +45,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     settings: {
       autoMergeEnabled: settings.autoMergeEnabled,
       mergeWindowHours: settings.mergeWindowHours,
+      acknowledged: settings.autoMergeAcknowledgedAt !== null,
     },
     locationAccess,
     shopHandle: session.shop.replace(".myshopify.com", ""),
@@ -51,55 +61,58 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const current = await getSettings(session.shop);
 
   const autoMergeEnabled = formData.get("autoMergeEnabled") === "true";
-  const acknowledged = formData.get("acknowledged") === "true";
-
-  // Turning auto-merge on requires explicit acknowledgement of what it does.
-  // Enforced here, not only in the UI.
   const turningOn = autoMergeEnabled && !current.autoMergeEnabled;
-  if (turningOn && !acknowledged) {
+
+  // Automation is first turned on at the end of onboarding; Settings can only
+  // resume it afterwards. Both rules are enforced here, not only in the UI.
+  if (turningOn && !isOnboardingComplete(current)) {
+    return json({ success: false, error: "Finish setting up MergeShip before turning on automatic merging." }, { status: 400 });
+  }
+  const acknowledgedNow = formData.get("acknowledged") === "true";
+  if (turningOn && !current.autoMergeAcknowledgedAt && !acknowledgedNow) {
     return json(
       { success: false, error: "Confirm you understand how automatic merging works before turning it on." },
       { status: 400 },
     );
   }
 
-  const rawHours = parseInt(formData.get("mergeWindowHours") as string, 10);
-  // Validate against the allowed set so arbitrary values can't be stored.
-  const mergeWindowHours = [1, 12, 24].includes(rawHours) ? rawHours : 24;
+  const mergeWindowHours = Number(formData.get("mergeWindowHours"));
+  if (!isValidMergeWindow(mergeWindowHours)) {
+    return json({ success: false, error: "Choose a valid merge window." }, { status: 400 });
+  }
 
   await upsertSettings(session.shop, {
     autoMergeEnabled,
     mergeWindowHours,
-    ...(turningOn && { autoMergeAcknowledgedAt: new Date() }),
+    ...(turningOn && !current.autoMergeAcknowledgedAt && { autoMergeAcknowledgedAt: new Date() }),
   });
   return json({ success: true, error: null });
 };
 
 // ── Component ─────────────────────────────────────────────
 
-const WHAT_HAPPENS = [
-  "MergeShip moves the newer order's items onto the customer's earlier order at no extra charge, then cancels the newer order and restocks it.",
-  "The cancelled order is not refunded. Any shipping the customer paid on it is not refunded automatically — refund it in Shopify if you choose to.",
-  "Customers aren't notified of the change.",
-];
+const WINDOW_OPTIONS = MERGE_WINDOW_HOURS.map((h) => ({
+  label: h === 1 ? "1 hour" : `${h} hours`,
+  value: String(h),
+}));
 
-const SAFETY_RULES = [
-  "Same customer, recipient, shipping address and currency.",
-  "Exactly one shipping method on each order, and the same one on both.",
-  "Fully paid, not yet fulfilled in any way, and low fraud risk.",
-  "Standard shippable products only — no gift cards, subscriptions, bundles or items with custom options.",
-  "Every item ships from the same location.",
-];
-
-const WINDOW_OPTIONS = [
-  { label: "1 hour", value: "1" },
-  { label: "12 hours", value: "12" },
-  { label: "24 hours", value: "24" },
-];
+function formatPlan(planHandle: string | null, price: PlanPrice | null) {
+  if (!planHandle) return "No active plan";
+  const name = planHandle.charAt(0).toUpperCase() + planHandle.slice(1);
+  if (!price) return name;
+  const value = Number(price.amount);
+  const amount = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: price.currency,
+    maximumFractionDigits: Number.isInteger(value) ? 0 : 2,
+  }).format(value);
+  const period = price.billingPeriod === "ANNUAL" ? "year" : "month";
+  return `${name} — ${amount}/${period}`;
+}
 
 export default function SettingsPage() {
   const { settings, locationAccess, shopHandle, appHandle } = useLoaderData<typeof loader>();
-  const { planHandle } = useOutletContext<{ planHandle: string | null }>();
+  const { planHandle, planPrice } = useOutletContext<{ planHandle: string | null; planPrice: PlanPrice | null }>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const navigate = useNavigate();
@@ -126,24 +139,26 @@ export default function SettingsPage() {
     else if (fetcher.data.error) shopify.toast.show(fetcher.data.error, { isError: true });
   }, [fetcher.data, shopify]);
 
-  const turningOn = autoMergeEnabled && !settings.autoMergeEnabled;
+  // Only a merchant who has never acknowledged (e.g. migrated from an early
+  // version) is asked again when resuming automation.
+  const needsAcknowledgement = autoMergeEnabled && !settings.autoMergeEnabled && !settings.acknowledged;
   const dirty =
     autoMergeEnabled !== settings.autoMergeEnabled ||
     mergeWindowHours !== String(settings.mergeWindowHours);
-  const multiLocation =
-    locationAccess.activeLocationCount !== null && locationAccess.activeLocationCount > 1;
-  const planName = planHandle ? planHandle.charAt(0).toUpperCase() + planHandle.slice(1) : null;
+  const blocked = locationAccess.requirement === "needs-access";
 
   const handleSave = () => {
     fetcher.submit(
-      {
-        autoMergeEnabled: String(autoMergeEnabled),
-        acknowledged: String(acknowledged),
-        mergeWindowHours,
-      },
+      { autoMergeEnabled: String(autoMergeEnabled), acknowledged: String(acknowledged), mergeWindowHours },
       { method: "post" },
     );
   };
+
+  const statusLabel = !settings.autoMergeEnabled
+    ? "Automatic merging is paused"
+    : blocked
+      ? "Automatic merging is stopped · needs location access"
+      : "Automatic merging is on";
 
   return (
     <Page
@@ -153,36 +168,20 @@ export default function SettingsPage() {
         content: "Save",
         onAction: handleSave,
         loading: fetcher.state !== "idle",
-        disabled: !dirty || (turningOn && !acknowledged),
+        disabled: !dirty || (needsAcknowledgement && !acknowledged),
       }}
     >
       <TitleBar title="Settings" />
-      <Layout>
-        {locationAccess.blocked && (
-          <Layout.Section>
-            <Banner
-              tone="warning"
-              title="MergeShip can't combine orders yet"
-              action={{ content: "Allow location access", loading: requesting, onAction: requestLocationAccess }}
-            >
-              <p>
-                Your store has {locationAccess.activeLocationCount} active
-                locations. Allow read-only location access so MergeShip can
-                confirm repeat orders ship from the same place.
-              </p>
-            </Banner>
-          </Layout.Section>
-        )}
-
-        <Layout.AnnotatedSection
+      <BlockStack>
+        <SettingsSection
           title="Automation"
           description="When this is on, MergeShip combines eligible repeat orders from the same customer before you fulfill them."
         >
           <Card>
-            <BlockStack gap="400">
+            <BlockStack gap="300">
               <StatusDot
-                on={settings.autoMergeEnabled}
-                label={settings.autoMergeEnabled ? "Automatic merging is on" : "Automatic merging is off"}
+                tone={!settings.autoMergeEnabled ? "neutral" : blocked ? "caution" : "success"}
+                label={statusLabel}
               />
               <Checkbox
                 label="Combine eligible repeat orders automatically"
@@ -192,7 +191,7 @@ export default function SettingsPage() {
                   if (!value) setAcknowledged(false);
                 }}
               />
-              {turningOn && (
+              {needsAcknowledgement && (
                 <Banner tone="warning" title="Before you turn this on">
                   <BlockStack gap="300">
                     <List type="bullet">
@@ -201,7 +200,7 @@ export default function SettingsPage() {
                       ))}
                     </List>
                     <Checkbox
-                      label="I understand MergeShip will edit and cancel eligible orders, and won't refund shipping."
+                      label="I understand MergeShip will move items onto the earlier order, cancel the newer order, and won't refund its shipping."
                       checked={acknowledged}
                       onChange={setAcknowledged}
                     />
@@ -210,9 +209,9 @@ export default function SettingsPage() {
               )}
             </BlockStack>
           </Card>
-        </Layout.AnnotatedSection>
+        </SettingsSection>
 
-        <Layout.AnnotatedSection
+        <SettingsSection
           title="Merge window"
           description="Repeat orders are only combined when they're placed within this time of each other."
         >
@@ -224,68 +223,77 @@ export default function SettingsPage() {
               onChange={setMergeWindowHours}
             />
           </Card>
-        </Layout.AnnotatedSection>
+        </SettingsSection>
 
-        {multiLocation && (
-          <Layout.AnnotatedSection
+        {locationAccess.requirement !== "not-needed" && (
+          <SettingsSection
             title="Location access"
             description="Needed in stores with more than one location, so MergeShip can confirm both orders ship from the same place."
           >
-            <Card>
-              {locationAccess.granted ? (
-                <StatusDot on label={`Allowed · ${locationAccess.activeLocationCount} active locations`} />
-              ) : (
-                <InlineStack align="space-between" blockAlign="center" gap="300">
-                  <StatusDot on={false} label="Not allowed — no orders will be combined" />
-                  <Button onClick={requestLocationAccess} loading={requesting}>
-                    Allow location access
-                  </Button>
-                </InlineStack>
-              )}
-            </Card>
-          </Layout.AnnotatedSection>
+            {locationAccess.requirement === "needs-access" ? (
+              <Banner
+                tone="warning"
+                title="MergeShip can't combine orders right now"
+                action={{ content: "Allow location access", loading: requesting, onAction: requestLocationAccess }}
+              >
+                <p>
+                  Your store now has {locationAccess.activeLocationCount} active
+                  locations. Allow read-only location access to continue
+                  automatic combining.
+                </p>
+              </Banner>
+            ) : (
+              <Card>
+                {locationAccess.requirement === "granted" ? (
+                  <StatusDot on label={`Allowed · ${locationAccess.activeLocationCount} active locations`} />
+                ) : (
+                  <Text as="p" tone="subdued">
+                    MergeShip couldn't check your store's locations just now.
+                  </Text>
+                )}
+              </Card>
+            )}
+          </SettingsSection>
         )}
 
-        <Layout.AnnotatedSection
+        <SettingsSection
           title="Safety rules"
+          align="start"
           description="Always enforced. MergeShip only combines orders when it can verify they're safe to combine. Orders that don't qualify are left untouched."
         >
           <Card>
-            <BlockStack gap="300">
-              <Text as="p">Orders are combined only when they have:</Text>
+            <BlockStack gap="200">
+              <Text as="p">MergeShip only combines orders when:</Text>
               <List type="bullet">
                 {SAFETY_RULES.map((rule) => (
                   <List.Item key={rule}>{rule}</List.Item>
                 ))}
               </List>
-              <Text as="p" tone="subdued">
-                If MergeShip can't confirm a combine finished, it tags the
-                orders “{REVIEW_TAG}” and flags them on the dashboard.
-              </Text>
+              <Box paddingBlockStart="100">
+                <Text as="p" variant="bodySm" tone="subdued">
+                  If MergeShip can't confirm a combine finished, it tags the
+                  orders “{REVIEW_TAG}” and flags them on the dashboard.
+                </Text>
+              </Box>
             </BlockStack>
           </Card>
-        </Layout.AnnotatedSection>
+        </SettingsSection>
 
-        <Layout.AnnotatedSection
-          title="Plan & billing"
-          description="Billing is handled by Shopify and appears on your Shopify invoice."
-        >
+        <SettingsSection title="Plan & billing" description="Managed through Shopify.">
           <Card>
             <InlineStack align="space-between" blockAlign="center" gap="300">
-              <Text as="p">{planName ? `${planName} plan` : "No active plan"}</Text>
+              <Text as="p" tone="subdued">
+                {formatPlan(planHandle, planPrice)}
+              </Text>
               {appHandle && (
-                <Button
-                  variant="plain"
-                  url={`https://admin.shopify.com/store/${shopHandle}/charges/${appHandle}/pricing_plans`}
-                  target="_top"
-                >
-                  Manage plan
-                </Button>
+                <Link url={`https://admin.shopify.com/store/${shopHandle}/charges/${appHandle}/pricing_plans`} target="_top" removeUnderline>
+                  Manage plan →
+                </Link>
               )}
             </InlineStack>
           </Card>
-        </Layout.AnnotatedSection>
-      </Layout>
+        </SettingsSection>
+      </BlockStack>
     </Page>
   );
 }
