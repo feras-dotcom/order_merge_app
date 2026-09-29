@@ -27,7 +27,7 @@ import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { getSettings, upsertSettings } from "../lib/settings.server";
 import { gql } from "../lib/graphql.server";
-import { FULFILLMENT_ORDERS_SCOPE } from "../lib/eligibility";
+import { LOCATION_SCOPES } from "../lib/eligibility";
 
 // ── Loader ────────────────────────────────────────────────
 
@@ -35,11 +35,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session, scopes } = await authenticate.admin(request);
   const settings = await getSettings(session.shop);
 
-  // Multi-location shops need the optional fulfillment-orders scope so
-  // MergeShip can verify both orders ship from the same location.
+  // Multi-location shops need every optional location scope so MergeShip can
+  // verify both orders ship from the same location.
   let locationScopeGranted = false;
   try {
-    locationScopeGranted = (await scopes.query()).granted.includes(FULFILLMENT_ORDERS_SCOPE);
+    const granted = (await scopes.query()).granted;
+    locationScopeGranted = LOCATION_SCOPES.every((scope) => granted.includes(scope));
   } catch (err: any) {
     console.warn(`[settings] Could not query scopes for ${session.shop}: ${err?.message}`);
   }
@@ -178,13 +179,13 @@ export default function SettingsPage() {
   const turningOn = autoMergeEnabled && !settings.autoMergeEnabled;
   const multiLocation = activeLocationCount !== null && activeLocationCount > 1;
 
-  // Opens Shopify's permission modal for the optional scope, then reloads the
+  // Opens Shopify's permission modal for the optional scopes, then reloads the
   // loader data so the banner reflects the merchant's choice.
   const [requestingScope, setRequestingScope] = useState(false);
   const requestLocationScope = async () => {
     setRequestingScope(true);
     try {
-      const response = await shopify.scopes.request([FULFILLMENT_ORDERS_SCOPE]);
+      const response = await shopify.scopes.request(LOCATION_SCOPES);
       if (response.result === "granted-all") shopify.toast.show("Location access allowed");
       revalidator.revalidate();
     } catch {
@@ -238,7 +239,8 @@ export default function SettingsPage() {
             <p>
               Your store has {activeLocationCount} active locations. To merge
               orders safely, MergeShip needs read-only access to fulfillment
-              orders so it can confirm both orders ship from the same location.
+              orders and locations so it can confirm both orders ship from the
+              same location.
               Until you allow this, no orders will be merged in this store.
             </p>
           </Banner>
