@@ -14,6 +14,8 @@ import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
 import { authenticate } from "../shopify.server";
 import { getActiveSubscription, planSelectionUrl } from "../lib/billing.server";
 import db from "../db.server";
+import { getSettings } from "../lib/settings.server";
+import { isOnboardingComplete } from "../lib/onboarding";
 
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
@@ -27,13 +29,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // selection page instead of granting access.
   const subscription =
     process.env.BYPASS_BILLING === "true"
-      ? { subscribed: true, planHandle: "dev-bypass", shopGid: null }
+      ? { subscribed: true, planHandle: "dev-bypass", planPrice: null, shopGid: null }
       : await getActiveSubscription(admin, session.shop);
 
   // Persist the resolved shop GID so the app/uninstalled webhook can still
   // reference the shop after its Admin API token is revoked.
   // Upserted so the row exists even before the merchant saves settings; a new
-  // row takes the schema defaults (automatic merging off).
+  // row takes the schema defaults (automatic merging off, setup not started).
   if (subscription.shopGid) {
     await db.settings.upsert({
       where: { shop: session.shop },
@@ -46,24 +48,39 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     throw redirect(planSelectionUrl(session.shop), { target: "_top" });
   }
 
+  // Setup gate: until onboarding is complete every app page leads to it; once
+  // complete, onboarding is only reachable for its final "You're ready" step.
+  const url = new URL(request.url);
+  const onOnboarding = url.pathname === ONBOARDING_PATH;
+  const setupComplete = isOnboardingComplete(await getSettings(session.shop));
+  if (!setupComplete && !onOnboarding) throw redirect(ONBOARDING_PATH);
+  if (setupComplete && onOnboarding && url.searchParams.get("step") !== "done") throw redirect("/app");
+
   return {
     apiKey: process.env.SHOPIFY_API_KEY || "",
     planHandle: subscription.planHandle,
+    planPrice: subscription.planPrice,
+    setupComplete,
   };
 };
 
+const ONBOARDING_PATH = "/app/onboarding";
+
 export default function App() {
-  const { apiKey, planHandle } = useLoaderData<typeof loader>();
+  const { apiKey, planHandle, planPrice, setupComplete } = useLoaderData<typeof loader>();
 
   return (
     <AppProvider isEmbeddedApp apiKey={apiKey}>
-      <NavMenu>
-        <Link to="/app" rel="home">
-          MergeShip
-        </Link>
-        <Link to="/app/settings">Settings</Link>
-      </NavMenu>
-      <Outlet context={{ planHandle }} />
+      {/* Navigation appears once setup is complete, so setup has one path. */}
+      {setupComplete && (
+        <NavMenu>
+          <Link to="/app" rel="home">
+            MergeShip
+          </Link>
+          <Link to="/app/settings">Settings</Link>
+        </NavMenu>
+      )}
+      <Outlet context={{ planHandle, planPrice }} />
     </AppProvider>
   );
 }

@@ -21,6 +21,10 @@ model Settings {
   // When the merchant last turned auto-merge on after acknowledging what it
   // does (modifies/cancels orders; never refunds duplicate shipping).
   autoMergeAcknowledgedAt DateTime?
+  // Setup state. null/null = never started; started only = in setup;
+  // completed = setup finished (automation was activated at that moment).
+  onboardingStartedAt   DateTime?
+  onboardingCompletedAt DateTime?
   mergeWindowHours    Int     @default(24)
   shippingCostSavings Float   @default(8.5)
   shopifyShopGid      String?

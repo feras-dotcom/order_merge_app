@@ -30,5 +30,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await cancelSubscription(shopGid);
   }
 
+  // A reinstall is a new install: automation must not silently resume, and
+  // the merchant goes through setup (plan, locations, acknowledgement) again.
+  // The merge window and combine history are kept.
+  await db.settings.updateMany({
+    where: { shop },
+    data: { autoMergeEnabled: false, onboardingStartedAt: null, onboardingCompletedAt: null },
+  });
+
   return new Response();
 };

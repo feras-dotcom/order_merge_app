@@ -1,19 +1,21 @@
 import { gql, type AdminClient } from "./graphql.server";
 import { LOCATION_SCOPES } from "./eligibility";
+import { locationRequirement, type LocationRequirement } from "./onboarding";
 
 export interface LocationAccess {
   /** null when the count could not be read. */
   activeLocationCount: number | null;
   /** Every optional location scope is granted. */
   granted: boolean;
+  requirement: LocationRequirement;
   /** Multi-location store without location access: automation cannot merge. */
   blocked: boolean;
 }
 
 /**
- * Shared by the dashboard and Settings so both show the same state. Mirrors
- * the merge engine's rule: multi-location stores need the optional location
- * scopes (see resolveMergeLocation in merge.server.ts).
+ * Shared by the dashboard, Settings and onboarding so all show the same state.
+ * Mirrors the merge engine's rule: multi-location stores need the optional
+ * location scopes (see resolveMergeLocation in merge.server.ts).
  */
 export async function getLocationAccess(
   admin: AdminClient,
@@ -46,6 +48,6 @@ export async function getLocationAccess(
     console.warn(`[location-access] Could not count locations for ${shop}: ${err?.message}`);
   }
 
-  const multiLocation = activeLocationCount !== null && activeLocationCount > 1;
-  return { activeLocationCount, granted, blocked: multiLocation && !granted };
+  const requirement = locationRequirement({ activeLocationCount, granted });
+  return { activeLocationCount, granted, requirement, blocked: requirement === "needs-access" };
 }

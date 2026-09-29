@@ -203,12 +203,12 @@ export default function Index() {
       subtitle="Repeat orders shouldn't mean more manual work."
       titleMetadata={
         <StatusDot
-          on={working}
+          tone={!autoMergeEnabled ? "neutral" : locationBlocked ? "caution" : "success"}
           label={
             !autoMergeEnabled
-              ? "Automatic merging off"
+              ? "Automatic merging paused"
               : locationBlocked
-                ? "Automatic merging paused"
+                ? "Automatic merging stopped"
                 : "Automatic merging on"
           }
         />
@@ -244,47 +244,42 @@ export default function Index() {
           </Banner>
         )}
 
+        {/* Onboarding guarantees setup is complete here, so this is a genuine
+            interruption (e.g. a location was added or access revoked). */}
         {autoMergeEnabled && locationBlocked && (
           <Banner
             tone="warning"
-            title="MergeShip can't combine orders yet"
+            title="MergeShip can't combine orders right now"
             action={{ content: "Allow location access", loading: requesting, onAction: requestLocationAccess }}
           >
             <p>
-              Your store has {activeLocationCount} active locations. Allow
-              read-only location access so MergeShip can confirm repeat orders
-              ship from the same place.
+              Your fulfillment setup changed — your store now has{" "}
+              {activeLocationCount} active locations. Allow location access to
+              continue automatic combining.
             </p>
           </Banner>
         )}
 
+        {/* Paused is the merchant's choice, not a problem: keep it quiet. */}
         {!autoMergeEnabled && (
           <Card>
             <InlineStack align="space-between" blockAlign="center" gap="400">
-              <BlockStack gap="100">
-                <Text as="h2" variant="headingSm">
-                  Automatic merging is off
-                </Text>
-                <Text as="p" tone="subdued">
-                  MergeShip won't change any orders until you turn it on.
-                </Text>
-              </BlockStack>
-              <Link url="/app/settings">Review and turn on</Link>
+              <Text as="p" tone="subdued">
+                Automatic merging is paused. MergeShip won't change any orders
+                until you turn it back on.
+              </Text>
+              <Link url="/app/settings">Turn on in Settings</Link>
             </InlineStack>
           </Card>
         )}
 
         {rows.length === 0 ? (
           <Card>
-            <EmptyState
-              heading="Repeat orders shouldn't mean more manual work."
-              image={EMPTY_STATE_IMAGE}
-              action={autoMergeEnabled ? undefined : { content: "Go to Settings", url: "/app/settings" }}
-            >
+            <EmptyState heading="Repeat orders shouldn't mean more manual work." image={EMPTY_STATE_IMAGE}>
               <p>
                 {working
                   ? "MergeShip is watching for eligible repeat orders and will combine them automatically when they pass the safety checks."
-                  : "Once automatic merging is on, MergeShip combines eligible repeat orders before fulfillment and leaves anything uncertain untouched."}
+                  : "Combined orders will appear here once automatic merging is running."}
               </p>
             </EmptyState>
           </Card>

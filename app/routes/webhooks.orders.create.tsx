@@ -9,6 +9,7 @@ import {
 } from "../lib/merge.server";
 import { gql } from "../lib/graphql.server";
 import { getSettings } from "../lib/settings.server";
+import { isOnboardingComplete } from "../lib/onboarding";
 
 // ── In-memory lock: prevents two concurrent webhook deliveries from merging
 // the same address+shipping group simultaneously. Keyed on the normalized
@@ -71,7 +72,9 @@ async function handleOrderCreated(admin: WebhookAdmin, shop: string, order: Reco
   // ── Opt-in: checked before idempotency so a disabled store never records an
   // ── entry, allowing future deliveries to be processed once enabled.
   const settings = await getSettings(shop);
-  if (!settings.autoMergeEnabled) {
+  // Merging only runs after setup is complete (which is also where it is
+  // first turned on) and while the merchant has it on.
+  if (!settings.autoMergeEnabled || !isOnboardingComplete(settings)) {
     console.log(`[orders/create] Auto-merge is not enabled for ${shop} — skipping.`);
     return;
   }
