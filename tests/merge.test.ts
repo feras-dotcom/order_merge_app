@@ -316,8 +316,25 @@ describe("executeMerge — fulfillment location rule", () => {
     const ctx = setup(orders);
     ctx.shopify.activeLocations = 4;
     ctx.shopify.fulfillmentOrdersScope = scope;
+    ctx.shopify.locationsScope = scope;
     return ctx;
   }
+
+  it("fulfillment orders granted but read_locations missing: skipped with Shopify's reason (live regression)", async () => {
+    const { shopify, journal, deps } = multiLocation();
+    shopify.locationsScope = false;
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.outcome).toBe("skipped");
+    expect(result.reason).toContain("read_locations");
+    expect(noWrites(shopify)).toBe(true);
+    expect(journal.ops.size).toBe(0);
+  });
+
+  it("single-location shop with only the fulfillment-orders scope: falls back and still merges", async () => {
+    const { shopify, deps } = setup();
+    shopify.fulfillmentOrdersScope = true;
+    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("merged");
+  });
 
   it("multi-location shop: merges when every item of both orders is at the same location, anchoring added items there", async () => {
     const { shopify, deps } = multiLocation([makeOrder(1, { location: LOC_B }), makeOrder(2, { location: LOC_B })]);
@@ -452,6 +469,7 @@ describe("executeMerge — fulfillment location rule", () => {
       makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [item], { status: "SCHEDULED" })] }),
     ]);
     shopify.fulfillmentOrdersScope = true;
+    shopify.locationsScope = true;
     expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("skipped");
   });
 

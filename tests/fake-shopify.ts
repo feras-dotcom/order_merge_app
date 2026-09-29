@@ -110,6 +110,9 @@ export class FakeShopify {
   activeLocations = 1;
   /** Whether the optional read_merchant_managed_fulfillment_orders scope is granted. */
   fulfillmentOrdersScope = false;
+  /** Whether the optional read_locations scope is granted. Without it Shopify
+   *  denies assignedLocation.location even when fulfillment orders are readable. */
+  locationsScope = false;
   /** locationId passed to each orderEditAddVariant call. */
   addVariantLocations: (string | null | undefined)[] = [];
   calls: string[] = [];
@@ -177,6 +180,19 @@ export class FakeShopify {
         return {
           errors: [{ message: "Access denied for fulfillmentOrders field.", extensions: { code: "ACCESS_DENIED" } }],
           data: { order: null },
+        };
+      }
+      if (!this.locationsScope) {
+        // Exact shape observed live on ordermergetest2 with only the first scope granted.
+        return {
+          errors: [
+            {
+              message:
+                "Access denied for location field. Required access: `read_locations` access scope, `read_inventory` access scope or `read_markets_home` access scope.",
+              extensions: { code: "ACCESS_DENIED" },
+              path: ["order", "fulfillmentOrders", "nodes", 0, "assignedLocation", "location"],
+            },
+          ],
         };
       }
       const o = this.orders.get(id);

@@ -266,11 +266,12 @@ type LocationDecision = { ok: true; locationId: string | null } | { ok: false; r
 
 /**
  * Location rule.
- *   • With the optional read_merchant_managed_fulfillment_orders scope: every
+ *   • With the optional location scopes (read_merchant_managed_fulfillment_orders
+ *     and read_locations, which gates assignedLocation.location.id): every
  *     open fulfillment order of every order must be untouched and assigned to
  *     one and the same location, and must account for every unfulfilled unit
  *     (see evaluateFulfillmentLocation). Applies to single-location shops too.
- *   • Without it: only shops with exactly one active location qualify.
+ *   • Without them: only shops with exactly one active location qualify.
  * Anything that cannot be verified is skipped.
  */
 async function resolveMergeLocation(
@@ -279,10 +280,12 @@ async function resolveMergeLocation(
   lineItems: Map<string, MergeLineItem[]>,
 ): Promise<LocationDecision> {
   let fulfillmentOrders: Map<string, OrderFulfillmentOrders> | null = null;
+  let denied = "";
   try {
     fulfillmentOrders = await fetchFulfillmentOrdersById(admin, orders);
-  } catch (err) {
+  } catch (err: any) {
     if (!isAccessDenied(err)) throw err;
+    denied = err.message;
   }
 
   if (fulfillmentOrders) {
@@ -293,8 +296,8 @@ async function resolveMergeLocation(
   if ((await countActiveLocations(admin)) === 1) return { ok: true, locationId: null };
   return {
     ok: false,
-    reason:
-      "Shop has more than one active location and MergeShip has not been allowed to read fulfillment locations (grant it in Settings).",
+    // Include Shopify's message: it names the exact missing scope.
+    reason: `Shop has more than one active location and MergeShip cannot read fulfillment locations (allow location access in Settings). ${denied}`,
   };
 }
 

@@ -171,9 +171,10 @@ export function lineItemIneligibility(
 
 // ── Fulfillment location ──────────────────────────────────────────────────────
 
-/** Optional scope (shopify.app.toml) a multi-location shop grants from
- *  Settings so fulfillment-order locations can be verified. */
-export const FULFILLMENT_ORDERS_SCOPE = "read_merchant_managed_fulfillment_orders";
+/** Optional scopes (shopify.app.toml) a multi-location shop grants together
+ *  from Settings: fulfillment orders, plus read_locations because
+ *  FulfillmentOrder.assignedLocation.location.id is gated by it. */
+export const LOCATION_SCOPES = ["read_merchant_managed_fulfillment_orders", "read_locations"];
 
 export interface FulfillmentOrderInfo {
   status: string;
