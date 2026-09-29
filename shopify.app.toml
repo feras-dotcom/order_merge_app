@@ -8,6 +8,9 @@ name = "MergeShip"
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "read_customers,write_order_edits,write_orders,write_products"
+# Requested from Settings only by multi-location stores, so MergeShip can
+# verify both orders are assigned to the same fulfillment location.
+optional_scopes = [ "read_merchant_managed_fulfillment_orders" ]
 
 [webhooks]
 api_version = "2026-10"

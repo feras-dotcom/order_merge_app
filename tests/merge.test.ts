@@ -3,6 +3,9 @@ import { executeMerge, resumeIncompleteMerges, REVIEW_TAG } from "../app/lib/mer
 import {
   advance,
   FakeShopify,
+  LOC_A,
+  LOC_B,
+  makeFulfillmentOrder,
   makeLineItem,
   makeOrder,
   MemoryJournal,
@@ -305,5 +308,171 @@ describe("executeMerge — three orders", () => {
     expect(shopify.order(2).cancelCount).toBe(1);
     expect(shopify.order(3).cancelCount).toBe(1); // the rejected request never reached Shopify
     expect(journal.history).toHaveLength(2);
+  });
+});
+
+describe("executeMerge — fulfillment location rule", () => {
+  function multiLocation(orders = [makeOrder(1), makeOrder(2)], scope = true) {
+    const ctx = setup(orders);
+    ctx.shopify.activeLocations = 4;
+    ctx.shopify.fulfillmentOrdersScope = scope;
+    return ctx;
+  }
+
+  it("multi-location shop: merges when every item of both orders is at the same location, anchoring added items there", async () => {
+    const { shopify, deps } = multiLocation([makeOrder(1, { location: LOC_B }), makeOrder(2, { location: LOC_B })]);
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.outcome).toBe("merged");
+    expect(shopify.addVariantLocations).toEqual([LOC_B]);
+    expect(shopify.mutationCalls("MergeLocationCount")).toBe(0);
+  });
+
+  it("multi-location shop without the optional scope: skipped, nothing changed", async () => {
+    const { shopify, journal, deps } = multiLocation(undefined, false);
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.outcome).toBe("skipped");
+    expect(result.reason).toContain("Settings");
+    expect(noWrites(shopify)).toBe(true);
+    expect(journal.ops.size).toBe(0);
+  });
+
+  it("single-location shop without the optional scope: still merges (existing behaviour)", async () => {
+    const { shopify, deps } = setup();
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.outcome).toBe("merged");
+    expect(shopify.addVariantLocations).toEqual([null]);
+  });
+
+  const skipCases: [string, () => ReturnType<typeof makeOrder>[]][] = [
+    ["orders at different locations", () => [makeOrder(1, { location: LOC_A }), makeOrder(2, { location: LOC_B })]],
+    [
+      "one order split across two locations",
+      () => {
+        const items = [makeLineItem(), makeLineItem()];
+        return [
+          makeOrder(1),
+          makeOrder(2, {
+            lineItems: items,
+            fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [items[0]]), makeFulfillmentOrder(LOC_B, [items[1]])],
+          }),
+        ];
+      },
+    ],
+    [
+      "units routed to a fulfillment service (invisible to the scope)",
+      () => {
+        const item = makeLineItem({ quantity: 2, currentQuantity: 2, unfulfilledQuantity: 2 });
+        return [
+          makeOrder(1),
+          makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [{ id: item.id, currentQuantity: 1 }])] }),
+        ];
+      },
+    ],
+    [
+      "an order with no visible fulfillment orders",
+      () => [makeOrder(1), makeOrder(2, { fulfillmentOrders: [] })],
+    ],
+    [
+      "fulfillment order on hold",
+      () => {
+        const item = makeLineItem();
+        return [
+          makeOrder(1),
+          makeOrder(2, {
+            lineItems: [item],
+            fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [item], { status: "ON_HOLD", fulfillmentHolds: [{ reason: "OTHER" }] })],
+          }),
+        ];
+      },
+    ],
+    [
+      "fulfillment order with a hold but still OPEN",
+      () => {
+        const item = makeLineItem();
+        return [
+          makeOrder(1),
+          makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [item], { fulfillmentHolds: [{ reason: "OTHER" }] })] }),
+        ];
+      },
+    ],
+    [
+      "fulfillment request already submitted",
+      () => {
+        const item = makeLineItem();
+        return [
+          makeOrder(1),
+          makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [item], { requestStatus: "SUBMITTED" })] }),
+        ];
+      },
+    ],
+    [
+      "scheduled (pre-order) fulfillment",
+      () => {
+        const item = makeLineItem();
+        return [
+          makeOrder(1),
+          makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [item], { status: "SCHEDULED" })] }),
+        ];
+      },
+    ],
+    [
+      "fulfillment order without an assigned location",
+      () => {
+        const item = makeLineItem();
+        return [makeOrder(1), makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(null, [item])] })];
+      },
+    ],
+  ];
+
+  it.each(skipCases)("skips: %s", async (_label, build) => {
+    const { shopify, journal, deps } = multiLocation(build());
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.outcome).toBe("skipped");
+    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(noWrites(shopify)).toBe(true);
+    expect(journal.ops.size).toBe(0);
+  });
+
+  it("ignores closed/cancelled fulfillment orders when the open ones match", async () => {
+    const item = makeLineItem();
+    const { shopify, deps } = multiLocation([
+      makeOrder(1),
+      makeOrder(2, {
+        lineItems: [item],
+        fulfillmentOrders: [makeFulfillmentOrder(LOC_B, [], { status: "CLOSED" }), makeFulfillmentOrder(LOC_A, [item])],
+      }),
+    ]);
+    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("merged");
+  });
+
+  it("the stricter rule also applies to single-location shops once the scope is granted", async () => {
+    const item = makeLineItem();
+    const { shopify, deps } = setup([
+      makeOrder(1),
+      makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [item], { status: "SCHEDULED" })] }),
+    ]);
+    shopify.fulfillmentOrdersScope = true;
+    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("skipped");
+  });
+
+  it("does not commit if the location changes while the edit is being built", async () => {
+    const { shopify, journal, deps } = multiLocation();
+    shopify.on("MergeEditDiscount", () => {
+      shopify.order(2).location = LOC_B;
+      return undefined;
+    });
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.outcome).toBe("skipped");
+    expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(journal.ops.size).toBe(0);
+  });
+
+  it("fails safely (no writes) when fulfillment orders can't be loaded for another reason", async () => {
+    const { shopify, deps } = multiLocation();
+    shopify.on("MergeFulfillmentOrders", () => topLevelError("Throttled"));
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.outcome).toBe("failed");
+    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(noWrites(shopify)).toBe(true);
   });
 });

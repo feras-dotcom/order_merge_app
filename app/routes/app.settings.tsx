@@ -5,6 +5,7 @@ import {
   useLoaderData,
   useNavigate,
   useOutletContext,
+  useRevalidator,
 } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -26,15 +27,23 @@ import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { getSettings, upsertSettings } from "../lib/settings.server";
 import { gql } from "../lib/graphql.server";
+import { FULFILLMENT_ORDERS_SCOPE } from "../lib/eligibility";
 
 // ── Loader ────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { admin, session, scopes } = await authenticate.admin(request);
   const settings = await getSettings(session.shop);
 
-  // MergeShip only merges in single-location shops for now; tell the merchant
-  // up front if theirs will never qualify.
+  // Multi-location shops need the optional fulfillment-orders scope so
+  // MergeShip can verify both orders ship from the same location.
+  let locationScopeGranted = false;
+  try {
+    locationScopeGranted = (await scopes.query()).granted.includes(FULFILLMENT_ORDERS_SCOPE);
+  } catch (err: any) {
+    console.warn(`[settings] Could not query scopes for ${session.shop}: ${err?.message}`);
+  }
+
   let activeLocationCount: number | null = null;
   try {
     const result = await gql<{ count: number }>(
@@ -60,6 +69,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       shippingCostSavings: settings.shippingCostSavings,
     },
     activeLocationCount,
+    locationScopeGranted,
     shopHandle: session.shop.replace(".myshopify.com", ""),
     appHandle: process.env.SHOPIFY_APP_HANDLE || "",
   });
@@ -136,9 +146,9 @@ const SAFETY_RULES = [
       "Orders containing gift cards, subscriptions, bundles, items with custom properties, custom or deleted products, or items that don't need shipping are left untouched.",
   },
   {
-    title: "Single-location stores only",
+    title: "Same fulfillment location",
     description:
-      "Merging currently runs only in stores with one active location, so combined items always ship from the same place.",
+      "Orders merge only when every item in every order is assigned to the same fulfillment location and none of it is on hold, scheduled or sent to a fulfillment service. If MergeShip can't confirm this, the orders are left untouched.",
   },
 ];
 
@@ -149,8 +159,9 @@ const WINDOW_OPTIONS = [
 ];
 
 export default function SettingsPage() {
-  const { settings, activeLocationCount, shopHandle, appHandle } =
+  const { settings, activeLocationCount, locationScopeGranted, shopHandle, appHandle } =
     useLoaderData<typeof loader>();
+  const revalidator = useRevalidator();
   const { planHandle } = useOutletContext<{ planHandle: string | null }>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
@@ -166,6 +177,22 @@ export default function SettingsPage() {
 
   const turningOn = autoMergeEnabled && !settings.autoMergeEnabled;
   const multiLocation = activeLocationCount !== null && activeLocationCount > 1;
+
+  // Opens Shopify's permission modal for the optional scope, then reloads the
+  // loader data so the banner reflects the merchant's choice.
+  const [requestingScope, setRequestingScope] = useState(false);
+  const requestLocationScope = async () => {
+    setRequestingScope(true);
+    try {
+      const response = await shopify.scopes.request([FULFILLMENT_ORDERS_SCOPE]);
+      if (response.result === "granted-all") shopify.toast.show("Location access allowed");
+      revalidator.revalidate();
+    } catch {
+      shopify.toast.show("Could not request location access", { isError: true });
+    } finally {
+      setRequestingScope(false);
+    }
+  };
 
   // Show a toast once per completed save — the ref guard prevents re-firing
   // if the component re-renders while fetcher.data is unchanged.
@@ -198,13 +225,31 @@ export default function SettingsPage() {
     >
       <TitleBar title="Settings" />
       <BlockStack gap="500">
-        {multiLocation && (
-          <Banner tone="warning" title="Automatic merging won't run in this store yet">
+        {multiLocation && !locationScopeGranted && (
+          <Banner
+            tone="warning"
+            title="Allow MergeShip to check fulfillment locations"
+            action={{
+              content: "Allow location access",
+              loading: requestingScope,
+              onAction: requestLocationScope,
+            }}
+          >
             <p>
-              Your store has {activeLocationCount} active locations. MergeShip
-              currently merges orders only in stores with a single active
-              location, so no orders will be merged even if automatic merging
-              is turned on.
+              Your store has {activeLocationCount} active locations. To merge
+              orders safely, MergeShip needs read-only access to fulfillment
+              orders so it can confirm both orders ship from the same location.
+              Until you allow this, no orders will be merged in this store.
+            </p>
+          </Banner>
+        )}
+
+        {multiLocation && locationScopeGranted && (
+          <Banner tone="info" title="Multi-location merging is on">
+            <p>
+              MergeShip merges orders only when all of their items are assigned
+              to the same fulfillment location. Orders split across locations,
+              or handled by a fulfillment service, are left untouched.
             </p>
           </Banner>
         )}

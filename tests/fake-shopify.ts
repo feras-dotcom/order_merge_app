@@ -2,7 +2,7 @@
 // covering exactly the operations merge.server.ts performs. Each operation is
 // dispatched by its GraphQL operation name; tests inject failures per name.
 
-import type { MergeLineItem, OrderState } from "../app/lib/eligibility";
+import type { FulfillmentOrderInfo, MergeLineItem, OrderState } from "../app/lib/eligibility";
 import type {
   MergeHistoryEntry,
   MergeJournal,
@@ -16,6 +16,31 @@ export interface FakeOrder extends OrderState {
   cancelDelayReads?: number;
   pendingCancelReads?: number | null;
   cancelCount: number;
+  /** Explicit fulfillment orders; by default one OPEN fulfillment order at
+   *  `location` covering every line item. */
+  fulfillmentOrders?: FulfillmentOrderInfo[];
+  location?: string;
+}
+
+export const LOC_A = "gid://shopify/Location/1";
+export const LOC_B = "gid://shopify/Location/2";
+
+export function makeFulfillmentOrder(
+  location: string | null,
+  items: { id?: string; currentQuantity: number }[],
+  overrides: Partial<FulfillmentOrderInfo> = {},
+): FulfillmentOrderInfo {
+  return {
+    status: "OPEN",
+    requestStatus: "UNSUBMITTED",
+    fulfillmentHolds: [],
+    assignedLocation: { location: location ? { id: location } : null },
+    lineItems: {
+      nodes: items.map((i) => ({ remainingQuantity: i.currentQuantity, lineItem: { id: i.id! } })),
+      pageInfo: { hasNextPage: false },
+    },
+    ...overrides,
+  };
 }
 
 type Handler = (vars: any) => any;
@@ -83,6 +108,10 @@ export function makeOrder(
 export class FakeShopify {
   orders = new Map<string, FakeOrder>();
   activeLocations = 1;
+  /** Whether the optional read_merchant_managed_fulfillment_orders scope is granted. */
+  fulfillmentOrdersScope = false;
+  /** locationId passed to each orderEditAddVariant call. */
+  addVariantLocations: (string | null | undefined)[] = [];
   calls: string[] = [];
   interceptors = new Map<string, Interceptor>();
   private callCounts = new Map<string, number>();
@@ -117,8 +146,12 @@ export class FakeShopify {
         o.pendingCancelReads -= 1;
       }
     }
-    const { lineItems, cancelDelayReads, pendingCancelReads, cancelCount, ...state } = o;
+    const { lineItems, cancelDelayReads, pendingCancelReads, cancelCount, fulfillmentOrders, location, ...state } = o;
     return structuredClone(state);
+  }
+
+  fulfillmentOrdersOf(o: FakeOrder): FulfillmentOrderInfo[] {
+    return o.fulfillmentOrders ?? [makeFulfillmentOrder(o.location ?? LOC_A, o.lineItems)];
   }
 
   private handlers: Record<string, Handler> = {
@@ -139,12 +172,32 @@ export class FakeShopify {
         },
       };
     },
+    MergeFulfillmentOrders: ({ id }) => {
+      if (!this.fulfillmentOrdersScope) {
+        return {
+          errors: [{ message: "Access denied for fulfillmentOrders field.", extensions: { code: "ACCESS_DENIED" } }],
+          data: { order: null },
+        };
+      }
+      const o = this.orders.get(id);
+      return {
+        data: {
+          order: o && {
+            fulfillmentOrders: {
+              nodes: structuredClone(this.fulfillmentOrdersOf(o)),
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      };
+    },
     MergeEditBegin: ({ id }) => {
       const calcId = `gid://shopify/CalculatedOrder/${this.editSeq++}`;
       this.edits.set(calcId, { orderId: id, added: [] });
       return { data: { orderEditBegin: { calculatedOrder: { id: calcId }, userErrors: [] } } };
     },
-    MergeEditAddVariant: ({ id, variantId, quantity }) => {
+    MergeEditAddVariant: ({ id, variantId, quantity, locationId }) => {
+      this.addVariantLocations.push(locationId);
       const edit = this.edits.get(id)!;
       const item = makeLineItem({ variant: { id: variantId }, quantity, currentQuantity: quantity, unfulfilledQuantity: quantity });
       edit.added.push(item);
