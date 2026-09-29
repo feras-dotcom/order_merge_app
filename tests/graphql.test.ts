@@ -1,0 +1,61 @@
+import { describe, expect, it } from "vitest";
+import { gql, ShopifyGraphqlError } from "../app/lib/graphql.server";
+
+const client = (body: unknown) => ({
+  graphql: async () => new Response(JSON.stringify(body)),
+});
+
+async function capture(p: Promise<unknown>) {
+  try {
+    await p;
+  } catch (err) {
+    return err as ShopifyGraphqlError;
+  }
+  throw new Error("expected gql to throw");
+}
+
+describe("gql", () => {
+  it("returns the payload on success", async () => {
+    const payload = { order: { id: "1" }, userErrors: [] };
+    await expect(gql(client({ data: { orderUpdate: payload } }), "t", "q", {}, "orderUpdate")).resolves.toEqual(payload);
+  });
+
+  it("throws (outcome unknown) on top-level GraphQL errors even when data is present", async () => {
+    const err = await capture(
+      gql(client({ errors: [{ message: "Access denied" }], data: { orderUpdate: { userErrors: [] } } }), "t", "q", {}, "orderUpdate"),
+    );
+    expect(err).toBeInstanceOf(ShopifyGraphqlError);
+    expect(err.rejected).toBe(false);
+    expect(err.message).toContain("Access denied");
+  });
+
+  it("throws (rejected) on userErrors", async () => {
+    const err = await capture(
+      gql(client({ data: { orderUpdate: { userErrors: [{ message: "Invalid" }] } } }), "t", "q", {}, "orderUpdate"),
+    );
+    expect(err.rejected).toBe(true);
+  });
+
+  it("uses a custom userErrors key", async () => {
+    const err = await capture(
+      gql(client({ data: { orderCancel: { orderCancelUserErrors: [{ message: "No" }] } } }), "t", "q", {}, "orderCancel", "orderCancelUserErrors"),
+    );
+    expect(err.rejected).toBe(true);
+  });
+
+  it("throws when the payload is missing", async () => {
+    const err = await capture(gql(client({ data: {} }), "t", "q", {}, "orderUpdate"));
+    expect(err.rejected).toBe(false);
+  });
+
+  it("throws (outcome unknown) when the client throws", async () => {
+    const failing = {
+      graphql: async () => {
+        throw new Error("socket hang up");
+      },
+    };
+    const err = await capture(gql(failing, "t", "q", {}, "orderUpdate"));
+    expect(err.rejected).toBe(false);
+    expect(err.message).toContain("socket hang up");
+  });
+});

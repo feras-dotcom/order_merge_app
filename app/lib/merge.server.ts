@@ -1,660 +1,734 @@
-// ── Merge utilities ───────────────────────────────────────────────────────────
-// Grouping rules and merge execution used by the background webhook handler
+// ── Merge execution ───────────────────────────────────────────────────────────
+// Merge execution and recovery used by the background webhook handler
 // (webhooks.orders.create.tsx). Successful consolidations are recorded in the
 // MergeRecord table, which feeds the dashboard (app._index.tsx).
+//
+// Safety model
+//   • Nothing is changed until every eligibility rule passes on freshly loaded
+//     state (see eligibility.ts), the shop has exactly one active location, and
+//     the state is re-verified immediately before the commit.
+//   • Every Shopify call goes through gql(), which fails on transport errors,
+//     top-level GraphQL errors, missing payloads and userErrors.
+//   • A MergeOperation journal row is written BEFORE the primary's order edit
+//     is committed. After the commit, each secondary is cancelled and the
+//     cancellation is confirmed by reading the order back (orderCancel is
+//     asynchronous). Only when every secondary is confirmed cancelled is the
+//     merge reported as successful.
+//   • Interrupted merges are resumed by resumeIncompleteMerges(). When the
+//     outcome cannot be determined, the operation is marked NEEDS_REVIEW, the
+//     orders are tagged/annotated in Shopify, and they are excluded from every
+//     future merge.
 
-import db from "../db.server";
+import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
+import {
+  evaluateMergeGroup,
+  type MergeLineItem,
+  type OrderState,
+} from "./eligibility";
+import {
+  prismaMergeJournal,
+  type JournalSecondary,
+  type MergeJournal,
+  type MergeOperationRecord,
+} from "./merge-journal.server";
 
-// ── Address normalization ─────────────────────────────────────────────────────
+export {
+  buildAddressKey,
+  buildGroupKey,
+  normalizeAddressLine,
+  normalizeShippingTitle,
+} from "./eligibility";
+export type { AdminClient } from "./graphql.server";
 
-export const normalizeAddressLine = (line: string | null | undefined): string =>
-  line
-    ?.toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
-    .replace(/\s+/g, " ")
-    .trim() ?? "";
+export const REVIEW_TAG = "MergeShip-Review";
 
-/** Trims, collapses whitespace and lowercases so "Standard Shipping " and
- *  "standard  shipping" compare equal. */
-export const normalizeShippingTitle = (title: string | null | undefined): string =>
-  title?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+// ── Dependencies (injectable for tests) ───────────────────────────────────────
 
-export interface AddressFields {
-  address1?: string | null;
-  address2?: string | null;
-  city?: string | null;
-  provinceCode?: string | null;
-  zip?: string | null;
-  countryCodeV2?: string | null;
+export interface MergeDeps {
+  journal: MergeJournal;
+  sleep: (ms: number) => Promise<void>;
+  now: () => Date;
+  /** Reads of the secondary after orderCancel before giving up for now. */
+  cancelPollAttempts: number;
+  cancelPollIntervalMs: number;
+  /** Rejected cancellations tolerated before escalating to NEEDS_REVIEW. */
+  maxCancelAttempts: number;
+  /** A PENDING_COMMIT op is only reconciled once it is at least this old, so
+   *  a slow commit that is still being applied is never misjudged. */
+  pendingCommitGraceMs: number;
+  /** How long an accepted orderCancel is awaited before it is re-issued. */
+  cancelRequestGraceMs: number;
 }
 
-/**
- * Returns a key of (customer ID) + NUL + (normalized address). Orders from
- * different customers can never share a key, even at the same address.
- * Returns null when the order has no customer or no usable address.
- */
-export function buildAddressKey(
-  customerId: string | null | undefined,
-  address: AddressFields | null | undefined,
-): string | null {
-  if (!customerId || !address) return null;
-  const normalizedAddress = [
-    address.address1,
-    address.address2,
-    address.city,
-    address.provinceCode,
-    address.zip,
-    address.countryCodeV2,
-  ]
-    .map(normalizeAddressLine)
-    .filter(Boolean)
-    .join("|");
-  if (!normalizedAddress) return null;
-  // \0 is a safe separator — it cannot appear in IDs, address text or titles
-  return `${customerId}\0${normalizedAddress}`;
-}
+export const defaultMergeDeps = (): MergeDeps => ({
+  journal: prismaMergeJournal,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now: () => new Date(),
+  cancelPollAttempts: 6,
+  cancelPollIntervalMs: 1500,
+  maxCancelAttempts: 3,
+  pendingCommitGraceMs: 5 * 60 * 1000,
+  cancelRequestGraceMs: 10 * 60 * 1000,
+});
 
-/**
- * Returns a composite key of (customer ID) + (normalized address) +
- * (normalized shipping title). Baking the shipping method into the key ensures
- * different methods at the same address form independent buckets instead of
- * disqualifying each other. Returns null when the order has no customer or no
- * usable address.
- */
-export function buildGroupKey(
-  customerId: string | null | undefined,
-  address: AddressFields | null | undefined,
-  shippingTitle: string | null | undefined,
-): string | null {
-  const addressKey = buildAddressKey(customerId, address);
-  return addressKey && `${addressKey}\0${normalizeShippingTitle(shippingTitle)}`;
-}
+// ── Result ────────────────────────────────────────────────────────────────────
 
-export const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-
-/** Shopify tags are case-insensitive; keep the first-seen casing of each. */
-function uniqueTags(tags: string[]): string[] {
-  const tagMap = new Map<string, string>();
-  for (const tag of tags) {
-    const trimmed = tag.trim();
-    if (trimmed && !tagMap.has(trimmed.toLowerCase())) {
-      tagMap.set(trimmed.toLowerCase(), trimmed);
-    }
-  }
-  return [...tagMap.values()];
-}
-
-// ── Merge result type ─────────────────────────────────────────────────────────
+export type MergeOutcome =
+  /** Every secondary is confirmed cancelled; the merge is complete. */
+  | "merged"
+  /** Not eligible; nothing was changed. */
+  | "skipped"
+  /** Failed before the commit; nothing was changed. */
+  | "failed"
+  /** Committed (or possibly committed) but not yet confirmed complete. The
+   *  journal keeps the orders blocked and the merge is resumed later. */
+  | "in_progress"
+  /** Outcome could not be confirmed; orders are flagged for the merchant. */
+  | "needs_review";
 
 export interface MergeResult {
-  success: boolean;
-  primaryOrderId?: string;
+  outcome: MergeOutcome;
+  reason?: string;
   primaryName?: string;
   mergedCount?: number;
-  cancelResults?: { name: string; cancelled: boolean; error?: string }[];
-  error?: string;
+  operationId?: string;
 }
 
-type AdminClient = {
-  graphql: (
-    query: string,
-    options?: { variables?: Record<string, unknown> },
-  ) => Promise<Response>;
-};
+// ── Shopify reads ─────────────────────────────────────────────────────────────
 
-interface MergeLineItem {
-  name: string;
-  currentQuantity: number;
-  variant: { id: string } | null;
-  customAttributes: { key: string; value: string | null }[];
+const ORDER_STATE_QUERY = `#graphql
+  query MergeOrderState($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Order {
+        id
+        name
+        createdAt
+        cancelledAt
+        closed
+        displayFinancialStatus
+        displayFulfillmentStatus
+        riskLevel
+        currencyCode
+        presentmentCurrencyCode
+        note
+        tags
+        customer { id }
+        shippingAddress {
+          firstName
+          lastName
+          company
+          address1
+          address2
+          city
+          provinceCode
+          zip
+          countryCodeV2
+        }
+        shippingLines(first: 5) { nodes { title } }
+        fulfillments(first: 5) { id }
+      }
+    }
+  }`;
+
+async function fetchOrderStates(admin: AdminClient, ids: string[]): Promise<OrderState[]> {
+  const nodes = await gql<any[]>(admin, "Load orders", ORDER_STATE_QUERY, { ids }, "nodes", null);
+  const byId = new Map(nodes.filter((n) => n?.id).map((n) => [n.id as string, n as OrderState]));
+  const orders = ids.map((id) => byId.get(id));
+  if (orders.some((o) => !o)) {
+    throw new ShopifyGraphqlError("Could not load every order involved in the merge.", false);
+  }
+  return orders as OrderState[];
 }
 
-// ── Line item loading (paginated — never truncates) ───────────────────────────
+const LINE_ITEMS_QUERY = `#graphql
+  query MergeOrderLineItems($id: ID!, $after: String) {
+    order(id: $id) {
+      lineItems(first: 100, after: $after) {
+        nodes {
+          id
+          name
+          quantity
+          currentQuantity
+          unfulfilledQuantity
+          nonFulfillableQuantity
+          requiresShipping
+          isGiftCard
+          variant { id }
+          customAttributes { key value }
+          sellingPlan { name }
+          lineItemGroup { id }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }`;
 
-async function fetchAllLineItems(
-  admin: AdminClient,
-  orderId: string,
-): Promise<MergeLineItem[]> {
+/** Every line item of the order, paginated — never truncated. Includes items
+ *  whose currentQuantity is 0 (removed), so the count is a stable fingerprint
+ *  of the order's line-item list. */
+async function fetchAllLineItems(admin: AdminClient, orderId: string): Promise<MergeLineItem[]> {
   const items: MergeLineItem[] = [];
   let after: string | null = null;
   do {
-    const res = await admin.graphql(
-      `#graphql
-        query OrderLineItems($id: ID!, $after: String) {
-          order(id: $id) {
-            lineItems(first: 100, after: $after) {
-              nodes {
-                name
-                currentQuantity
-                variant { id }
-                customAttributes { key value }
-              }
-              pageInfo { hasNextPage endCursor }
-            }
-          }
-        }`,
-      { variables: { id: orderId, after } },
-    );
-    const connection: any = (await res.json()).data?.order?.lineItems;
-    if (!connection) throw new Error(`Could not load line items for ${orderId}.`);
+    const order: any = await gql(admin, "Load line items", LINE_ITEMS_QUERY, { id: orderId, after }, "order", null);
+    const connection = order.lineItems;
+    if (!connection?.nodes || !connection.pageInfo) {
+      throw new ShopifyGraphqlError(`Could not load line items for ${orderId}.`, false);
+    }
     items.push(...connection.nodes);
     after = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
   } while (after);
   return items;
 }
 
-// ── Core merge execution ──────────────────────────────────────────────────────
+async function fetchLineItemsById(admin: AdminClient, orders: OrderState[]) {
+  const map = new Map<string, MergeLineItem[]>();
+  for (const order of orders) map.set(order.id, await fetchAllLineItems(admin, order.id));
+  return map;
+}
 
 /**
- * Executes a full merge of the supplied order IDs:
- *   1. Fetches order details and ALL line items (paginated) for every order.
- *   2. Sorts oldest-first; the oldest becomes the primary.
- *   3. Guards (any failure aborts before anything is changed):
- *      • every order is not cancelled, PAID and UNFULFILLED;
- *      • every order has the same customer, address and shipping method;
- *      • every order has the same shop currency and presentment currency;
- *      • no line item has custom properties (Shopify's order-edit API cannot
- *        carry these over);
- *      • every secondary line item still on the order has a variant, so it can
- *        be transferred.
- *   4. Opens an order-edit session on the primary.
- *   5. Adds every secondary line item to the primary and applies a 100 %
- *      discount so the primary balance does not increase. Any failure here
- *      abandons the uncommitted edit, so no item is ever dropped.
- *   6. Commits the edit silently.
- *   7. Cancels every secondary with reason OTHER, restock, no refund, then
- *      closes it.
- *   8. Records every successfully cancelled secondary in MergeRecord
- *      (Consolidation History). A database failure here is logged only; it
- *      never affects the merge that already happened in Shopify.
- *   9. Appends any secondary customer notes to the primary note and merges
- *      all tags (plus "Consolidated") into a unique list on the primary.
- *      Each cancelled secondary is tagged "Merged" and noted with the primary
- *      order it was consolidated into.
- *
- * @param admin  Shopify admin GraphQL client (from authenticate.admin or
- *               authenticate.webhook).
- * @param shop  Shop domain the orders belong to (used for history records).
- * @param orderIds  Array of Shopify Order GIDs to merge (minimum 2).
+ * Initial-launch location rule: merge only in shops with exactly one active
+ * location. With the app's current scopes MergeShip cannot read which location
+ * each order's items are assigned to, so any multi-location shop is skipped
+ * rather than risk combining items that ship from different places.
+ */
+async function hasSingleActiveLocation(admin: AdminClient): Promise<boolean> {
+  const result = await gql<{ count: number }>(
+    admin,
+    "Count locations",
+    `#graphql
+      query MergeLocationCount {
+        locationsCount(query: "active:true") { count }
+      }`,
+    {},
+    "locationsCount",
+    null,
+  );
+  return result.count === 1;
+}
+
+// ── Best-effort annotations (never affect merge correctness) ──────────────────
+
+function uniqueTags(tags: string[]): string[] {
+  const tagMap = new Map<string, string>();
+  for (const tag of tags) {
+    const trimmed = tag.trim();
+    if (trimmed && !tagMap.has(trimmed.toLowerCase())) tagMap.set(trimmed.toLowerCase(), trimmed);
+  }
+  return [...tagMap.values()];
+}
+
+async function annotateOrder(
+  admin: AdminClient,
+  order: Pick<OrderState, "id" | "name" | "note" | "tags">,
+  addTags: string[],
+  noteLines: string | string[] | null,
+): Promise<void> {
+  const existingNote = (order.note ?? "").trim();
+  const newLines = (Array.isArray(noteLines) ? noteLines : noteLines ? [noteLines] : []).filter(
+    (line) => line && !existingNote.includes(line),
+  );
+  try {
+    await gql(
+      admin,
+      `Annotate ${order.name}`,
+      `#graphql
+        mutation MergeAnnotateOrder($input: OrderInput!) {
+          orderUpdate(input: $input) {
+            order { id }
+            userErrors { field message }
+          }
+        }`,
+      {
+        input: {
+          id: order.id,
+          tags: uniqueTags([...(order.tags ?? []), ...addTags]),
+          ...(newLines.length && {
+            note: [existingNote, ...newLines].filter(Boolean).join("\n"),
+          }),
+        },
+      },
+      "orderUpdate",
+    );
+  } catch (err: any) {
+    console.warn(`[merge] Could not annotate ${order.name}: ${err?.message}`);
+  }
+}
+
+// ── Journal helpers ───────────────────────────────────────────────────────────
+
+const inFlight = new Set<string>();
+
+async function flagForReview(
+  admin: AdminClient,
+  op: MergeOperationRecord,
+  reason: string,
+  deps: MergeDeps,
+): Promise<MergeResult> {
+  console.error(`[merge] NEEDS REVIEW ${op.primaryOrderName} (${op.id}): ${reason}`);
+  await deps.journal.update(op.id, { status: "NEEDS_REVIEW", lastError: reason });
+  op.status = "NEEDS_REVIEW";
+
+  const pending = op.secondaries.filter((s) => !s.done);
+  try {
+    const states = await fetchOrderStates(admin, [op.primaryOrderId, ...pending.map((s) => s.id)]);
+    const [primary, ...secondaryStates] = states;
+    await annotateOrder(
+      admin,
+      primary,
+      [REVIEW_TAG],
+      `MergeShip: a merge into this order needs review — ${reason}`,
+    );
+    for (const secondary of secondaryStates) {
+      await annotateOrder(
+        admin,
+        secondary,
+        [REVIEW_TAG],
+        `MergeShip: items from this order may already have been added to ${op.primaryOrderName}. Do not fulfill this order until reviewed.`,
+      );
+    }
+  } catch (err: any) {
+    console.warn(`[merge] Could not flag orders for review on ${op.id}: ${err?.message}`);
+  }
+
+  return {
+    outcome: "needs_review",
+    reason,
+    primaryName: op.primaryOrderName,
+    operationId: op.id,
+  };
+}
+
+/**
+ * Determines whether a PENDING_COMMIT operation's order edit was applied by
+ * comparing the primary's line-item count with the journalled fingerprint.
+ * Each transferred item is added with allowDuplicates, so a committed edit
+ * adds exactly addedLineItemCount line items.
+ */
+async function reconcilePendingCommit(
+  admin: AdminClient,
+  op: MergeOperationRecord,
+  deps: MergeDeps,
+): Promise<"COMMITTED" | "ABANDONED" | "NEEDS_REVIEW"> {
+  const count = (await fetchAllLineItems(admin, op.primaryOrderId)).length;
+  if (count === op.primaryLineItemCountBefore) {
+    await deps.journal.update(op.id, { status: "ABANDONED", lastError: "Order edit was not committed." });
+    op.status = "ABANDONED";
+    return "ABANDONED";
+  }
+  if (count === op.primaryLineItemCountBefore + op.addedLineItemCount) {
+    await deps.journal.update(op.id, { status: "COMMITTED" });
+    op.status = "COMMITTED";
+    return "COMMITTED";
+  }
+  return "NEEDS_REVIEW";
+}
+
+/**
+ * Finishes a COMMITTED operation: cancels every remaining secondary, confirms
+ * each cancellation by reading the order back, records history, and marks the
+ * operation COMPLETED only when every secondary is confirmed.
+ */
+async function completeCommittedOperation(
+  admin: AdminClient,
+  op: MergeOperationRecord,
+  deps: MergeDeps,
+): Promise<MergeResult> {
+  const secondaries: JournalSecondary[] = op.secondaries.map((s) => ({ ...s }));
+
+  for (const secondary of secondaries) {
+    if (secondary.done) continue;
+
+    let [state] = await fetchOrderStates(admin, [secondary.id]);
+
+    if (!state.cancelledAt) {
+      // Its items are already on the primary. If it has started fulfilling in
+      // the meantime, cancelling could hide a shipment in progress — stop.
+      if (state.displayFulfillmentStatus !== "UNFULFILLED" || state.fulfillments.length > 0) {
+        return flagForReview(
+          admin,
+          { ...op, secondaries },
+          `${secondary.name} has fulfillment activity, but its items were already added to ${op.primaryOrderName}.`,
+          deps,
+        );
+      }
+
+      const requestedAt = secondary.cancelRequestedAt ? new Date(secondary.cancelRequestedAt).getTime() : null;
+      const awaitingEarlierRequest =
+        requestedAt !== null && deps.now().getTime() - requestedAt < deps.cancelRequestGraceMs;
+
+      if (!awaitingEarlierRequest) {
+        try {
+          await requestCancel(admin, secondary, op.primaryOrderName);
+          secondary.cancelRequestedAt = deps.now().toISOString();
+          await deps.journal.update(op.id, { secondaries });
+        } catch (err: any) {
+          op.attempts += 1;
+          const rejected = err instanceof ShopifyGraphqlError && err.rejected;
+          // Outcome unknown: treat as possibly accepted so it isn't re-issued
+          // until the grace period passes.
+          if (!rejected) secondary.cancelRequestedAt = deps.now().toISOString();
+          await deps.journal.update(op.id, {
+            attempts: op.attempts,
+            lastError: err?.message ?? String(err),
+            secondaries,
+          });
+          if (rejected) {
+            if (op.attempts >= deps.maxCancelAttempts) {
+              return flagForReview(admin, { ...op, secondaries }, `Shopify rejected cancelling ${secondary.name}: ${err.message}`, deps);
+            }
+            return inProgress(op, `Cancelling ${secondary.name} was rejected; will retry.`);
+          }
+          // Fall through and read the order back.
+        }
+      }
+
+      for (let i = 0; i < deps.cancelPollAttempts && !state.cancelledAt; i++) {
+        await deps.sleep(deps.cancelPollIntervalMs);
+        [state] = await fetchOrderStates(admin, [secondary.id]);
+      }
+      if (!state.cancelledAt) {
+        return inProgress(op, `Cancellation of ${secondary.name} is not yet confirmed.`);
+      }
+    }
+
+    // Confirmed cancelled: record history before marking done so a crash
+    // between the two only re-runs an idempotent insert.
+    await deps.journal.recordHistory({
+      shop: op.shop,
+      primaryOrderId: op.primaryOrderId,
+      primaryOrderName: op.primaryOrderName,
+      mergedOrderId: secondary.id,
+      mergedOrderName: secondary.name,
+      customerId: op.customerId,
+      itemsCombined: secondary.items,
+    });
+    secondary.done = true;
+    await deps.journal.update(op.id, { secondaries });
+    op.secondaries = secondaries;
+
+    await annotateOrder(admin, state, ["Merged"], `Consolidated into primary order ${op.primaryOrderName} by MergeShip`);
+    try {
+      await gql(
+        admin,
+        `Close ${secondary.name}`,
+        `#graphql
+          mutation MergeCloseSecondary($input: OrderCloseInput!) {
+            orderClose(input: $input) {
+              order { id }
+              userErrors { field message }
+            }
+          }`,
+        { input: { id: secondary.id } },
+        "orderClose",
+      );
+    } catch (err: any) {
+      // Cosmetic (Orders badge); the cancellation is already confirmed.
+      console.warn(`[merge] Could not close ${secondary.name}: ${err?.message}`);
+    }
+  }
+
+  // Carry the secondaries' customer notes and merchant tags to the primary —
+  // the order that is actually fulfilled. Lines MergeShip wrote are excluded.
+  const [primary, ...secondaryStates] = await fetchOrderStates(admin, [
+    op.primaryOrderId,
+    ...secondaries.map((s) => s.id),
+  ]);
+  const carriedNotes = secondaryStates.flatMap((s) =>
+    (s.note ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("MergeShip") && !line.startsWith("Consolidated into primary order"))
+      .map((line) => `Note from ${s.name}: ${line}`),
+  );
+  const carriedTags = secondaryStates
+    .flatMap((s) => s.tags ?? [])
+    .filter((t) => !["merged", REVIEW_TAG.toLowerCase()].includes(t.trim().toLowerCase()));
+  await annotateOrder(admin, primary, [...carriedTags, "Consolidated"], [
+    ...carriedNotes,
+    `MergeShip: merged items from ${secondaries.map((s) => s.name).join(", ")} (already paid; shipping was not refunded).`,
+  ]);
+  await deps.journal.update(op.id, { status: "COMPLETED", lastError: null });
+  op.status = "COMPLETED";
+  console.log(`[merge] Completed ${op.primaryOrderName} ← ${secondaries.map((s) => s.name).join(", ")}`);
+  return {
+    outcome: "merged",
+    primaryName: op.primaryOrderName,
+    mergedCount: secondaries.length,
+    operationId: op.id,
+  };
+}
+
+/** Requests cancellation (restock, no refund, no customer notification). */
+async function requestCancel(admin: AdminClient, secondary: JournalSecondary, primaryName: string) {
+  await gql(
+    admin,
+    `Cancel ${secondary.name}`,
+    `#graphql
+      mutation MergeCancelSecondary($orderId: ID!, $staffNote: String) {
+        orderCancel(
+          orderId: $orderId
+          reason: OTHER
+          notifyCustomer: false
+          restock: true
+          refund: false
+          staffNote: $staffNote
+        ) {
+          job { id }
+          orderCancelUserErrors { field message }
+        }
+      }`,
+    {
+      orderId: secondary.id,
+      staffNote: `Duplicate — merged into ${primaryName} by MergeShip. Items transferred; inventory restocked; not refunded.`,
+    },
+    "orderCancel",
+    "orderCancelUserErrors",
+  );
+}
+
+function inProgress(op: MergeOperationRecord, reason: string): MergeResult {
+  console.warn(`[merge] In progress ${op.primaryOrderName} (${op.id}): ${reason}`);
+  return { outcome: "in_progress", reason, primaryName: op.primaryOrderName, operationId: op.id };
+}
+
+// ── Resume ────────────────────────────────────────────────────────────────────
+
+/**
+ * Resumes every unfinished merge for the shop. Safe to call on every webhook
+ * and dashboard load: completed work is skipped and each step is idempotent.
+ */
+export async function resumeIncompleteMerges(
+  admin: AdminClient,
+  shop: string,
+  deps: MergeDeps = defaultMergeDeps(),
+): Promise<MergeResult[]> {
+  const results: MergeResult[] = [];
+  for (const op of await deps.journal.findUnfinished(shop)) {
+    if (inFlight.has(op.id)) continue;
+    if (
+      op.status === "PENDING_COMMIT" &&
+      deps.now().getTime() - op.updatedAt.getTime() < deps.pendingCommitGraceMs
+    ) {
+      continue;
+    }
+    inFlight.add(op.id);
+    try {
+      if (op.status === "PENDING_COMMIT") {
+        const state = await reconcilePendingCommit(admin, op, deps);
+        if (state === "ABANDONED") continue;
+        if (state === "NEEDS_REVIEW") {
+          results.push(
+            await flagForReview(admin, op, `Could not confirm whether the edit to ${op.primaryOrderName} was applied.`, deps),
+          );
+          continue;
+        }
+      }
+      results.push(await completeCommittedOperation(admin, op, deps));
+    } catch (err: any) {
+      console.error(`[merge] Resume of ${op.id} failed; will retry: ${err?.message}`);
+    } finally {
+      inFlight.delete(op.id);
+    }
+  }
+  return results;
+}
+
+// ── Execute ───────────────────────────────────────────────────────────────────
+
+const skip = (reason: string): MergeResult => {
+  console.log(`[merge] Skipped: ${reason}`);
+  return { outcome: "skipped", reason };
+};
+
+const fail = (reason: string): MergeResult => {
+  console.error(`[merge] Failed (no orders changed): ${reason}`);
+  return { outcome: "failed", reason };
+};
+
+/** Line-item fingerprint used to detect changes between checks and commit. */
+const fingerprint = (items: Map<string, MergeLineItem[]>) =>
+  JSON.stringify(
+    [...items.entries()].map(([id, list]) => [id, list.map((i) => [i.id, i.currentQuantity, i.unfulfilledQuantity])]),
+  );
+
+/**
+ * Merges the given orders: the oldest is the primary; every other order's
+ * items are added to it at a 100 % discount, then those orders are cancelled
+ * (restocked, not refunded, customer not notified).
  */
 export async function executeMerge(
   admin: AdminClient,
   shop: string,
   orderIds: string[],
+  deps: MergeDeps = defaultMergeDeps(),
 ): Promise<MergeResult> {
-  if (orderIds.length < 2) {
-    return { success: false, error: "At least two orders are required to merge." };
-  }
+  if (orderIds.length < 2) return skip("At least two orders are required to merge.");
 
-  // 1 ── Fetch order details ──────────────────────────────────────────────────
-  const detailsRes = await admin.graphql(
-    `#graphql
-      query OrderDetails($ids: [ID!]!) {
-        nodes(ids: $ids) {
-          ... on Order {
-            id
-            name
-            createdAt
-            cancelledAt
-            displayFinancialStatus
-            displayFulfillmentStatus
-            currencyCode
-            presentmentCurrencyCode
-            note
-            tags
-            customer { id }
-            shippingAddress {
-              address1
-              address2
-              city
-              provinceCode
-              zip
-              countryCodeV2
-            }
-            shippingLine { title }
-          }
-        }
-      }`,
-    { variables: { ids: orderIds } },
-  );
-  const detailsJson = await detailsRes.json();
-  const orders = (detailsJson.data?.nodes ?? []).filter(Boolean) as any[];
+  // 1 ── Never touch orders that belong to an unfinished or flagged merge ─────
+  const blocked = await deps.journal.findBlockingOrderIds(shop);
+  const blockedId = orderIds.find((id) => blocked.has(id));
+  if (blockedId) return skip(`Order ${blockedId} is part of an unfinished or flagged merge.`);
 
-  if (orders.length !== orderIds.length) {
-    return { success: false, error: "Could not retrieve details for every order." };
-  }
-
-  // 2 ── Sort oldest-first; the primary order is the earliest ─────────────────
-  orders.sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-  );
-  const primary = orders[0];
-  const secondaries = orders.slice(1);
-  const secondaryNames = secondaries.map((o: any) => o.name).join(", ");
-
-  const abort = (error: string): MergeResult => {
-    console.log(`Merge aborted (${orders.map((o: any) => o.name).join(", ")}): ${error}`);
-    return { success: false, error };
-  };
-
-  // 3a ── Guard: status — not cancelled, paid, fully unfulfilled ──────────────
-  // Defense-in-depth: callers already filter, but executeMerge re-checks so it
-  // is safe regardless of how it is invoked (e.g. a tampered UI form post).
-  for (const order of orders) {
-    if (order.cancelledAt) {
-      return abort(`Order ${order.name} is cancelled.`);
-    }
-    if (order.displayFinancialStatus !== "PAID") {
-      return abort(`Order ${order.name} is not paid (status: ${order.displayFinancialStatus}).`);
-    }
-    if (order.displayFulfillmentStatus !== "UNFULFILLED") {
-      return abort(
-        `Order ${order.name} is not unfulfilled (status: ${order.displayFulfillmentStatus}).`,
-      );
-    }
-  }
-
-  // 3b ── Guard: same customer, address and shipping method ──────────────────
-  const groupKeys = orders.map((o: any) =>
-    buildGroupKey(o.customer?.id, o.shippingAddress, o.shippingLine?.title),
-  );
-  if (groupKeys.some((k) => !k || k !== groupKeys[0])) {
-    return abort(
-      "Orders do not share the same customer, shipping address and shipping method.",
-    );
-  }
-
-  // 3c ── Guard: same shop currency and customer (presentment) currency ──────
-  const currencyMismatch = orders.find(
-    (o: any) =>
-      o.currencyCode !== primary.currencyCode ||
-      o.presentmentCurrencyCode !== primary.presentmentCurrencyCode,
-  );
-  if (currencyMismatch) {
-    return abort(
-      `Order ${currencyMismatch.name} uses ${currencyMismatch.currencyCode}/${currencyMismatch.presentmentCurrencyCode}, but ${primary.name} uses ${primary.currencyCode}/${primary.presentmentCurrencyCode}. Orders in different currencies are never merged.`,
-    );
-  }
-
-  // 3d ── Load every line item (paginated) ────────────────────────────────────
-  const lineItemsById = new Map<string, MergeLineItem[]>();
+  // 2 ── Load and evaluate fresh state ─────────────────────────────────────────
+  let orders: OrderState[];
+  let lineItems: Map<string, MergeLineItem[]>;
   try {
-    for (const order of orders) {
-      lineItemsById.set(order.id, await fetchAllLineItems(admin, order.id));
+    if (!(await hasSingleActiveLocation(admin))) {
+      return skip("Shop has more than one active location; multi-location merging is not supported yet.");
     }
+    orders = await fetchOrderStates(admin, orderIds);
+    lineItems = await fetchLineItemsById(admin, orders);
   } catch (err: any) {
-    return abort(err?.message ?? "Could not load line items.");
+    return fail(err?.message ?? "Could not load orders.");
   }
 
-  // 3e ── Guard: line item properties ─────────────────────────────────────────
-  // Shopify's order-edit API (orderEditAddVariant) has no argument for
-  // customAttributes, so properties on personalized products cannot be carried
-  // over to the primary. Skip the entire merge to leave those orders untouched.
-  for (const order of orders) {
-    const hasProperties = lineItemsById
-      .get(order.id)!
-      .some((item) => item.customAttributes.length > 0);
-    if (hasProperties) {
-      console.log(
-        `Skipping merge for order ${order.name}: contains custom line item properties that cannot be edited via Shopify API.`,
-      );
-      return {
-        success: false,
-        error: `Order ${order.name} has line items with custom properties. These orders were left untouched to preserve fulfillment details.`,
-      };
-    }
-  }
+  const evaluation = evaluateMergeGroup(orders, lineItems);
+  if (!evaluation.ok) return skip(evaluation.reason);
+  const { primary, secondaries } = evaluation;
+  const primaryCountBefore = lineItems.get(primary.id)!.length;
 
-  // 3f ── Guard: every secondary item must be transferable ────────────────────
-  // Items with currentQuantity 0 were already removed from the order and are
-  // not transferred. Anything else without a variant (custom items, deleted
-  // products) cannot be added via orderEditAddVariant, so abort rather than
-  // drop it and cancel the order.
-  for (const secondary of secondaries) {
-    const untransferable = lineItemsById
-      .get(secondary.id)!
-      .find((item) => item.currentQuantity > 0 && !item.variant?.id);
-    if (untransferable) {
-      return abort(
-        `Order ${secondary.name} contains "${untransferable.name}", which is a custom item or a deleted product and cannot be transferred. No orders were changed.`,
-      );
-    }
-  }
+  // 3 ── Build the order edit (uncommitted — abandoning it changes nothing) ──
+  let calcId: string;
+  let addedLineItemCount = 0;
+  try {
+    const begin = await gql(
+      admin,
+      `Begin edit of ${primary.name}`,
+      `#graphql
+        mutation MergeEditBegin($id: ID!) {
+          orderEditBegin(id: $id) {
+            calculatedOrder { id }
+            userErrors { field message }
+          }
+        }`,
+      { id: primary.id },
+      "orderEditBegin",
+    );
+    calcId = begin.calculatedOrder?.id;
+    if (!calcId) throw new ShopifyGraphqlError("orderEditBegin returned no calculated order.", false);
 
-  // 4 ── Begin an order-edit session on the primary order ────────────────────
-  const editBeginRes = await admin.graphql(
-    `#graphql
-      mutation orderEditBegin($id: ID!) {
-        orderEditBegin(id: $id) {
-          calculatedOrder { id }
-          userErrors { field message }
-        }
-      }`,
-    { variables: { id: primary.id } },
-  );
-  const editBeginJson = await editBeginRes.json();
-  const calcId = editBeginJson.data?.orderEditBegin?.calculatedOrder?.id;
-  const beginErrors = editBeginJson.data?.orderEditBegin?.userErrors ?? [];
-
-  if (!calcId || beginErrors.length) {
-    return {
-      success: false,
-      error: `Could not begin edit on ${primary.name}: ${
-        beginErrors.map((e: any) => e.message).join("; ") || "unknown error"
-      }`,
-    };
-  }
-
-  // 5 ── Transfer every line item and zero-out the added price ──────────────
-  // Returning before orderEditCommit abandons the calculated order, so a
-  // failure on any single item leaves every order exactly as it was.
-  for (const secondary of secondaries) {
-    for (const item of lineItemsById.get(secondary.id)!) {
-      if (item.currentQuantity <= 0) continue;
-
-      const addRes = await admin.graphql(
-        `#graphql
-          mutation orderEditAddVariant(
-            $id: ID!
-            $variantId: ID!
-            $quantity: Int!
-          ) {
-            orderEditAddVariant(
-              id: $id
-              variantId: $variantId
-              quantity: $quantity
-              allowDuplicates: true
-            ) {
-              calculatedLineItem { id }
-              calculatedOrder { id }
-              userErrors { field message }
-            }
-          }`,
-        {
-          variables: {
-            id: calcId,
-            variantId: item.variant!.id,
-            quantity: item.currentQuantity,
-          },
-        },
-      );
-      const addJson = await addRes.json();
-      const addErrors = addJson.data?.orderEditAddVariant?.userErrors ?? [];
-      const calcLineItemId =
-        addJson.data?.orderEditAddVariant?.calculatedLineItem?.id;
-      if (addErrors.length || !calcLineItemId) {
-        return abort(
-          `Could not transfer "${item.name}" from ${secondary.name}: ${
-            addErrors.map((e: any) => e.message).join("; ") || "unknown error"
-          }. No orders were changed.`,
+    for (const secondary of secondaries) {
+      for (const item of lineItems.get(secondary.id)!) {
+        if (item.currentQuantity <= 0) continue;
+        const added = await gql(
+          admin,
+          `Add "${item.name}" from ${secondary.name}`,
+          `#graphql
+            mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+              orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, allowDuplicates: true) {
+                calculatedLineItem { id }
+                userErrors { field message }
+              }
+            }`,
+          { id: calcId, variantId: item.variant!.id, quantity: item.currentQuantity },
+          "orderEditAddVariant",
         );
-      }
+        const calcLineItemId = added.calculatedLineItem?.id;
+        if (!calcLineItemId) throw new ShopifyGraphqlError(`No line item returned for "${item.name}".`, false);
+        addedLineItemCount += 1;
 
-      // Apply a 100 % discount so the primary balance stays zero
-      const discountRes = await admin.graphql(
-        `#graphql
-          mutation orderEditAddLineItemDiscount(
-            $id: ID!
-            $lineItemId: ID!
-            $discount: OrderEditAppliedDiscountInput!
-          ) {
-            orderEditAddLineItemDiscount(
-              id: $id
-              lineItemId: $lineItemId
-              discount: $discount
-            ) {
-              calculatedOrder { id }
-              userErrors { field message }
-            }
-          }`,
-        {
-          variables: {
+        await gql(
+          admin,
+          `Discount "${item.name}" from ${secondary.name}`,
+          `#graphql
+            mutation MergeEditDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
+              orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
+                calculatedLineItem { id }
+                userErrors { field message }
+              }
+            }`,
+          {
             id: calcId,
             lineItemId: calcLineItemId,
-            discount: {
-              percentValue: 100,
-              description: `Merged from ${secondary.name} — already paid`,
-            },
+            discount: { percentValue: 100, description: `Merged from ${secondary.name} — already paid` },
           },
-        },
-      );
-      const discountJson = await discountRes.json();
-      const discountErrors =
-        discountJson.data?.orderEditAddLineItemDiscount?.userErrors ?? [];
-      if (discountErrors.length) {
-        return abort(
-          `Could not discount "${item.name}" from ${secondary.name}: ${discountErrors
-            .map((e: any) => e.message)
-            .join("; ")}. No orders were changed.`,
+          "orderEditAddLineItemDiscount",
         );
       }
     }
+  } catch (err: any) {
+    return fail(err?.message ?? "Could not build the order edit.");
   }
 
-  // 6 ── Commit the edit (no customer notification) ─────────────────────────
-  const commitRes = await admin.graphql(
-    `#graphql
-      mutation orderEditCommit($id: ID!, $staffNote: String) {
-        orderEditCommit(id: $id, notifyCustomer: false, staffNote: $staffNote) {
-          order { id }
-          userErrors { field message }
-        }
-      }`,
-    {
-      variables: {
-        id: calcId,
-        staffNote: `Merged line items from ${secondaryNames}.`,
-      },
-    },
-  );
-  const commitJson = await commitRes.json();
-  const commitErrors = commitJson.data?.orderEditCommit?.userErrors ?? [];
-
-  if (commitErrors.length) {
-    return {
-      success: false,
-      error: `Failed to commit edit: ${commitErrors.map((e: any) => e.message).join("; ")}`,
-    };
+  // 4 ── Re-verify immediately before committing ──────────────────────────────
+  // Orders can be fulfilled, edited, refunded or cancelled while the edit was
+  // being built; commit only if nothing relevant changed.
+  try {
+    const freshOrders = await fetchOrderStates(admin, orderIds);
+    const freshItems = await fetchLineItemsById(admin, freshOrders);
+    const recheck = evaluateMergeGroup(freshOrders, freshItems);
+    if (!recheck.ok) return skip(`Orders changed during the merge: ${recheck.reason}`);
+    if (fingerprint(freshItems) !== fingerprint(lineItems)) {
+      return skip("Order line items changed during the merge.");
+    }
+  } catch (err: any) {
+    return fail(err?.message ?? "Could not re-verify orders.");
   }
 
-  // 7 ── Cancel each secondary, then close it so the Orders badge decrements ──
-  const cancelResults: { name: string; cancelled: boolean; error?: string }[] = [];
-  const consolidated: string[] = [];
-  for (const secondary of secondaries) {
+  // 5 ── Journal the intent BEFORE committing ─────────────────────────────────
+  let op: MergeOperationRecord;
+  try {
+    op = await deps.journal.create({
+      shop,
+      status: "PENDING_COMMIT",
+      primaryOrderId: primary.id,
+      primaryOrderName: primary.name,
+      customerId: primary.customer?.id ?? null,
+      primaryLineItemCountBefore: primaryCountBefore,
+      addedLineItemCount,
+      secondaries: secondaries.map((s) => ({
+        id: s.id,
+        name: s.name,
+        items: lineItems.get(s.id)!.reduce((n, i) => n + Math.max(i.currentQuantity, 0), 0),
+        done: false,
+      })),
+      involvedOrderIds: [primary.id, ...secondaries.map((s) => s.id)],
+    });
+  } catch (err: any) {
+    return fail(`Could not record the merge before committing: ${err?.message}`);
+  }
+
+  inFlight.add(op.id);
+  try {
+    // 6 ── Commit ──────────────────────────────────────────────────────────────
     try {
-      const cancelRes = await admin.graphql(
+      await gql(
+        admin,
+        `Commit edit of ${primary.name}`,
         `#graphql
-          mutation orderCancel(
-            $orderId: ID!
-            $reason: OrderCancelReason!
-            $restock: Boolean!
-            $refund: Boolean!
-            $staffNote: String
-          ) {
-            orderCancel(
-              orderId: $orderId
-              reason: $reason
-              notifyCustomer: false
-              restock: $restock
-              refund: $refund
-              staffNote: $staffNote
-            ) {
-              orderCancelUserErrors { field message }
+          mutation MergeEditCommit($id: ID!, $staffNote: String) {
+            orderEditCommit(id: $id, notifyCustomer: false, staffNote: $staffNote) {
+              order { id }
+              userErrors { field message }
             }
           }`,
-        {
-          variables: {
-            orderId: secondary.id,
-            reason: "OTHER",
-            restock: true,
-            refund: false,
-            staffNote: `Duplicate — merged into ${primary.name}. Line items transferred; inventory restocked.`,
-          },
-        },
+        { id: calcId, staffNote: `MergeShip: merged items from ${secondaries.map((s) => s.name).join(", ")}.` },
+        "orderEditCommit",
       );
-      const cancelJson = await cancelRes.json();
-      const cancelErrors =
-        cancelJson.data?.orderCancel?.orderCancelUserErrors ?? [];
-
-      if (cancelErrors.length) {
-        const msg = cancelErrors.map((e: any) => e.message).join("; ");
-        console.error(`orderCancel errors for ${secondary.name}:`, msg);
-        cancelResults.push({ name: secondary.name, cancelled: false, error: msg });
-      } else {
-        console.log(`orderCancel OK for ${secondary.name}`);
-
-        // Tag and annotate the absorbed order so it is clearly identifiable in
-        // the Shopify admin order list. Non-fatal: the merge already happened.
-        try {
-          const existingNote = (secondary.note ?? "").trim();
-          const tagRes = await admin.graphql(
-            `#graphql
-              mutation absorbedOrderUpdate($input: OrderInput!) {
-                orderUpdate(input: $input) {
-                  order { id }
-                  userErrors { field message }
-                }
-              }`,
-            {
-              variables: {
-                input: {
-                  id: secondary.id,
-                  tags: uniqueTags([...(secondary.tags ?? []), "Merged"]),
-                  note: [
-                    existingNote,
-                    `Consolidated into primary order ${primary.name} by MergeShip`,
-                  ]
-                    .filter(Boolean)
-                    .join("\n"),
-                },
-              },
-            },
-          );
-          const tagErrors =
-            (await tagRes.json()).data?.orderUpdate?.userErrors ?? [];
-          if (tagErrors.length) {
-            console.warn(
-              `Tagging warnings for ${secondary.name}:`,
-              tagErrors.map((e: any) => e.message).join("; "),
-            );
-          }
-        } catch (tagErr: any) {
-          console.warn(`Tagging threw for ${secondary.name}:`, tagErr?.message);
-        }
-
-        // Close the cancelled order so Shopify finalises its lifecycle and the
-        // Orders sidebar badge decrements immediately. Without this step the
-        // badge stays elevated when restock:true is used (Shopify leaves the
-        // order in a pending-inventory state that keeps it in the active count).
-        try {
-          const closeRes = await admin.graphql(
-            `#graphql
-              mutation orderClose($input: OrderCloseInput!) {
-                orderClose(input: $input) {
-                  order { id }
-                  userErrors { field message }
-                }
-              }`,
-            { variables: { input: { id: secondary.id } } },
-          );
-          const closeJson = await closeRes.json();
-          const closeErrors = closeJson.data?.orderClose?.userErrors ?? [];
-          if (closeErrors.length) {
-            console.warn(
-              `orderClose warnings for ${secondary.name}:`,
-              closeErrors.map((e: any) => e.message).join("; "),
-            );
-          } else {
-            console.log(`orderClose OK for ${secondary.name}`);
-          }
-        } catch (closeErr: any) {
-          // Non-fatal: cancel already succeeded, close is a best-effort badge fix
-          console.warn(`orderClose threw for ${secondary.name}:`, closeErr?.message);
-        }
-
-        cancelResults.push({ name: secondary.name, cancelled: true });
-        consolidated.push(secondary.id);
+      await deps.journal.update(op.id, { status: "COMMITTED" });
+      op.status = "COMMITTED";
+    } catch (err: any) {
+      if (err instanceof ShopifyGraphqlError && err.rejected) {
+        await deps.journal.update(op.id, { status: "ABANDONED", lastError: err.message });
+        return fail(err.message);
       }
-    } catch (err: any) {
-      console.error(`orderCancel threw for ${secondary.name}:`, err?.message);
-      cancelResults.push({
-        name: secondary.name,
-        cancelled: false,
-        error: err?.message ?? "Unknown error",
-      });
+      // Unknown outcome: the edit may or may not have been applied. Leave the
+      // op PENDING_COMMIT (orders stay blocked); resume reconciles it after
+      // the grace period.
+      await deps.journal.update(op.id, { lastError: err?.message ?? String(err) });
+      return inProgress(op, `Commit outcome unknown: ${err?.message}`);
     }
-  }
 
-  // 8 ── Record consolidations for the dashboard ─────────────────────────────
-  if (consolidated.length) {
+    // 7 ── Cancel secondaries and confirm ──────────────────────────────────────
     try {
-      await db.mergeRecord.createMany({
-        data: secondaries
-          .filter((s: any) => consolidated.includes(s.id))
-          .map((s: any) => ({
-            shop,
-            primaryOrderId: primary.id,
-            primaryOrderName: primary.name,
-            mergedOrderId: s.id,
-            mergedOrderName: s.name,
-            customerId: primary.customer?.id ?? null,
-            itemsCombined: lineItemsById
-              .get(s.id)!
-              .reduce((n, item) => n + Math.max(item.currentQuantity, 0), 0),
-          })),
-        skipDuplicates: true,
-      });
+      return await completeCommittedOperation(admin, op, deps);
     } catch (err: any) {
-      console.error(
-        `Failed to record consolidation history for ${primary.name}:`,
-        err?.message,
-      );
+      await deps.journal.update(op.id, { lastError: err?.message ?? String(err) });
+      return inProgress(op, err?.message ?? "Could not finish the merge.");
     }
+  } finally {
+    inFlight.delete(op.id);
   }
-
-  // 9 ── Carry over secondary customer notes and union tags (+ "Consolidated")
-  const primaryNote = (primary.note ?? "").trim();
-  const secondaryNotes = secondaries
-    .map((o: any) => ({ name: o.name, note: (o.note ?? "").trim() }))
-    .filter(({ note }) => note && !primaryNote.includes(note))
-    .map(({ name, note }) => `Note from ${name}: ${note}`);
-
-  const allTags = orders.flatMap((o: any) => (o.tags ?? []) as string[]);
-
-  const updateRes = await admin.graphql(
-    `#graphql
-      mutation orderUpdate($input: OrderInput!) {
-        orderUpdate(input: $input) {
-          order { id }
-          userErrors { field message }
-        }
-      }`,
-    {
-      variables: {
-        input: {
-          id: primary.id,
-          tags: uniqueTags([...allTags, "Consolidated"]),
-          // Only touch the note when there is a customer note to carry over
-          ...(secondaryNotes.length > 0 && {
-            note: [primaryNote, ...secondaryNotes].filter(Boolean).join("\n"),
-          }),
-        },
-      },
-    },
-  );
-  const updateErrors = (await updateRes.json()).data?.orderUpdate?.userErrors ?? [];
-  if (updateErrors.length) {
-    console.error(
-      `orderUpdate errors for ${primary.name}:`,
-      updateErrors.map((e: any) => e.message).join("; "),
-    );
-  }
-
-  return {
-    success: true,
-    primaryOrderId: primary.id as string,
-    primaryName: primary.name as string,
-    mergedCount: secondaries.length,
-    cancelResults,
-  };
 }

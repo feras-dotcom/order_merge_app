@@ -10,4 +10,8 @@ module.exports = {
   globals: {
     shopify: "readonly"
   },
+  // Tests run on Vitest (Jest-compatible API); jest rules need a version hint.
+  settings: {
+    jest: { version: 29 },
+  },
 };

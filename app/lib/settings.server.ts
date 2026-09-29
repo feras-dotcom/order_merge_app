@@ -3,19 +3,22 @@ import db from "../db.server";
 // ── Merge settings ────────────────────────────────────────────────────────────
 
 export interface MergeSettings {
+  /** Off until the merchant explicitly opts in (see app.settings.tsx). */
   autoMergeEnabled: boolean;
   mergeWindowHours: number;
   shippingCostSavings: number;
   /** gid://shopify/Shop/<id> — persisted so the uninstall webhook can act on
    *  the shop after its Admin API token is revoked. Not merchant-facing. */
   shopifyShopGid: string | null;
+  autoMergeAcknowledgedAt: Date | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
-  autoMergeEnabled: true,
+  autoMergeEnabled: false,
   mergeWindowHours: 24,
   shippingCostSavings: 8.5,
   shopifyShopGid: null,
+  autoMergeAcknowledgedAt: null,
 };
 
 /**

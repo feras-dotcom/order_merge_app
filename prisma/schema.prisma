@@ -17,7 +17,10 @@ datasource db {
 model Settings {
   id                  String  @id @default(cuid())
   shop                String  @unique
-  autoMergeEnabled    Boolean @default(true)
+  autoMergeEnabled    Boolean @default(false)
+  // When the merchant last turned auto-merge on after acknowledging what it
+  // does (modifies/cancels orders; never refunds duplicate shipping).
+  autoMergeAcknowledgedAt DateTime?
   mergeWindowHours    Int     @default(24)
   shippingCostSavings Float   @default(8.5)
   shopifyShopGid      String?
@@ -52,6 +55,34 @@ model MergeRecord {
 
   @@unique([shop, mergedOrderId])
   @@index([shop, createdAt])
+}
+
+// Write-ahead journal for a merge. Created before the primary's order edit is
+// committed so an interrupted merge (crash, timeout, failed cancellation) can
+// be reconciled and resumed instead of leaving a secondary open whose items
+// were already moved — which would double-ship them or re-merge them.
+//   PENDING_COMMIT → COMMITTED → COMPLETED
+//   PENDING_COMMIT → ABANDONED (commit verifiably did not apply)
+//   any unfinished → NEEDS_REVIEW (state could not be confirmed; orders are
+//                                  flagged and excluded from future merges)
+model MergeOperation {
+  id                         String   @id @default(cuid())
+  shop                       String
+  status                     String
+  primaryOrderId             String
+  primaryOrderName           String
+  customerId                 String?
+  primaryLineItemCountBefore Int
+  addedLineItemCount         Int
+  // [{ id, name, items, done }] — one entry per secondary order
+  secondaries                Json
+  involvedOrderIds           String[]
+  attempts                   Int      @default(0)
+  lastError                  String?
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  @@index([shop, status])
 }
 
 model Session {
