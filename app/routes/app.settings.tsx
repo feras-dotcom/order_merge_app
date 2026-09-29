@@ -1,15 +1,22 @@
 import { json } from "@remix-run/node";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useFetcher, useNavigate } from "@remix-run/react";
+import {
+  useFetcher,
+  useLoaderData,
+  useNavigate,
+  useOutletContext,
+} from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import {
   Badge,
+  Banner,
   BlockStack,
   Button,
   Card,
   Checkbox,
   Divider,
   InlineStack,
+  List,
   Page,
   Select,
   Text,
@@ -18,13 +25,44 @@ import {
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { getSettings, upsertSettings } from "../lib/settings.server";
+import { gql } from "../lib/graphql.server";
 
 // ── Loader ────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const settings = await getSettings(session.shop);
-  return json({ settings });
+
+  // MergeShip only merges in single-location shops for now; tell the merchant
+  // up front if theirs will never qualify.
+  let activeLocationCount: number | null = null;
+  try {
+    const result = await gql<{ count: number }>(
+      admin,
+      "Count locations",
+      `#graphql
+        query SettingsLocationCount {
+          locationsCount(query: "active:true") { count }
+        }`,
+      {},
+      "locationsCount",
+      null,
+    );
+    activeLocationCount = result.count;
+  } catch (err: any) {
+    console.warn(`[settings] Could not count locations for ${session.shop}: ${err?.message}`);
+  }
+
+  return json({
+    settings: {
+      autoMergeEnabled: settings.autoMergeEnabled,
+      mergeWindowHours: settings.mergeWindowHours,
+      shippingCostSavings: settings.shippingCostSavings,
+    },
+    activeLocationCount,
+    shopHandle: session.shop.replace(".myshopify.com", ""),
+    appHandle: process.env.SHOPIFY_APP_HANDLE || "",
+  });
 };
 
 // ── Action ────────────────────────────────────────────────
@@ -32,9 +70,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
+  const current = await getSettings(session.shop);
 
-  // ── Settings save ─────────────────────────────────────────────────────────
   const autoMergeEnabled = formData.get("autoMergeEnabled") === "true";
+  const acknowledged = formData.get("acknowledged") === "true";
+
+  // Turning auto-merge on requires explicit acknowledgement of what it does.
+  // Enforced here, not only in the UI.
+  const turningOn = autoMergeEnabled && !current.autoMergeEnabled;
+  if (turningOn && !acknowledged) {
+    return json(
+      { success: false, error: "Please confirm you understand how automatic merging works before enabling it." },
+      { status: 400 },
+    );
+  }
 
   const rawHours = parseInt(formData.get("mergeWindowHours") as string, 10);
   // Validate against the allowed set so arbitrary values can't be stored.
@@ -47,22 +96,49 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ? Math.round(rawSavings * 100) / 100
       : 8.5;
 
-  await upsertSettings(session.shop, { autoMergeEnabled, mergeWindowHours, shippingCostSavings });
-  return json({ success: true });
+  await upsertSettings(session.shop, {
+    autoMergeEnabled,
+    mergeWindowHours,
+    shippingCostSavings,
+    ...(turningOn && { autoMergeAcknowledgedAt: new Date() }),
+  });
+  return json({ success: true, error: null });
 };
 
 // ── Component ─────────────────────────────────────────────
 
+const WHAT_IT_DOES = [
+  "When a new order qualifies, MergeShip adds its items to the customer's oldest matching open order at no extra charge, then cancels the newer order and restocks its inventory.",
+  "Cancelled orders are not refunded. Duplicate shipping the customer paid on the newer order is NOT refunded automatically — refund it yourself in Shopify if you choose to.",
+  "Customers are not notified of the edit or the cancellation.",
+  "If MergeShip cannot confirm a merge finished, the orders are tagged “MergeShip-Review”. Check those orders before fulfilling them.",
+];
+
 const SAFETY_RULES = [
   {
-    title: "Require identical shipping method",
+    title: "Same customer, recipient and address",
     description:
-      "Orders merge only when their shipping methods match (ignoring letter case and extra spaces), so no customer loses a shipping upgrade they paid for.",
+      "Orders merge only when the customer, the recipient's name and company, and every line of the shipping address match.",
   },
   {
-    title: "Require paid status",
+    title: "One identical shipping method",
     description:
-      "Only fully paid, non-cancelled orders are merged, so unpaid items are never absorbed into a paid order.",
+      "Each order must have exactly one shipping method, and they must match (ignoring letter case and extra spaces), so no customer loses a shipping upgrade they paid for.",
+  },
+  {
+    title: "Fully paid, completely unfulfilled, low risk",
+    description:
+      "Only fully paid, open orders with no fulfillment activity at all and a LOW Shopify fraud risk are merged. Partially fulfilled, on-hold or in-progress orders never qualify.",
+  },
+  {
+    title: "Only simple, shippable items",
+    description:
+      "Orders containing gift cards, subscriptions, bundles, items with custom properties, custom or deleted products, or items that don't need shipping are left untouched.",
+  },
+  {
+    title: "Single-location stores only",
+    description:
+      "Merging currently runs only in stores with one active location, so combined items always ship from the same place.",
   },
 ];
 
@@ -73,42 +149,47 @@ const WINDOW_OPTIONS = [
 ];
 
 export default function SettingsPage() {
-  const { settings } = useLoaderData<typeof loader>();
+  const { settings, activeLocationCount, shopHandle, appHandle } =
+    useLoaderData<typeof loader>();
+  const { planHandle } = useOutletContext<{ planHandle: string | null }>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const navigate = useNavigate();
   const handledRef = useRef<object | null>(null);
 
-  const [autoMergeEnabled, setAutoMergeEnabled] = useState(
-    settings.autoMergeEnabled,
-  );
-  const [mergeWindowHours, setMergeWindowHours] = useState(
-    String(settings.mergeWindowHours),
-  );
+  const [autoMergeEnabled, setAutoMergeEnabled] = useState(settings.autoMergeEnabled);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [mergeWindowHours, setMergeWindowHours] = useState(String(settings.mergeWindowHours));
   const [shippingCostSavings, setShippingCostSavings] = useState(
     String(settings.shippingCostSavings ?? 8.5),
   );
 
-  // Show a success toast once per completed save — the ref guard prevents
-  // re-firing if the component re-renders while fetcher.data is unchanged.
+  const turningOn = autoMergeEnabled && !settings.autoMergeEnabled;
+  const multiLocation = activeLocationCount !== null && activeLocationCount > 1;
+
+  // Show a toast once per completed save — the ref guard prevents re-firing
+  // if the component re-renders while fetcher.data is unchanged.
   useEffect(() => {
     if (!fetcher.data || fetcher.data === handledRef.current) return;
     handledRef.current = fetcher.data;
-    if (fetcher.data.success) {
-      shopify.toast.show("Settings saved");
-    }
+    if (fetcher.data.success) shopify.toast.show("Settings saved");
+    else if (fetcher.data.error) shopify.toast.show(fetcher.data.error, { isError: true });
   }, [fetcher.data, shopify]);
 
   const handleSave = () => {
     fetcher.submit(
       {
         autoMergeEnabled: String(autoMergeEnabled),
+        acknowledged: String(acknowledged),
         mergeWindowHours,
         shippingCostSavings,
       },
       { method: "post" },
     );
   };
+
+  const saveDisabled = turningOn && !acknowledged;
+  const planName = planHandle ? planHandle.charAt(0).toUpperCase() + planHandle.slice(1) : null;
 
   return (
     <Page
@@ -117,19 +198,57 @@ export default function SettingsPage() {
     >
       <TitleBar title="Settings" />
       <BlockStack gap="500">
+        {multiLocation && (
+          <Banner tone="warning" title="Automatic merging won't run in this store yet">
+            <p>
+              Your store has {activeLocationCount} active locations. MergeShip
+              currently merges orders only in stores with a single active
+              location, so no orders will be merged even if automatic merging
+              is turned on.
+            </p>
+          </Banner>
+        )}
+
         {/* ── Automation Rules ────────────────────────────────────────────── */}
         <Card>
           <BlockStack gap="400">
-            <Text as="h2" variant="headingMd">
-              Automation Rules
-            </Text>
+            <InlineStack gap="200" blockAlign="center">
+              <Text as="h2" variant="headingMd">
+                Automation Rules
+              </Text>
+              {settings.autoMergeEnabled ? (
+                <Badge tone="success">Automatic merging on</Badge>
+              ) : (
+                <Badge>Automatic merging off</Badge>
+              )}
+            </InlineStack>
 
             <Checkbox
               label="Enable automatic order merging"
-              helpText="When enabled, new paid orders are automatically merged with matching open orders for the same customer."
+              helpText="New orders that pass every safety rule below are automatically combined with the same customer's matching open order."
               checked={autoMergeEnabled}
-              onChange={setAutoMergeEnabled}
+              onChange={(value) => {
+                setAutoMergeEnabled(value);
+                if (!value) setAcknowledged(false);
+              }}
             />
+
+            {turningOn && (
+              <Banner tone="warning" title="Before you turn on automatic merging">
+                <BlockStack gap="300">
+                  <List type="bullet">
+                    {WHAT_IT_DOES.map((line) => (
+                      <List.Item key={line}>{line}</List.Item>
+                    ))}
+                  </List>
+                  <Checkbox
+                    label="I understand MergeShip will edit and cancel qualifying orders, and will not refund duplicate shipping charges."
+                    checked={acknowledged}
+                    onChange={setAcknowledged}
+                  />
+                </BlockStack>
+              </Banner>
+            )}
 
             <Select
               label="Merge time window"
@@ -143,6 +262,7 @@ export default function SettingsPage() {
               <Button
                 variant="primary"
                 onClick={handleSave}
+                disabled={saveDisabled}
                 loading={fetcher.state !== "idle"}
               >
                 Save
@@ -181,6 +301,7 @@ export default function SettingsPage() {
               <Button
                 variant="primary"
                 onClick={handleSave}
+                disabled={saveDisabled}
                 loading={fetcher.state !== "idle"}
               >
                 Save
@@ -228,41 +349,29 @@ export default function SettingsPage() {
             <Text as="h2" variant="headingMd">
               Plan and Billing
             </Text>
-
-            <BlockStack gap="200">
-              <InlineStack gap="200" align="start" blockAlign="center">
-                <Text as="span" variant="bodyMd" fontWeight="semibold">
-                  Current plan:
-                </Text>
-                <Text as="span" variant="bodyMd">
-                  Pro Plan
-                </Text>
-                <Badge tone="success">Managed by Shopify</Badge>
-              </InlineStack>
-
-              <InlineStack gap="200" align="start">
-                <Text as="span" variant="bodyMd" fontWeight="semibold">
-                  Price:
-                </Text>
-                <Text as="span" variant="bodyMd">
-                  $19 / month
-                </Text>
-              </InlineStack>
-
-              <InlineStack gap="200" align="start">
-                <Text as="span" variant="bodyMd" fontWeight="semibold">
-                  Free trial:
-                </Text>
-                <Text as="span" variant="bodyMd">
-                  14 days
-                </Text>
-              </InlineStack>
-
-              <Text as="p" variant="bodySm" tone="subdued">
-                Billing is managed securely through Shopify. Your payment details
-                are never shared with us.
+            <InlineStack gap="200" align="start" blockAlign="center">
+              <Text as="span" variant="bodyMd" fontWeight="semibold">
+                Current plan:
               </Text>
-            </BlockStack>
+              <Text as="span" variant="bodyMd">
+                {planName ?? "—"}
+              </Text>
+              <Badge tone="success">Managed by Shopify</Badge>
+            </InlineStack>
+            {appHandle && (
+              <InlineStack>
+                <Button
+                  url={`https://admin.shopify.com/store/${shopHandle}/charges/${appHandle}/pricing_plans`}
+                  target="_top"
+                >
+                  View or change plan
+                </Button>
+              </InlineStack>
+            )}
+            <Text as="p" variant="bodySm" tone="subdued">
+              Billing is managed securely through Shopify. Your payment details
+              are never shared with us.
+            </Text>
           </BlockStack>
         </Card>
       </BlockStack>

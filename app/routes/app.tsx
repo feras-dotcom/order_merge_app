@@ -32,10 +32,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Persist the resolved shop GID so the app/uninstalled webhook can still
   // reference the shop after its Admin API token is revoked.
+  // Upserted so the row exists even before the merchant saves settings; a new
+  // row takes the schema defaults (automatic merging off).
   if (subscription.shopGid) {
-    await db.settings.updateMany({
-      where: { shop: session.shop, NOT: { shopifyShopGid: subscription.shopGid } },
-      data: { shopifyShopGid: subscription.shopGid },
+    await db.settings.upsert({
+      where: { shop: session.shop },
+      create: { shop: session.shop, shopifyShopGid: subscription.shopGid },
+      update: { shopifyShopGid: subscription.shopGid },
     });
   }
 

@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   Badge,
+  Banner,
   BlockStack,
   Box,
   Card,
@@ -20,6 +21,8 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getSettings } from "../lib/settings.server";
+import { defaultMergeDeps, resumeIncompleteMerges } from "../lib/merge.server";
+import { listOperationsNeedingReview } from "../lib/merge-journal.server";
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -44,8 +47,19 @@ const formatCurrency = (amount: number) =>
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
-  const [settings, consolidatedCount, records] = await Promise.all([
+
+  // Finish any merge that was interrupted (e.g. a secondary whose cancellation
+  // was not yet confirmed) even if no new order webhook arrives.
+  try {
+    // Single confirmation read: never hold the page for the full polling loop.
+    await resumeIncompleteMerges(admin, shop, { ...defaultMergeDeps(), cancelPollAttempts: 1 });
+  } catch (err: any) {
+    console.error(`[dashboard] Resuming unfinished merges failed: ${err?.message}`);
+  }
+
+  const [settings, needsReview, consolidatedCount, records] = await Promise.all([
     getSettings(shop),
+    listOperationsNeedingReview(shop),
     db.mergeRecord.count({ where: { shop } }),
     db.mergeRecord.findMany({
       where: { shop },
@@ -114,6 +128,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     autoMergeEnabled: settings.autoMergeEnabled,
+    needsReview: needsReview.map((op) => ({
+      id: op.id,
+      primaryOrderName: op.primaryOrderName,
+      secondaryNames: ((op.secondaries as { name: string }[]) ?? []).map((s) => s.name),
+      reason: op.lastError,
+    })),
     shippingCostSavings: settings.shippingCostSavings ?? 8.5,
     historyLimit: HISTORY_LIMIT,
     recordsShown: records.length,
@@ -240,7 +260,7 @@ function ConsolidationCard({
 }
 
 export default function Index() {
-  const { autoMergeEnabled, shippingCostSavings, historyLimit, recordsShown, consolidatedCount, groups } =
+  const { autoMergeEnabled, needsReview, shippingCostSavings, historyLimit, recordsShown, consolidatedCount, groups } =
     useLoaderData<typeof loader>();
   const { planHandle } = useOutletContext<{ planHandle: string | null }>();
   const [query, setQuery] = useState("");
@@ -279,6 +299,38 @@ export default function Index() {
     >
       <TitleBar title="MergeShip" />
       <BlockStack gap="600">
+        {needsReview.length > 0 && (
+          <Banner tone="critical" title="Some merges need your review before fulfillment">
+            <BlockStack gap="200">
+              <p>
+                MergeShip could not confirm these merges finished. The orders
+                are tagged “MergeShip-Review” in Shopify. Check each one — the
+                items may already be on the primary order — and cancel or
+                fulfill manually as appropriate.
+              </p>
+              {needsReview.map((op) => (
+                <p key={op.id}>
+                  <strong>{op.primaryOrderName}</strong>
+                  {op.secondaryNames.length > 0 && ` ← ${op.secondaryNames.join(", ")}`}
+                  {op.reason && ` — ${op.reason}`}
+                </p>
+              ))}
+            </BlockStack>
+          </Banner>
+        )}
+
+        {!autoMergeEnabled && (
+          <Banner
+            tone="info"
+            title="Automatic merging is off"
+            action={{ content: "Review settings", url: "/app/settings" }}
+          >
+            <p>
+              MergeShip won't change any orders until you review how it works
+              and turn automatic merging on in Settings.
+            </p>
+          </Banner>
+        )}
         <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
           <MetricCard
             label="Orders Consolidated"
