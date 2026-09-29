@@ -4,6 +4,10 @@
 // MergeShip cannot positively confirm two orders are safe to combine, they are
 // not eligible.
 
+/** Tag MergeShip adds to orders whose merge it could not confirm. Shared with
+ *  the dashboard, so it lives outside the .server modules. */
+export const REVIEW_TAG = "MergeShip-Review";
+
 // ── Normalization ─────────────────────────────────────────────────────────────
 
 export const normalizeAddressLine = (line: string | null | undefined): string =>

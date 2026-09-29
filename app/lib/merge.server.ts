@@ -23,6 +23,7 @@
 
 import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
 import {
+  REVIEW_TAG,
   evaluateFulfillmentLocation,
   evaluateMergeGroup,
   type OrderFulfillmentOrders,
@@ -44,7 +45,7 @@ export {
 } from "./eligibility";
 export type { AdminClient } from "./graphql.server";
 
-export const REVIEW_TAG = "MergeShip-Review";
+export { REVIEW_TAG };
 
 // ── Dependencies (injectable for tests) ───────────────────────────────────────
 
