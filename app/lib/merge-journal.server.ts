@@ -120,6 +120,7 @@ export async function listOperationsNeedingReview(shop: string) {
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
+      primaryOrderId: true,
       primaryOrderName: true,
       secondaries: true,
       lastError: true,

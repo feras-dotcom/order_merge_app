@@ -134,10 +134,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     autoMergeEnabled: settings.autoMergeEnabled,
     locationBlocked: locationAccess.blocked,
     activeLocationCount: locationAccess.activeLocationCount,
+    // Only merges MergeShip could not confirm (NEEDS_REVIEW operations) —
+    // ordinary skipped or ineligible orders are never listed here.
     needsReview: needsReview.map((op) => ({
       id: op.id,
-      primaryOrderName: op.primaryOrderName,
-      secondaryNames: ((op.secondaries as { name: string }[]) ?? []).map((s) => s.name),
+      primary: { id: op.primaryOrderId, name: op.primaryOrderName },
+      secondaries: ((op.secondaries as { id: string; name: string }[]) ?? []).map((s) => ({ id: s.id, name: s.name })),
     })),
     combinedCount,
     recentCount,
@@ -217,27 +219,41 @@ export default function Index() {
     >
       <TitleBar title="MergeShip" />
       <BlockStack gap="500">
+        {/* Shown only when a merge genuinely needs the merchant; absent otherwise. */}
         {needsReview.length > 0 && (
           <Banner
-            tone="critical"
+            tone="warning"
             title={
               needsReview.length === 1
-                ? "1 combined order needs review before you fulfill it"
-                : `${needsReview.length} combined orders need review before you fulfill them`
+                ? "1 combine needs your review before fulfillment"
+                : `${needsReview.length} combines need your review before fulfillment`
             }
           >
-            <BlockStack gap="200">
+            <BlockStack gap="300">
               <p>
-                MergeShip couldn't confirm these finished. Check the orders
-                tagged “{REVIEW_TAG}” in Shopify — the items may already be on
-                the first order.
+                MergeShip couldn't confirm these finished, so it tagged the
+                orders “{REVIEW_TAG}”. Open each one and check whether the items
+                are already on the first order before fulfilling or cancelling.
               </p>
               <BlockStack gap="100">
                 {needsReview.map((op) => (
-                  <Text as="p" key={op.id}>
-                    {op.primaryOrderName}
-                    {op.secondaryNames.length > 0 && ` · combined from ${op.secondaryNames.join(", ")}`}
-                  </Text>
+                  <InlineStack key={op.id} gap="150" blockAlign="center">
+                    <Link url={orderAdminUrl(op.primary.id)} target="_blank">
+                      {op.primary.name}
+                    </Link>
+                    {op.secondaries.length > 0 && (
+                      <>
+                        <Text as="span" tone="subdued">
+                          ← combined from
+                        </Text>
+                        {op.secondaries.map((s) => (
+                          <Link key={s.id} url={orderAdminUrl(s.id)} target="_blank">
+                            {s.name}
+                          </Link>
+                        ))}
+                      </>
+                    )}
+                  </InlineStack>
                 ))}
               </BlockStack>
             </BlockStack>
@@ -289,7 +305,6 @@ export default function Index() {
               <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
                 <Stat label="Repeat orders combined" value={combinedCount} />
                 <Stat label="Last 30 days" value={recentCount} />
-                <Stat label="Needs review" value={needsReview.length} />
               </InlineGrid>
             </Card>
 

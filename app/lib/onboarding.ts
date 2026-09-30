@@ -2,10 +2,40 @@
 // Pure rules shared by the onboarding UI and its server action, so what the
 // merchant sees and what the server enforces can never disagree.
 
-export const MERGE_WINDOW_HOURS = [1, 12, 24] as const;
+// ── Merge window ──────────────────────────────────────────────────────────────
+// Stored as whole hours (Settings.mergeWindowHours). Presets cover the common
+// cases; Custom accepts any whole number of hours or days up to the maximum.
+//
+// Maximum: 7 days. The window doesn't change the candidate query (the webhook
+// always reads the customer's 50 most recent open, unfulfilled, paid orders),
+// but every order inside the window becomes a candidate that executeMerge
+// loads and checks individually (~4 Admin API calls each), and an order that
+// has sat unfulfilled for over a week is increasingly likely to be held,
+// pre-ordered or already being picked — not something to add items to.
+
+export const MERGE_WINDOW_PRESETS = [1, 6, 24, 48] as const;
+export const DEFAULT_MERGE_WINDOW_HOURS = 24;
+export const MAX_MERGE_WINDOW_HOURS = 7 * 24;
 
 export const isValidMergeWindow = (hours: unknown): hours is number =>
-  typeof hours === "number" && (MERGE_WINDOW_HOURS as readonly number[]).includes(hours);
+  typeof hours === "number" && Number.isInteger(hours) && hours >= 1 && hours <= MAX_MERGE_WINDOW_HOURS;
+
+export type MergeWindowUnit = "hours" | "days";
+
+/** Converts a custom entry to hours, or null if it isn't a valid window. */
+export function customWindowToHours(value: string, unit: MergeWindowUnit): number | null {
+  if (!/^\d+$/.test(value.trim())) return null;
+  const hours = Number(value) * (unit === "days" ? 24 : 1);
+  return isValidMergeWindow(hours) ? hours : null;
+}
+
+/** How a stored window is shown: a preset, or a custom value in days/hours. */
+export function describeMergeWindow(hours: number):
+  | { preset: true; hours: number }
+  | { preset: false; value: number; unit: MergeWindowUnit } {
+  if ((MERGE_WINDOW_PRESETS as readonly number[]).includes(hours)) return { preset: true, hours };
+  return hours % 24 === 0 ? { preset: false, value: hours / 24, unit: "days" } : { preset: false, value: hours, unit: "hours" };
+}
 
 export interface LocationState {
   /** null when Shopify's location count could not be read. */

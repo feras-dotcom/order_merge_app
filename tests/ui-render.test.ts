@@ -80,7 +80,7 @@ describe("dashboard", () => {
     expect(view).toContain("Repeat orders shouldn't mean more manual work.");
     expect(view).toContain("MergeShip is watching for eligible repeat orders");
     expect(view).toContain("Automatic merging on");
-    expect(view).not.toMatch(/can't combine|Saved|Consolidat|Boxes|Allow location access/);
+    expect(view).not.toMatch(/can't combine|Saved|Consolidat|Boxes|Allow location access|review/i);
   });
 
   it("paused by the merchant: quiet, no warning", async () => {
@@ -97,7 +97,7 @@ describe("dashboard", () => {
         dash({
           locationBlocked: true,
           activeLocationCount: 2,
-          needsReview: [{ id: "x", primaryOrderName: "#1003", secondaryNames: ["#1004"] }],
+          needsReview: [{ id: "x", primary: { id: "gid://shopify/Order/3", name: "#1003" }, secondaries: [{ id: "gid://shopify/Order/4", name: "#1004" }] }],
           combinedCount: 1,
           recentCount: 1,
           recordsShown: 1,
@@ -109,9 +109,39 @@ describe("dashboard", () => {
     expect(view).toContain("Your fulfillment setup changed");
     expect(view).toContain("Allow location access");
     expect(view).toContain("Automatic merging stopped");
-    expect(view).toContain("1 combined order needs review");
+    expect(view).toContain("1 combine needs your review before fulfillment");
+    expect(view).toContain("#1003");
+    expect(view).toContain("combined from");
+    expect(view).toMatch(/Last 30 days/);
+    expect(view).not.toContain("Needs review");
     expect(view).toContain("#1002");
     expect(view).toContain("Sep 29, 4:12 PM UTC");
+  });
+});
+
+describe("dashboard review state", () => {
+  it("with activity and nothing to review: no review metric or banner at all", async () => {
+    const view = text(
+      await pageHtml("../app/routes/app._index", dash({ combinedCount: 1, recentCount: 1, recordsShown: 1, rows: [row] })),
+    );
+    expect(view).toContain("Repeat orders combined");
+    expect(view).toContain("Recent activity");
+    expect(view).not.toMatch(/review/i);
+  });
+
+  it("with operations needing review: count, explanation and links to each affected order", async () => {
+    const view = await pageHtml(
+      "../app/routes/app._index",
+      dash({
+        needsReview: [
+          { id: "a", primary: { id: "gid://shopify/Order/31", name: "#1031" }, secondaries: [{ id: "gid://shopify/Order/32", name: "#1032" }] },
+          { id: "b", primary: { id: "gid://shopify/Order/41", name: "#1041" }, secondaries: [] },
+        ],
+      }),
+    );
+    expect(text(view)).toContain("2 combines need your review before fulfillment");
+    expect(text(view)).toContain("MergeShip-Review");
+    for (const id of ["31", "32", "41"]) expect(view).toContain(`shopify:admin/orders/${id}`);
   });
 });
 
@@ -124,6 +154,19 @@ describe("settings", () => {
     expect(view).not.toMatch(/Savings|Active\b/);
     expect(view).toContain("Starter — $19/month");
     expect(view).toContain("Manage plan");
+  });
+
+  it("merge window: presets, and a stored custom value shown as Custom in days", async () => {
+    let view = await pageHtml("../app/routes/app.settings", settings());
+    for (const label of ["1 hour", "6 hours", "24 hours (default)", "48 hours", "Custom"]) expect(view).toContain(label);
+    view = await pageHtml(
+      "../app/routes/app.settings",
+      settings({ settings: { autoMergeEnabled: true, mergeWindowHours: 72, acknowledged: true } }),
+    );
+    // Server-rendered <select>s mark the chosen option with `selected`.
+    expect(view).toMatch(/<option value="custom" selected/);
+    expect(view).toMatch(/<option value="days" selected/);
+    expect(view).toContain('value="3"');
   });
 
   it("multi-location with access: one quiet status line", async () => {
@@ -154,7 +197,11 @@ describe("onboarding", () => {
   it("first visit: welcome screen, no warnings or technical detail", async () => {
     const view = text(await pageHtml("../app/routes/app.onboarding", onboarding({ locationAccess: access(3, false) })));
     expect(view).toContain("Welcome to MergeShip");
-    expect(view).toContain("Set up MergeShip");
+    expect(view).toContain("Set up MergeShip in about a minute.");
+    expect(view).toContain("You'll:");
+    expect(view).toContain("choose how long MergeShip should look for repeat orders");
+    expect(view).toContain("confirm fulfillment-location access if your store requires it");
+    expect(view).toContain("review the safety protections before enabling automation");
     expect(view).not.toMatch(/can't combine|fraud|Allow location access/);
   });
 
