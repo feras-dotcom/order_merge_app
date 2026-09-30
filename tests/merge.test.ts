@@ -558,3 +558,29 @@ describe("executeMerge — live regressions (ordermergetest2, Custom shipping)",
     expect((await executeMerge(shopify.admin, SHOP, [id(1023), id(1022), id(1021)], deps)).outcome).toBe("merged");
   });
 });
+
+describe("executeMerge — per-order exclusion is general (standard shipping)", () => {
+  const multi = (orders: ReturnType<typeof makeOrder>[]) => {
+    const ctx = setup(orders);
+    ctx.shopify.activeLocations = 3;
+    ctx.shopify.fulfillmentOrdersScope = true;
+    ctx.shopify.locationsScope = true;
+    return ctx;
+  };
+  const id = (n: number) => `gid://shopify/Order/${n}`;
+
+  it("a standard-shipping order at a fulfillment service doesn't block a compatible standard pair", async () => {
+    const { shopify, deps } = multi([makeOrder(1, { fulfillmentOrders: [] }), makeOrder(2), makeOrder(3)]);
+    const result = await executeMerge(shopify.admin, SHOP, [id(3), id(2), id(1)], deps);
+    expect(result).toMatchObject({ outcome: "merged", primaryName: "#2", mergedCount: 1 });
+    expect(shopify.order(1).cancelCount).toBe(0);
+    expect(shopify.order(1).lineItems).toHaveLength(1);
+  });
+
+  it("a standard-shipping order at a different location doesn't block a compatible standard pair", async () => {
+    const { shopify, deps } = multi([makeOrder(1, { location: LOC_B }), makeOrder(2), makeOrder(3)]);
+    const result = await executeMerge(shopify.admin, SHOP, [id(3), id(2), id(1)], deps);
+    expect(result).toMatchObject({ outcome: "merged", primaryName: "#2", mergedCount: 1 });
+    expect(shopify.order(1).cancelCount).toBe(0);
+  });
+});
