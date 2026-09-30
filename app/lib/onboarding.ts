@@ -88,12 +88,12 @@ export const SAFETY_RULES = [
   "They're from the same customer, going to the same recipient and address, in the same currency.",
   "Each has exactly one shipping method, and it's the same on both.",
   "They're fully paid, have no fulfillment activity yet, and have a low fraud risk.",
-  "They contain standard shippable products — no gift cards, subscriptions, bundles or items with custom options.",
+  "They contain standard shippable products only. No gift cards, subscriptions, bundles or items with custom options.",
   "Every item ships from the same location.",
 ];
 
 export const WHAT_HAPPENS = [
   "Items from the newer order are moved onto the customer's earlier order at no extra charge.",
   "The newer order is cancelled and its stock is restocked. Customers aren't notified.",
-  "Shipping charged on the newer order is not refunded automatically — refund it in Shopify if you choose to.",
+  "Shipping charged on the newer order is not refunded automatically. You can refund it in Shopify if you choose to.",
 ];

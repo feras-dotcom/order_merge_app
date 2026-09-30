@@ -1,7 +1,7 @@
 import type { MetaFunction } from "@remix-run/node";
 
 export const meta: MetaFunction = () => [
-  { title: "Privacy Policy — MergeShip" },
+  { title: "MergeShip Privacy Policy" },
   { name: "description", content: "Privacy Policy for MergeShip" },
 ];
 
@@ -11,7 +11,7 @@ export default function PrivacyPage() {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Privacy Policy — MergeShip</title>
+        <title>MergeShip Privacy Policy</title>
       </head>
       <body
         style={{

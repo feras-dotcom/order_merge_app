@@ -140,7 +140,8 @@ describe("dashboard review state", () => {
       }),
     );
     expect(text(view)).toContain("2 combines need your review before fulfillment");
-    expect(text(view)).toContain("MergeShip-Review");
+    expect(text(view)).toContain("marked the orders for review");
+    expect(text(view)).not.toContain("MergeShip-Review");
     for (const id of ["31", "32", "41"]) expect(view).toContain(`shopify:admin/orders/${id}`);
   });
 });
@@ -152,7 +153,7 @@ describe("settings", () => {
     expect(view).toContain("MergeShip only combines orders when:");
     expect(view).not.toContain("Location access");
     expect(view).not.toMatch(/Savings|Active\b/);
-    expect(view).toContain("Starter — $19/month");
+    expect(view).toContain("Starter · $19/month");
     expect(view).toContain("Manage plan");
   });
 
@@ -200,7 +201,7 @@ describe("onboarding", () => {
     expect(view).toContain("Set up MergeShip in about a minute.");
     expect(view).toContain("You'll:");
     expect(view).toContain("choose how long MergeShip should look for repeat orders");
-    expect(view).toContain("confirm fulfillment-location access if your store requires it");
+    expect(view).toContain("confirm fulfillment location access if your store requires it");
     expect(view).toContain("review the safety protections before enabling automation");
     expect(view).not.toMatch(/can't combine|fraud|Allow location access/);
   });
@@ -223,5 +224,40 @@ describe("onboarding", () => {
     expect(view).toContain("You're ready.");
     expect(view).toContain("MergeShip is now watching for eligible repeat orders.");
     expect(view).toContain("Go to dashboard");
+  });
+});
+
+describe("copy style", () => {
+  // MergeShip's merchant voice avoids dash punctuation (em/en dashes, "--").
+  const screens: [string, string, any][] = [
+    ["dashboard", "../app/routes/app._index", dash()],
+    ["dashboard paused", "../app/routes/app._index", dash({ autoMergeEnabled: false })],
+    [
+      "dashboard interrupted with review",
+      "../app/routes/app._index",
+      dash({
+        locationBlocked: true,
+        activeLocationCount: 2,
+        needsReview: [{ id: "x", primary: { id: "gid://shopify/Order/3", name: "#1003" }, secondaries: [] }],
+        combinedCount: 1,
+        recentCount: 1,
+        recordsShown: 1,
+        rows: [{ ...row, customerName: "Unknown", items: null }],
+      }),
+    ],
+    ["settings", "../app/routes/app.settings", settings({ locationAccess: access(3, true) })],
+    ["settings needs access", "../app/routes/app.settings", settings({ locationAccess: access(3, false) })],
+    [
+      "settings legacy acknowledgement",
+      "../app/routes/app.settings",
+      settings({ settings: { autoMergeEnabled: false, mergeWindowHours: 12, acknowledged: false } }),
+    ],
+    ["onboarding welcome", "../app/routes/app.onboarding", onboarding()],
+    ["onboarding window", "../app/routes/app.onboarding", onboarding({ started: true, locationAccess: access(3, false) })],
+    ["onboarding done", "../app/routes/app.onboarding", onboarding({ done: true })],
+  ];
+
+  it.each(screens)("%s has no dash punctuation", async (_name, path, loader) => {
+    expect(text(await pageHtml(path, loader))).not.toMatch(/[—–]|--/);
   });
 });
