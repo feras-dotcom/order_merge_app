@@ -425,7 +425,7 @@ async function flagForReview(
       admin,
       primary,
       [REVIEW_TAG],
-      `MergeShip: a merge into this order needs review — ${reason}`,
+      `MergeShip: a merge into this order needs review. ${reason}`,
     );
     for (const secondary of secondaryStates) {
       await annotateOrder(
@@ -628,7 +628,7 @@ async function requestCancel(admin: AdminClient, secondary: JournalSecondary, pr
       }`,
     {
       orderId: secondary.id,
-      staffNote: `Duplicate — merged into ${primaryName} by MergeShip. Items transferred; inventory restocked; not refunded.`,
+      staffNote: `Repeat order merged into ${primaryName} by MergeShip. Items transferred, inventory restocked, not refunded.`,
     },
     "orderCancel",
     "orderCancelUserErrors",
@@ -821,7 +821,7 @@ export async function executeMerge(
           {
             id: calcId,
             lineItemId: calcLineItemId,
-            discount: { percentValue: 100, description: `Merged from ${secondary.name} — already paid` },
+            discount: { percentValue: 100, description: `Merged from ${secondary.name}, already paid` },
           },
           "orderEditAddLineItemDiscount",
         );

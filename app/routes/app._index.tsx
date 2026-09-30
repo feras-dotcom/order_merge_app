@@ -20,7 +20,6 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getSettings } from "../lib/settings.server";
 import { defaultMergeDeps, resumeIncompleteMerges } from "../lib/merge.server";
-import { REVIEW_TAG } from "../lib/eligibility";
 import { listOperationsNeedingReview } from "../lib/merge-journal.server";
 import { getLocationAccess } from "../lib/location-access.server";
 import { StatusDot } from "../components/StatusDot";
@@ -121,7 +120,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const row = rows.get(r.primaryOrderId) ?? {
       orderId: r.primaryOrderId,
       orderName: r.primaryOrderName,
-      customerName: (r.customerId && customerNames.get(r.customerId)) || "—",
+      customerName: (r.customerId && customerNames.get(r.customerId)) || "Unknown",
       items: itemCounts.get(r.primaryOrderId) ?? null,
       latestAt: r.createdAt.toISOString(),
       combined: [],
@@ -231,9 +230,10 @@ export default function Index() {
           >
             <BlockStack gap="300">
               <p>
-                MergeShip couldn't confirm these finished, so it tagged the
-                orders “{REVIEW_TAG}”. Open each one and check whether the items
-                are already on the first order before fulfilling or cancelling.
+                MergeShip couldn't confirm these finished, so it marked the
+                orders for review in Shopify. Open each one and check whether the
+                items are already on the first order before fulfilling or
+                cancelling.
               </p>
               <BlockStack gap="100">
                 {needsReview.map((op) => (
@@ -269,7 +269,7 @@ export default function Index() {
             action={{ content: "Allow location access", loading: requesting, onAction: requestLocationAccess }}
           >
             <p>
-              Your fulfillment setup changed — your store now has{" "}
+              Your fulfillment setup changed. Your store now has{" "}
               {activeLocationCount} active locations. Allow location access to
               continue automatic combining.
             </p>
@@ -374,7 +374,7 @@ export default function Index() {
                       <IndexTable.Cell>{row.customerName}</IndexTable.Cell>
                       <IndexTable.Cell>
                         <Text as="span" alignment="end" numeric>
-                          {row.items ?? "—"}
+                          {row.items ?? "Unknown"}
                         </Text>
                       </IndexTable.Cell>
                       <IndexTable.Cell>

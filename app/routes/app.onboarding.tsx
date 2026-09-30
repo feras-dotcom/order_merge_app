@@ -111,7 +111,7 @@ type Step = "welcome" | "window" | "location" | "safety" | "activate";
 
 const SETUP_PREVIEW = [
   "choose how long MergeShip should look for repeat orders",
-  "confirm fulfillment-location access if your store requires it",
+  "confirm fulfillment location access if your store requires it",
   "review the safety protections before enabling automation",
 ];
 
@@ -333,8 +333,9 @@ export default function OnboardingPage() {
               <Text as="p" tone="subdued">
                 Your store has{" "}
                 {locationAccess.activeLocationCount ?? "more than one"} active
-                locations. MergeShip needs read-only location access so it can
-                make sure repeat orders are fulfilled from the same place.
+                locations. MergeShip needs permission to view them so it can
+                make sure repeat orders are fulfilled from the same place. It
+                can't change your locations.
               </Text>
               {locationAccess.requirement === "granted" && (
                 <StatusDot on label="Location access allowed" />

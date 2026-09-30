@@ -18,7 +18,6 @@ import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { getSettings, upsertSettings } from "../lib/settings.server";
 import { getLocationAccess } from "../lib/location-access.server";
-import { REVIEW_TAG } from "../lib/eligibility";
 import {
   isOnboardingComplete,
   isValidMergeWindow,
@@ -101,7 +100,7 @@ function formatPlan(planHandle: string | null, price: PlanPrice | null) {
     maximumFractionDigits: Number.isInteger(value) ? 0 : 2,
   }).format(value);
   const period = price.billingPeriod === "ANNUAL" ? "year" : "month";
-  return `${name} — ${amount}/${period}`;
+  return `${name} · ${amount}/${period}`;
 }
 
 export default function SettingsPage() {
@@ -235,8 +234,8 @@ export default function SettingsPage() {
               >
                 <p>
                   Your store now has {locationAccess.activeLocationCount} active
-                  locations. Allow read-only location access to continue
-                  automatic combining.
+                  locations. Allow location access to continue automatic
+                  combining. MergeShip can only view your locations.
                 </p>
               </Banner>
             ) : (
@@ -268,8 +267,8 @@ export default function SettingsPage() {
               </List>
               <Box paddingBlockStart="100">
                 <Text as="p" variant="bodySm" tone="subdued">
-                  If MergeShip can't confirm a combine finished, it tags the
-                  orders “{REVIEW_TAG}” and flags them on the dashboard.
+                  If MergeShip can't confirm a combine finished, it marks the
+                  orders for review and flags them on the dashboard.
                 </Text>
               </Box>
             </BlockStack>
