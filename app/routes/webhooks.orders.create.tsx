@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import {
+  buildAddressKey,
   buildGroupKey,
   defaultMergeDeps,
   executeMerge,
@@ -103,23 +104,28 @@ async function handleOrderCreated(admin: WebhookAdmin, shop: string, order: Reco
 
   // REST webhook fields use snake_case and province_code / country_code.
   const rawAddress = order.shipping_address as Record<string, string> | null;
-  const newOrderGroupKey = buildGroupKey(
-    customerId,
-    rawAddress && {
-      firstName: rawAddress.first_name,
-      lastName: rawAddress.last_name,
-      company: rawAddress.company,
-      address1: rawAddress.address1,
-      address2: rawAddress.address2,
-      city: rawAddress.city,
-      provinceCode: rawAddress.province_code,
-      zip: rawAddress.zip,
-      countryCodeV2: rawAddress.country_code,
-    },
-    ((order.shipping_lines as any[]) ?? []).map((l) => l?.title),
-  );
+  const newOrderAddress = rawAddress && {
+    firstName: rawAddress.first_name,
+    lastName: rawAddress.last_name,
+    company: rawAddress.company,
+    address1: rawAddress.address1,
+    address2: rawAddress.address2,
+    city: rawAddress.city,
+    provinceCode: rawAddress.province_code,
+    zip: rawAddress.zip,
+    countryCodeV2: rawAddress.country_code,
+  };
+  const shippingTitles = ((order.shipping_lines as any[]) ?? []).map((l) => l?.title);
+  // Candidate discovery only groups by shipping title; executeMerge compares
+  // the full shipping identity (code, source, custom rate price) on fresh data.
+  const newOrderGroupKey = buildGroupKey(customerId, newOrderAddress, shippingTitles);
   if (!newOrderGroupKey) {
-    return skip(orderId, "no usable shipping address or not exactly one shipping method");
+    const why = !buildAddressKey(customerId, newOrderAddress)
+      ? "no usable shipping address"
+      : shippingTitles.length !== 1
+        ? `${shippingTitles.length} shipping lines in the webhook payload (exactly one required)`
+        : "shipping line has no title";
+    return skip(orderId, why);
   }
 
   const newOrderTime = new Date(order.created_at as string).getTime();

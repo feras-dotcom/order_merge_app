@@ -2,7 +2,12 @@
 // covering exactly the operations merge.server.ts performs. Each operation is
 // dispatched by its GraphQL operation name; tests inject failures per name.
 
-import type { FulfillmentOrderInfo, MergeLineItem, OrderState } from "../app/lib/eligibility";
+import type {
+  FulfillmentOrderInfo,
+  MergeLineItem,
+  OrderState,
+  ShippingLineInfo,
+} from "../app/lib/eligibility";
 import type {
   MergeHistoryEntry,
   MergeJournal,
@@ -68,6 +73,30 @@ export function makeLineItem(overrides: Partial<MergeLineItem> = {}): MergeLineI
   };
 }
 
+/** A shipping-profile rate, shaped like the live data for "International Shipping". */
+export function standardRate(overrides: Partial<ShippingLineInfo> = {}): ShippingLineInfo {
+  return {
+    title: "Standard",
+    code: "Standard",
+    source: "shopify",
+    carrierIdentifier: null,
+    custom: false,
+    originalPriceSet: { shopMoney: { amount: "5.0", currencyCode: "USD" } },
+    ...overrides,
+  };
+}
+
+/** A manually entered rate, shaped like the live data for Draft Order "Custom" shipping. */
+export function customRate(amount: string, overrides: Partial<ShippingLineInfo> = {}): ShippingLineInfo {
+  return standardRate({
+    title: "Custom",
+    code: "custom",
+    custom: true,
+    originalPriceSet: { shopMoney: { amount, currencyCode: "USD" } },
+    ...overrides,
+  });
+}
+
 export function makeOrder(
   n: number,
   overrides: Partial<FakeOrder> = {},
@@ -95,7 +124,7 @@ export function makeOrder(
       zip: "62701",
       countryCodeV2: "US",
     },
-    shippingLines: { nodes: [{ title: "Standard" }] },
+    shippingLines: { nodes: [standardRate()] },
     fulfillments: [],
     note: null,
     tags: [],
