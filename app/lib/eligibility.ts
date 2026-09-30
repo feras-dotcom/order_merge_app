@@ -83,6 +83,74 @@ export function buildGroupKey(
   return `${addressKey}${SEP}${title}`;
 }
 
+// ── Shipping-method equivalence ───────────────────────────────────────────────
+
+export interface ShippingLineInfo {
+  title: string | null;
+  code?: string | null;
+  source?: string | null;
+  carrierIdentifier?: string | null;
+  /** true for manually entered rates (Draft Orders / admin / API). */
+  custom?: boolean | null;
+  originalPriceSet?: { shopMoney: { amount: string; currencyCode: string } } | null;
+}
+
+const norm = (value: string | null | undefined) => normalizeShippingTitle(value);
+
+/**
+ * Stable identity of a shipping method, or null when it can't be established.
+ *
+ * • Shopify rates (custom=false: shipping-profile, carrier-calculated, app
+ *   rates) are identified by their title, code, source and carrier. The price
+ *   is deliberately NOT part of it: the same service legitimately costs
+ *   different amounts for different carts.
+ * • Custom rates (custom=true) are free-text: every one Shopify's admin creates
+ *   is titled "Custom" with code "custom", whatever service the merchant sold.
+ *   The only authoritative discriminator is what the customer was charged, so
+ *   the title AND the original (pre-discount) price must both match — two
+ *   Custom lines at different prices may be different services, and treating
+ *   them as one could lose a paid shipping upgrade.
+ * • If Shopify doesn't say whether the line is custom, or a custom line has no
+ *   readable price, equivalence can't be established.
+ */
+export function shippingSignature(line: ShippingLineInfo): string | null {
+  const title = norm(line.title);
+  if (!title || typeof line.custom !== "boolean") return null;
+  if (line.custom) {
+    const money = line.originalPriceSet?.shopMoney;
+    const amount = Number(money?.amount);
+    if (!money?.currencyCode || money.amount == null || !Number.isFinite(amount)) return null;
+    return ["custom", title, `${amount} ${money.currencyCode}`].join(SEP);
+  }
+  return ["rate", title, norm(line.code), norm(line.source), norm(line.carrierIdentifier)].join(SEP);
+}
+
+/** Human-readable shipping method for skip reasons. */
+export function describeShippingLine(line: ShippingLineInfo | undefined): string {
+  if (!line) return "no shipping method";
+  const money = line.originalPriceSet?.shopMoney;
+  const price = money ? ` (${money.amount} ${money.currencyCode})` : "";
+  return `"${line.title ?? "untitled"}"${line.custom ? " custom rate" : ""}${price}`;
+}
+
+/** The order's single shipping method signature, or why there isn't one. */
+export function orderShippingSignature(order: Pick<OrderState, "name" | "shippingLines">):
+  | { ok: true; signature: string }
+  | { ok: false; reason: string } {
+  const lines = order.shippingLines.nodes;
+  if (lines.length !== 1) {
+    return { ok: false, reason: `Order ${order.name} has ${lines.length} shipping methods; exactly one is required.` };
+  }
+  const signature = shippingSignature(lines[0]);
+  if (!signature) {
+    return {
+      ok: false,
+      reason: `Order ${order.name}'s shipping method ${describeShippingLine(lines[0])} can't be compared reliably.`,
+    };
+  }
+  return { ok: true, signature };
+}
+
 // ── Order-level state ─────────────────────────────────────────────────────────
 
 export interface OrderState {
@@ -98,7 +166,7 @@ export interface OrderState {
   presentmentCurrencyCode: string;
   customer: { id: string } | null;
   shippingAddress: AddressFields | null;
-  shippingLines: { nodes: { title: string | null }[] };
+  shippingLines: { nodes: ShippingLineInfo[] };
   fulfillments: { id: string }[];
   note?: string | null;
   tags?: string[];
@@ -307,6 +375,20 @@ export function evaluateMergeGroup<T extends OrderState>(
     };
   }
 
+  const signatures: string[] = [];
+  for (const order of sorted) {
+    const shipping = orderShippingSignature(order);
+    if (!shipping.ok) return { ok: false, reason: shipping.reason };
+    signatures.push(shipping.signature);
+  }
+  const mismatch = signatures.findIndex((s) => s !== signatures[0]);
+  if (mismatch !== -1) {
+    return {
+      ok: false,
+      reason: `Shipping methods differ: ${primary.name} ${describeShippingLine(primary.shippingLines.nodes[0])} vs ${sorted[mismatch].name} ${describeShippingLine(sorted[mismatch].shippingLines.nodes[0])}.`,
+    };
+  }
+
   const currencyMismatch = sorted.find(
     (o) =>
       o.currencyCode !== primary.currencyCode ||
@@ -324,4 +406,75 @@ export function evaluateMergeGroup<T extends OrderState>(
   }
 
   return { ok: true, primary, secondaries };
+}
+
+// ── Candidate selection ───────────────────────────────────────────────────────
+
+export type CandidateSelection<T extends OrderState> =
+  | { ok: true; orders: T[]; excluded: { name: string; reason: string }[] }
+  | { ok: false; reason: string };
+
+/**
+ * Narrows a candidate set to the orders that can combine with the anchor (the
+ * newly placed order). The anchor must qualify on its own; every other order
+ * that fails a per-order rule or doesn't match the anchor's customer,
+ * recipient, address, currency or shipping method is excluded and left
+ * untouched, so one unsuitable order can't block an otherwise safe pair.
+ * evaluateMergeGroup remains the authoritative check on the result.
+ */
+export function selectCompatibleOrders<T extends OrderState>(
+  anchorId: string,
+  orders: T[],
+  lineItemsById: Map<string, MergeLineItem[]>,
+): CandidateSelection<T> {
+  const anchor = orders.find((o) => o.id === anchorId);
+  if (!anchor) return { ok: false, reason: "The new order could not be loaded." };
+
+  const problem = (order: T): string | null => {
+    const state = orderStateIneligibility(order);
+    if (state) return state;
+    const items = lineItemsById.get(order.id);
+    if (!items) return `Line items for ${order.name} were not loaded.`;
+    // Role-specific rules (e.g. transferable items) are applied once the
+    // primary is known, by evaluateMergeGroup.
+    const lineItem = lineItemIneligibility(order.name, items, false);
+    if (lineItem) return lineItem;
+    const shipping = orderShippingSignature(order);
+    return shipping.ok ? null : shipping.reason;
+  };
+
+  const anchorProblem = problem(anchor);
+  if (anchorProblem) return { ok: false, reason: anchorProblem };
+  const anchorAddress = buildAddressKey(anchor.customer?.id, anchor.shippingAddress);
+  if (!anchorAddress) return { ok: false, reason: `Order ${anchor.name} has no usable shipping address.` };
+  const anchorShipping = (orderShippingSignature(anchor) as { signature: string }).signature;
+
+  const kept: T[] = [anchor];
+  const excluded: { name: string; reason: string }[] = [];
+  for (const order of orders) {
+    if (order.id === anchorId) continue;
+    let reason = problem(order);
+    if (!reason && buildAddressKey(order.customer?.id, order.shippingAddress) !== anchorAddress) {
+      reason = "Different customer, recipient or shipping address.";
+    }
+    if (
+      !reason &&
+      (order.currencyCode !== anchor.currencyCode || order.presentmentCurrencyCode !== anchor.presentmentCurrencyCode)
+    ) {
+      reason = "Different currency.";
+    }
+    if (!reason && (orderShippingSignature(order) as { signature: string }).signature !== anchorShipping) {
+      reason = `Different shipping method: ${describeShippingLine(order.shippingLines.nodes[0])} vs ${describeShippingLine(anchor.shippingLines.nodes[0])} on ${anchor.name}.`;
+    }
+    if (reason) excluded.push({ name: order.name, reason });
+    else kept.push(order);
+  }
+
+  if (kept.length < 2) {
+    return {
+      ok: false,
+      reason: `No other order can combine with ${anchor.name}: ${excluded.map((e) => `${e.name} — ${e.reason}`).join("; ")}`,
+    };
+  }
+  return { ok: true, orders: kept, excluded };
 }

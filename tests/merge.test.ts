@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { executeMerge, resumeIncompleteMerges, REVIEW_TAG } from "../app/lib/merge.server";
 import {
   advance,
+  customRate,
   FakeShopify,
   LOC_A,
   LOC_B,
@@ -492,5 +493,68 @@ describe("executeMerge — fulfillment location rule", () => {
     expect(result.outcome).toBe("failed");
     expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
     expect(noWrites(shopify)).toBe(true);
+  });
+});
+
+describe("executeMerge — live regressions (ordermergetest2, Custom shipping)", () => {
+  // Shapes taken from the live orders: Custom lines are title "Custom", code
+  // "custom", custom=true; "The 3p Fulfilled Snowboard" is routed to a
+  // fulfillment service, so no fulfillment order is visible for it.
+  const threePl = (n: number, amount: string) =>
+    makeOrder(n, { shippingLines: { nodes: [customRate(amount)] }, fulfillmentOrders: [] });
+  const shopLocation = (n: number, amount: string, source: string | null = "shopify") =>
+    makeOrder(n, { shippingLines: { nodes: [customRate(amount, { source })] }, location: LOC_A });
+  const multi = (orders: ReturnType<typeof makeOrder>[]) => {
+    const ctx = setup(orders);
+    ctx.shopify.activeLocations = 3;
+    ctx.shopify.fulfillmentOrdersScope = true;
+    ctx.shopify.locationsScope = true;
+    return ctx;
+  };
+  const id = (n: number) => `gid://shopify/Order/${n}`;
+
+  it("Karine #1021–#1023: the matching $20 Custom pair combines; the 3PL $10 order is left untouched", async () => {
+    const { shopify, deps } = multi([threePl(1021, "10.0"), shopLocation(1022, "20.0"), shopLocation(1023, "20.0")]);
+    const result = await executeMerge(shopify.admin, SHOP, [id(1023), id(1022), id(1021)], deps);
+    expect(result).toMatchObject({ outcome: "merged", primaryName: "#1022", mergedCount: 1 });
+    expect(shopify.order(1023).cancelledAt).not.toBeNull();
+    expect(shopify.order(1021).cancelCount).toBe(0);
+    expect(shopify.order(1021).lineItems).toHaveLength(1);
+  });
+
+  it("Russell, anchor #1020 (3PL): nothing is touched", async () => {
+    const orders = [shopLocation(1017, "15.0", null), threePl(1018, "5.0"), shopLocation(1019, "5.0"), threePl(1020, "5.0")];
+    const { shopify, journal, deps } = multi(orders);
+    const result = await executeMerge(shopify.admin, SHOP, [id(1020), id(1019), id(1018), id(1017)], deps);
+    expect(result.outcome).toBe("skipped");
+    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(journal.ops.size).toBe(0);
+  });
+
+  it("Russell, anchor #1019 ($5 Custom): $15 Custom and 3PL orders don't qualify, so nothing is touched", async () => {
+    const orders = [shopLocation(1017, "15.0", null), threePl(1018, "5.0"), shopLocation(1019, "5.0")];
+    const { shopify, deps } = multi(orders);
+    const result = await executeMerge(shopify.admin, SHOP, [id(1019), id(1018), id(1017)], deps);
+    expect(result.outcome).toBe("skipped");
+    expect(result.reason).toMatch(/No other order/);
+    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
+  });
+
+  it("a second $5 Custom order at the shop location does combine with #1019", async () => {
+    const orders = [shopLocation(1017, "15.0", null), shopLocation(1019, "5.0"), shopLocation(1025, "5.0")];
+    const { shopify, deps } = multi(orders);
+    const result = await executeMerge(shopify.admin, SHOP, [id(1025), id(1019), id(1017)], deps);
+    expect(result).toMatchObject({ outcome: "merged", primaryName: "#1019", mergedCount: 1 });
+    expect(shopify.order(1017).cancelCount).toBe(0);
+  });
+
+  it("an excluded order is re-verified away: the pre-commit recheck only covers the combined orders", async () => {
+    const { shopify, deps } = multi([threePl(1021, "10.0"), shopLocation(1022, "20.0"), shopLocation(1023, "20.0")]);
+    // #1021 changing mid-merge must not affect the #1022/#1023 combine.
+    shopify.on("MergeEditDiscount", () => {
+      shopify.order(1021).displayFulfillmentStatus = "FULFILLED";
+      return undefined;
+    });
+    expect((await executeMerge(shopify.admin, SHOP, [id(1023), id(1022), id(1021)], deps)).outcome).toBe("merged");
   });
 });

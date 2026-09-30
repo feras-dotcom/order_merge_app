@@ -70,6 +70,7 @@ vi.mock("../app/db.server", () => ({
 }));
 
 vi.mock("../app/lib/merge.server", () => ({
+  buildAddressKey: () => "address",
   buildGroupKey: () => "group",
   defaultMergeDeps: () => ({ journal: { findBlockingOrderIds: async () => new Set() } }),
   executeMerge: env.executeMerge,

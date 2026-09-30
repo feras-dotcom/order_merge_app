@@ -4,8 +4,11 @@ import {
   evaluateMergeGroup,
   lineItemIneligibility,
   orderStateIneligibility,
+  selectCompatibleOrders,
+  shippingSignature,
+  type ShippingLineInfo,
 } from "../app/lib/eligibility";
-import { makeLineItem, makeOrder } from "./fake-shopify";
+import { customRate, makeLineItem, makeOrder, standardRate } from "./fake-shopify";
 
 const addr = makeOrder(1).shippingAddress!;
 const C = "gid://shopify/Customer/1";
@@ -125,5 +128,104 @@ describe("evaluateMergeGroup", () => {
     const a = makeOrder(1);
     const b = makeOrder(2);
     expect(evaluateMergeGroup([a, b], new Map([[a.id, a.lineItems]])).ok).toBe(false);
+  });
+});
+
+describe("shipping-method equivalence", () => {
+  const withShipping = (n: number, ...lines: ShippingLineInfo[]) =>
+    makeOrder(n, { shippingLines: { nodes: lines } });
+  const pair = (a: ShippingLineInfo[], b: ShippingLineInfo[]) => {
+    const o1 = withShipping(1, ...a);
+    const o2 = withShipping(2, ...b);
+    return evaluateMergeGroup([o1, o2], new Map([[o1.id, o1.lineItems], [o2.id, o2.lineItems]]));
+  };
+
+  it("identical standard rates → eligible", () => {
+    expect(pair([standardRate()], [standardRate()]).ok).toBe(true);
+  });
+
+  it("same standard rate at a different cart-dependent price → eligible", () => {
+    const pricier = standardRate({ originalPriceSet: { shopMoney: { amount: "9.0", currencyCode: "USD" } } });
+    expect(pair([standardRate()], [pricier]).ok).toBe(true);
+  });
+
+  it.each([
+    ["title", { title: "Express", code: "Express" }],
+    ["code", { code: "Standard-2" }],
+    ["source", { source: "usps" }],
+    ["carrier", { carrierIdentifier: "abc123" }],
+  ])("standard rates differing by %s → rejected", (_label, overrides) => {
+    const result = pair([standardRate()], [standardRate(overrides as Partial<ShippingLineInfo>)]);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.reason).toMatch(/Shipping methods differ|do not share/);
+  });
+
+  it("identical Custom rates (same title and price) → eligible", () => {
+    expect(pair([customRate("20.0")], [customRate("20.0")]).ok).toBe(true);
+  });
+
+  it("Custom rates only differing by source (null vs shopify, as seen live) → eligible", () => {
+    expect(pair([customRate("5.0", { source: null })], [customRate("5.0")]).ok).toBe(true);
+  });
+
+  it("Custom rates at different prices → rejected, with a diagnosable reason", () => {
+    const result = pair([customRate("10.0")], [customRate("20.0")]);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.reason).toContain('"Custom" custom rate (10.0 USD)');
+    expect(!result.ok && result.reason).toContain("(20.0 USD)");
+  });
+
+  it("renamed Custom rates at the same price → rejected", () => {
+    expect(pair([customRate("10.0", { title: "Rush" })], [customRate("10.0", { title: "Economy" })]).ok).toBe(false);
+  });
+
+  it("a Custom rate never matches a Shopify rate with the same title and price", () => {
+    expect(pair([customRate("5.0", { title: "Standard" })], [standardRate()]).ok).toBe(false);
+  });
+
+  it("missing shipping method → rejected", () => {
+    expect(pair([], []).ok).toBe(false);
+  });
+
+  it("more than one shipping method → rejected", () => {
+    expect(pair([standardRate(), standardRate()], [standardRate()]).ok).toBe(false);
+  });
+
+  it.each([
+    ["unknown custom flag", { custom: null }],
+    ["custom rate without a price", { custom: true, originalPriceSet: null }],
+    ["custom rate with an unreadable price", { custom: true, originalPriceSet: { shopMoney: { amount: "n/a", currencyCode: "USD" } } }],
+    ["blank title", { title: "  " }],
+  ])("ambiguous metadata (%s) → conservative rejection", (_label, overrides) => {
+    const line = standardRate(overrides as Partial<ShippingLineInfo>);
+    expect(shippingSignature(line)).toBeNull();
+    expect(pair([line], [line]).ok).toBe(false);
+  });
+});
+
+describe("selectCompatibleOrders", () => {
+  const items = (...orders: ReturnType<typeof makeOrder>[]) => new Map(orders.map((o) => [o.id, o.lineItems]));
+
+  it("keeps the anchor and matching orders, excluding a mismatched one instead of blocking", () => {
+    const a = makeOrder(1, { shippingLines: { nodes: [customRate("20.0")] } });
+    const b = makeOrder(2, { shippingLines: { nodes: [customRate("10.0")] } });
+    const anchor = makeOrder(3, { shippingLines: { nodes: [customRate("20.0")] } });
+    const result = selectCompatibleOrders(anchor.id, [anchor, b, a], items(a, b, anchor));
+    expect(result.ok && result.orders.map((o) => o.name)).toEqual(["#3", "#1"]);
+    expect(result.ok && result.excluded[0]).toMatchObject({ name: "#2" });
+    expect(result.ok && result.excluded[0].reason).toContain("Different shipping method");
+  });
+
+  it("never proceeds when the anchor itself doesn't qualify", () => {
+    const a = makeOrder(1);
+    const anchor = makeOrder(2, { riskLevel: "HIGH" });
+    expect(selectCompatibleOrders(anchor.id, [anchor, a], items(a, anchor)).ok).toBe(false);
+  });
+
+  it("explains why nothing could combine with the anchor", () => {
+    const a = makeOrder(1, { shippingLines: { nodes: [customRate("15.0")] } });
+    const anchor = makeOrder(2, { shippingLines: { nodes: [customRate("5.0")] } });
+    const result = selectCompatibleOrders(anchor.id, [anchor, a], items(a, anchor));
+    expect(!result.ok && result.reason).toMatch(/No other order can combine with #2: #1 — Different shipping method/);
   });
 });

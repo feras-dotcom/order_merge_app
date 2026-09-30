@@ -26,6 +26,7 @@ import {
   REVIEW_TAG,
   evaluateFulfillmentLocation,
   evaluateMergeGroup,
+  selectCompatibleOrders,
   type OrderFulfillmentOrders,
   type MergeLineItem,
   type OrderState,
@@ -129,7 +130,16 @@ const ORDER_STATE_QUERY = `#graphql
           zip
           countryCodeV2
         }
-        shippingLines(first: 5) { nodes { title } }
+        shippingLines(first: 5) {
+          nodes {
+            title
+            code
+            source
+            carrierIdentifier
+            custom
+            originalPriceSet { shopMoney { amount currencyCode } }
+          }
+        }
         fulfillments(first: 5) { id }
       }
     }
@@ -261,6 +271,49 @@ async function logMergedLocation(admin: AdminClient, primary: OrderState, locati
   } catch (err: any) {
     console.warn(`[merge] Could not check locations after commit for ${primary.name}: ${err?.message}`);
   }
+}
+
+/**
+ * Per-order location pre-filter. When fulfillment orders are readable, keeps
+ * the anchor (orders[0]) plus only those candidates whose items verifiably
+ * ship from the anchor's location; others are excluded and left untouched.
+ * Without location access, the group is returned unchanged and
+ * resolveMergeLocation applies the single-location rule to it.
+ */
+async function excludeByLocation(
+  admin: AdminClient,
+  orders: OrderState[],
+  lineItems: Map<string, MergeLineItem[]>,
+): Promise<{ ok: true; orders: OrderState[] } | { ok: false; reason: string }> {
+  let fulfillmentOrders: Map<string, OrderFulfillmentOrders>;
+  try {
+    fulfillmentOrders = await fetchFulfillmentOrdersById(admin, orders);
+  } catch (err) {
+    if (isAccessDenied(err)) return { ok: true, orders };
+    throw err;
+  }
+
+  const [anchor, ...others] = orders;
+  const anchorLocation = evaluateFulfillmentLocation([anchor], fulfillmentOrders, lineItems);
+  if (!anchorLocation.ok) return { ok: false, reason: anchorLocation.reason };
+
+  const kept = [anchor];
+  const excluded: string[] = [];
+  for (const order of others) {
+    const location = evaluateFulfillmentLocation([order], fulfillmentOrders, lineItems);
+    if (!location.ok) {
+      excluded.push(`${order.name} — ${location.reason}`);
+    } else if (location.locationId !== anchorLocation.locationId) {
+      excluded.push(`${order.name} — ships from a different location than ${anchor.name}.`);
+    } else {
+      kept.push(order);
+    }
+  }
+  for (const e of excluded) console.log(`[merge] Excluded ${e}`);
+  if (kept.length < 2) {
+    return { ok: false, reason: `No other order ships from the same location as ${anchor.name}: ${excluded.join("; ")}` };
+  }
+  return { ok: true, orders: kept };
 }
 
 type LocationDecision = { ok: true; locationId: string | null } | { ok: false; reason: string };
@@ -651,6 +704,9 @@ const fingerprint = (items: Map<string, MergeLineItem[]>) =>
  * Merges the given orders: the oldest is the primary; every other order's
  * items are added to it at a 100 % discount, then those orders are cancelled
  * (restocked, not refunded, customer not notified).
+ *
+ * orderIds[0] is the anchor (the newly placed order). It must qualify; other
+ * candidates that can't combine with it are excluded and left untouched.
  */
 export async function executeMerge(
   admin: AdminClient,
@@ -674,6 +730,22 @@ export async function executeMerge(
   } catch (err: any) {
     return fail(err?.message ?? "Could not load orders.");
   }
+
+  // 2b ── Keep only the orders that can combine with the new order ───────────
+  // One unsuitable candidate is excluded (and left untouched) rather than
+  // blocking an otherwise safe combine of the others.
+  const selection = selectCompatibleOrders(orderIds[0], orders, lineItems);
+  if (!selection.ok) return skip(selection.reason);
+  for (const e of selection.excluded) console.log(`[merge] Excluded ${e.name}: ${e.reason}`);
+  try {
+    const byLocation = await excludeByLocation(admin, selection.orders, lineItems);
+    if (!byLocation.ok) return skip(byLocation.reason);
+    orders = byLocation.orders;
+  } catch (err: any) {
+    return fail(err?.message ?? "Could not verify fulfillment locations.");
+  }
+  lineItems = new Map(orders.map((o) => [o.id, lineItems.get(o.id)!]));
+  const groupIds = orders.map((o) => o.id);
 
   const evaluation = evaluateMergeGroup(orders, lineItems);
   if (!evaluation.ok) return skip(evaluation.reason);
@@ -763,7 +835,7 @@ export async function executeMerge(
   // Orders can be fulfilled, edited, refunded or cancelled while the edit was
   // being built; commit only if nothing relevant changed.
   try {
-    const freshOrders = await fetchOrderStates(admin, orderIds);
+    const freshOrders = await fetchOrderStates(admin, groupIds);
     const freshItems = await fetchLineItemsById(admin, freshOrders);
     const recheck = evaluateMergeGroup(freshOrders, freshItems);
     if (!recheck.ok) return skip(`Orders changed during the merge: ${recheck.reason}`);
