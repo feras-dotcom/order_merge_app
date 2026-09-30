@@ -6,13 +6,13 @@ import type { ReactNode } from "react";
 import {
   Banner,
   BlockStack,
+  Box,
   Button,
   Card,
   Checkbox,
   InlineStack,
   List,
   Page,
-  Select,
   Text,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
@@ -21,12 +21,12 @@ import { getSettings, upsertSettings } from "../lib/settings.server";
 import { getLocationAccess } from "../lib/location-access.server";
 import {
   isValidMergeWindow,
-  MERGE_WINDOW_HOURS,
   missingOnboardingRequirements,
   SAFETY_RULES,
   WHAT_HAPPENS,
   type OnboardingRequirement,
 } from "../lib/onboarding";
+import { MergeWindowField } from "../components/MergeWindowField";
 import { StatusDot } from "../components/StatusDot";
 import { useLocationAccessRequest } from "../components/useLocationAccessRequest";
 
@@ -109,10 +109,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 type Step = "welcome" | "window" | "location" | "safety" | "activate";
 
-const WINDOW_OPTIONS = MERGE_WINDOW_HOURS.map((h) => ({
-  label: h === 1 ? "1 hour" : `${h} hours`,
-  value: String(h),
-}));
+const SETUP_PREVIEW = [
+  "choose how long MergeShip should look for repeat orders",
+  "confirm fulfillment-location access if your store requires it",
+  "review the safety protections before enabling automation",
+];
 
 const REQUIREMENT_MESSAGES: Record<OnboardingRequirement, string> = {
   "merge-window": "Choose a merge window.",
@@ -173,7 +174,7 @@ export default function OnboardingPage() {
   );
 
   const [step, setStep] = useState<Step>(started ? "window" : "welcome");
-  const [windowHours, setWindowHours] = useState(String(mergeWindowHours));
+  const [windowHours, setWindowHours] = useState<number | null>(mergeWindowHours);
   const [acknowledged, setAcknowledged] = useState(false);
 
   // If completing fails server-side, jump to the first unmet requirement.
@@ -206,24 +207,26 @@ export default function OnboardingPage() {
     return (
       <Page narrowWidth>
         <TitleBar title="MergeShip" />
-        <Card>
-          <BlockStack gap="500">
-            <BlockStack gap="200">
-              <StatusDot on label="Automatic merging on" />
-              <Text as="h2" variant="headingLg">
-                You're ready.
-              </Text>
-              <Text as="p" tone="subdued">
-                MergeShip is now watching for eligible repeat orders.
-              </Text>
+        <Box paddingBlockStart={{ xs: "0", md: "1000" }}>
+          <Card>
+            <BlockStack gap="500">
+              <BlockStack gap="200">
+                <StatusDot on label="Automatic merging on" />
+                <Text as="h2" variant="headingLg">
+                  You're ready.
+                </Text>
+                <Text as="p" tone="subdued">
+                  MergeShip is now watching for eligible repeat orders.
+                </Text>
+              </BlockStack>
+              <InlineStack align="end">
+                <Button variant="primary" url="/app">
+                  Go to dashboard
+                </Button>
+              </InlineStack>
             </BlockStack>
-            <InlineStack align="end">
-              <Button variant="primary" url="/app">
-                Go to dashboard
-              </Button>
-            </InlineStack>
-          </BlockStack>
-        </Card>
+          </Card>
+        </Box>
       </Page>
     );
   }
@@ -231,69 +234,79 @@ export default function OnboardingPage() {
   return (
     <Page narrowWidth>
       <TitleBar title="Set up MergeShip" />
-      <BlockStack gap="400">
-        {errorBanner}
+      {/* Offset from the top on larger screens so setup sits deliberately in
+          the canvas instead of hugging the header; steps share the offset so
+          the card doesn't jump between steps. */}
+      <Box paddingBlockStart={{ xs: "0", md: "1000" }}>
+        <BlockStack gap="400">
+          {errorBanner}
 
-        {step === "welcome" && (
-          <Card>
-            <BlockStack gap="500">
-              <BlockStack gap="200">
-                <Text as="h1" variant="headingXl">
-                  Welcome to MergeShip
-                </Text>
-                <Text as="p" variant="bodyLg">
-                  Repeat orders shouldn't mean more manual work.
-                </Text>
-                <Text as="p" tone="subdued">
-                  Set up how MergeShip should handle eligible repeat orders
-                  before fulfillment. It takes about a minute.
-                </Text>
+          {step === "welcome" && (
+            <Card padding={{ xs: "400", sm: "800" }}>
+              <BlockStack gap="600">
+                <BlockStack gap="300">
+                  <Text as="h1" variant="headingXl">
+                    Welcome to MergeShip
+                  </Text>
+                  <Text as="p" variant="bodyLg">
+                    Repeat orders shouldn't mean more manual work.
+                  </Text>
+                  <Text as="p" tone="subdued">
+                    Set up MergeShip in about a minute.
+                  </Text>
+                </BlockStack>
+                <BlockStack gap="200">
+                  <Text as="p" fontWeight="medium">
+                    You'll:
+                  </Text>
+                  <List type="bullet">
+                    {SETUP_PREVIEW.map((line) => (
+                      <List.Item key={line}>{line}</List.Item>
+                    ))}
+                  </List>
+                </BlockStack>
+                <InlineStack align="start">
+                  <Button
+                    variant="primary"
+                    size="large"
+                    onClick={() => {
+                      fetcher.submit({ intent: "start" }, { method: "post" });
+                      setStep("window");
+                    }}
+                  >
+                    Set up MergeShip
+                  </Button>
+                </InlineStack>
               </BlockStack>
-              <InlineStack align="end">
+            </Card>
+          )}
+
+          {step === "window" && (
+            <StepCard
+              counter={counter}
+              title="Choose a merge window"
+              primary={
                 <Button
                   variant="primary"
+                  disabled={windowHours === null}
                   onClick={() => {
-                    fetcher.submit({ intent: "start" }, { method: "post" });
-                    setStep("window");
+                    fetcher.submit({ intent: "window", mergeWindowHours: String(windowHours) }, { method: "post" });
+                    go(1);
                   }}
                 >
-                  Set up MergeShip
+                  Continue
                 </Button>
-              </InlineStack>
-            </BlockStack>
-          </Card>
-        )}
-
-        {step === "window" && (
-          <StepCard
-            counter={counter}
-            title="Choose a merge window"
-            primary={
-              <Button
-                variant="primary"
-                onClick={() => {
-                  fetcher.submit({ intent: "window", mergeWindowHours: windowHours }, { method: "post" });
-                  go(1);
-                }}
-              >
-                Continue
-              </Button>
-            }
-          >
-            <BlockStack gap="300">
-              <Text as="p" tone="subdued">
-                MergeShip only combines repeat orders placed within this time of
-                each other. You can change it later in Settings.
-              </Text>
-              <Select
-                label="Combine orders placed within"
-                options={WINDOW_OPTIONS}
-                value={windowHours}
-                onChange={setWindowHours}
-              />
-            </BlockStack>
-          </StepCard>
-        )}
+              }
+            >
+              <BlockStack gap="300">
+                <Text as="p" tone="subdued">
+                  MergeShip only combines repeat orders placed within this time
+                  of each other. You can change it later in Settings.
+                </Text>
+                <MergeWindowField initialHours={windowHours ?? mergeWindowHours} onChange={setWindowHours} />
+              </BlockStack>
+            </StepCard>
+          )}
 
         {step === "location" && (
           <StepCard
@@ -379,7 +392,7 @@ export default function OnboardingPage() {
                 loading={submitting}
                 onClick={() =>
                   fetcher.submit(
-                    { intent: "complete", mergeWindowHours: windowHours, acknowledged: String(acknowledged) },
+                    { intent: "complete", mergeWindowHours: String(windowHours), acknowledged: String(acknowledged) },
                     { method: "post" },
                   )
                 }
@@ -410,7 +423,8 @@ export default function OnboardingPage() {
             </BlockStack>
           </StepCard>
         )}
-      </BlockStack>
+        </BlockStack>
+      </Box>
     </Page>
   );
 }

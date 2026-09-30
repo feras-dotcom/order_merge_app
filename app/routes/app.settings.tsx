@@ -12,7 +12,6 @@ import {
   Link,
   List,
   Page,
-  Select,
   Text,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
@@ -23,11 +22,11 @@ import { REVIEW_TAG } from "../lib/eligibility";
 import {
   isOnboardingComplete,
   isValidMergeWindow,
-  MERGE_WINDOW_HOURS,
   SAFETY_RULES,
   WHAT_HAPPENS,
 } from "../lib/onboarding";
 import type { PlanPrice } from "../lib/billing.server";
+import { MergeWindowField } from "../components/MergeWindowField";
 import { StatusDot } from "../components/StatusDot";
 import { SettingsSection } from "../components/SettingsSection";
 import { useLocationAccessRequest } from "../components/useLocationAccessRequest";
@@ -91,11 +90,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 // ── Component ─────────────────────────────────────────────
 
-const WINDOW_OPTIONS = MERGE_WINDOW_HOURS.map((h) => ({
-  label: h === 1 ? "1 hour" : `${h} hours`,
-  value: String(h),
-}));
-
 function formatPlan(planHandle: string | null, price: PlanPrice | null) {
   if (!planHandle) return "No active plan";
   const name = planHandle.charAt(0).toUpperCase() + planHandle.slice(1);
@@ -121,12 +115,12 @@ export default function SettingsPage() {
 
   const [autoMergeEnabled, setAutoMergeEnabled] = useState(settings.autoMergeEnabled);
   const [acknowledged, setAcknowledged] = useState(false);
-  const [mergeWindowHours, setMergeWindowHours] = useState(String(settings.mergeWindowHours));
+  const [mergeWindowHours, setMergeWindowHours] = useState<number | null>(settings.mergeWindowHours);
 
   // Re-sync local state after a save reloads the loader data.
   useEffect(() => {
     setAutoMergeEnabled(settings.autoMergeEnabled);
-    setMergeWindowHours(String(settings.mergeWindowHours));
+    setMergeWindowHours(settings.mergeWindowHours);
     setAcknowledged(false);
   }, [settings.autoMergeEnabled, settings.mergeWindowHours]);
 
@@ -143,13 +137,16 @@ export default function SettingsPage() {
   // version) is asked again when resuming automation.
   const needsAcknowledgement = autoMergeEnabled && !settings.autoMergeEnabled && !settings.acknowledged;
   const dirty =
-    autoMergeEnabled !== settings.autoMergeEnabled ||
-    mergeWindowHours !== String(settings.mergeWindowHours);
+    autoMergeEnabled !== settings.autoMergeEnabled || mergeWindowHours !== settings.mergeWindowHours;
   const blocked = locationAccess.requirement === "needs-access";
 
   const handleSave = () => {
     fetcher.submit(
-      { autoMergeEnabled: String(autoMergeEnabled), acknowledged: String(acknowledged), mergeWindowHours },
+      {
+        autoMergeEnabled: String(autoMergeEnabled),
+        acknowledged: String(acknowledged),
+        mergeWindowHours: String(mergeWindowHours),
+      },
       { method: "post" },
     );
   };
@@ -168,7 +165,7 @@ export default function SettingsPage() {
         content: "Save",
         onAction: handleSave,
         loading: fetcher.state !== "idle",
-        disabled: !dirty || (needsAcknowledgement && !acknowledged),
+        disabled: !dirty || mergeWindowHours === null || (needsAcknowledgement && !acknowledged),
       }}
     >
       <TitleBar title="Settings" />
@@ -216,10 +213,10 @@ export default function SettingsPage() {
           description="Repeat orders are only combined when they're placed within this time of each other."
         >
           <Card>
-            <Select
-              label="Combine orders placed within"
-              options={WINDOW_OPTIONS}
-              value={mergeWindowHours}
+            {/* Remounts after a save so it reflects the stored value. */}
+            <MergeWindowField
+              key={settings.mergeWindowHours}
+              initialHours={settings.mergeWindowHours}
               onChange={setMergeWindowHours}
             />
           </Card>

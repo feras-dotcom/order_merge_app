@@ -167,13 +167,13 @@ describe("onboarding action — required configuration is enforced server-side",
   it("saves a valid merge window and rejects an invalid one", async () => {
     await act({ intent: "window", mergeWindowHours: "12" });
     expect(env.settings.mergeWindowHours).toBe(12);
-    const bad = await act({ intent: "window", mergeWindowHours: "6" });
+    const bad = await act({ intent: "window", mergeWindowHours: "169" });
     expect((bad as Response).status).toBe(400);
     expect(env.settings.mergeWindowHours).toBe(12);
   });
 
   it.each([
-    ["invalid merge window", { mergeWindowHours: "48" }, "merge-window"],
+    ["invalid merge window", { mergeWindowHours: "169" }, "merge-window"],
     ["missing acknowledgement", { acknowledged: "false" }, "acknowledgement"],
   ])("refuses to complete with %s", async (_label, fields, requirement) => {
     const result = await complete(fields);
@@ -246,7 +246,7 @@ describe("Settings action", () => {
 
   it("rejects an invalid merge window", async () => {
     env.settings = completedShop();
-    expect(((await save({ autoMergeEnabled: "true", mergeWindowHours: "7" })) as Response).status).toBe(400);
+    expect(((await save({ autoMergeEnabled: "true", mergeWindowHours: "2.5" })) as Response).status).toBe(400);
     expect(env.settings.mergeWindowHours).toBe(24);
   });
 });
@@ -313,5 +313,33 @@ describe("app/uninstalled webhook", () => {
       where: { shop: SHOP },
       data: { autoMergeEnabled: false, onboardingStartedAt: null, onboardingCompletedAt: null },
     });
+  });
+});
+
+describe("merge window bounds (server-side)", () => {
+  const post2 = (path: string, fields: Record<string, string>) =>
+    new Request(`https://app.example.com${path}`, { method: "POST", body: new URLSearchParams(fields) });
+
+  it("onboarding accepts presets and custom values up to 7 days, and rejects beyond", async () => {
+    for (const [value, ok] of [["6", true], ["48", true], ["72", true], ["168", true], ["169", false], ["0", false]] as const) {
+      env.settings = { ...DEFAULT_SETTINGS };
+      const result = await outcome(() =>
+        onboardingRoute.action({ request: post2("/app/onboarding", { intent: "window", mergeWindowHours: value }), params: {}, context: {} } as any),
+      );
+      expect([value, (result as Response).status ?? 200]).toEqual([value, ok ? 200 : 400]);
+      if (ok) expect(env.settings.mergeWindowHours).toBe(Number(value));
+    }
+  });
+
+  it("Settings keeps working for an existing shop on the retired 12-hour preset", async () => {
+    env.settings = completedShop({ mergeWindowHours: 12 });
+    await outcome(() =>
+      settingsRoute.action({ request: post2("/app/settings", { autoMergeEnabled: "true", mergeWindowHours: "12" }), params: {}, context: {} } as any),
+    );
+    expect(env.settings.mergeWindowHours).toBe(12);
+    await outcome(() =>
+      settingsRoute.action({ request: post2("/app/settings", { autoMergeEnabled: "true", mergeWindowHours: "96" }), params: {}, context: {} } as any),
+    );
+    expect(env.settings.mergeWindowHours).toBe(96);
   });
 });
