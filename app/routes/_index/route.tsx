@@ -45,6 +45,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 const contactEmail = "support@mergeship.app";
 const contactHref = `mailto:${contactEmail}`;
+const appStoreHref = "https://apps.shopify.com/mergeship";
 
 const orders = [
   { id: "#1842", tone: "violet" },
@@ -115,12 +116,9 @@ export default function Index() {
               combines them before fulfillment.
             </p>
             <div className={styles.actions}>
-              <a className={styles.button} href={contactHref}>
-                Contact us
+              <a className={styles.button} href={appStoreHref}>
+                Try It Now!
                 <span aria-hidden="true">→</span>
-              </a>
-              <a className={styles.emailLink} href={contactHref}>
-                {contactEmail}
               </a>
             </div>
           </div>
