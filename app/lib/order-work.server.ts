@@ -85,8 +85,16 @@ export interface WorkStore {
   /** Extends the lease. Conditional on token+unexpired; throws OwnershipLostError. */
   renew(id: string, token: string, ttlMs: number): Promise<void>;
   /** status=DONE, outcome, lastReason, doneAt=now, lease cleared. Conditional
-   *  on token+unexpired+status PENDING; returns false if ownership lost. */
-  markDone(id: string, token: string, outcome: WorkOutcome, reason: string): Promise<boolean>;
+   *  on token+unexpired+status PENDING; returns false if ownership lost.
+   *  `operationId` (optional) records which v2 op owns the outcome — e.g. an
+   *  OPERATION_REVIEW row points at the op parked in REVIEW_REQUIRED. */
+  markDone(
+    id: string,
+    token: string,
+    outcome: WorkOutcome,
+    reason: string,
+    operationId?: string,
+  ): Promise<boolean>;
   /** retryAfter = now + delayMs, lastReason, lease cleared. Conditional as
    *  above; returns false if ownership lost. */
   scheduleRetry(id: string, token: string, delayMs: number, reason: string): Promise<boolean>;
@@ -210,10 +218,11 @@ export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
         WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}`;
       if (updated === 0) throw new OwnershipLostError(`Work item ${id} is owned by another worker.`);
     },
-    async markDone(id, token, outcome, reason) {
+    async markDone(id, token, outcome, reason, operationId) {
       const updated = await db.$executeRaw`
         UPDATE "ProcessedWebhook"
         SET "status" = 'DONE', "outcome" = ${outcome}, "lastReason" = ${reason},
+            "operationId" = COALESCE(${operationId ?? null}, "operationId"),
             "doneAt" = ${DB_WALL}, "leaseToken" = NULL, "leasedUntil" = NULL,
             "retryAfter" = NULL, "updatedAt" = ${DB_WALL}
         WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}

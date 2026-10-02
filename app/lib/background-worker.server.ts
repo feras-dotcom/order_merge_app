@@ -18,7 +18,7 @@
 
 import type { AdminClient } from "./graphql.server";
 import { defaultMergeDeps, type MergeDeps } from "./merge.server";
-import { driveOperation } from "./operation-protocol.server";
+import { driveOperation, REVIEW_MAX_AGE_MS } from "./operation-protocol.server";
 import { prismaClaimStore, type ClaimStore } from "./claims.server";
 import { prismaMergeJournal, type MergeJournal } from "./merge-journal.server";
 import { newLeaseToken, OwnershipLostError } from "./ownership.server";
@@ -39,6 +39,16 @@ export const INSTANCE_RETENTION_MS = 24 * 60 * 60_000;
 /** An op whose shop has no offline session is retried this far out — a
  *  missing session cannot drive reads or writes, but must not be terminal. */
 const NO_SESSION_RETRY_MS = 60 * 60_000;
+/** lastError marker carrying the first sighting, so "7 days without a
+ *  session" is measurable without a schema column. */
+const NO_SESSION_REASON = "no offline session for the shop";
+
+/** First no-session sighting parsed from lastError, else now. */
+const noSessionSince = (op: { lastError?: string | null }, now: Date): Date => {
+  const match = op.lastError?.match(/since (\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
+  const parsed = match ? new Date(match[1]) : null;
+  return parsed && !isNaN(parsed.getTime()) ? parsed : now;
+};
 
 export interface SweepContext {
   claims: ClaimStore;
@@ -57,6 +67,9 @@ export interface SweepContext {
   budgetMs?: number;
 }
 
+/** One id per process — all heartbeats from this process share it. */
+const WORKER_INSTANCE_ID = crypto.randomUUID();
+
 export async function runSweepOnce(ctx: SweepContext): Promise<void> {
   const msg = (err: any) => err?.message ?? String(err);
   const started = ctx.now().getTime();
@@ -72,9 +85,9 @@ export async function runSweepOnce(ctx: SweepContext): Promise<void> {
   }
   try {
     await ctx.ops.heartbeat(
-      ctx.instanceId ?? crypto.randomUUID(),
+      ctx.instanceId ?? WORKER_INSTANCE_ID,
       process.env.RAILWAY_DEPLOYMENT_ID ?? null,
-      process.env.npm_package_version ?? null,
+      process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
     );
   } catch (err: any) {
     console.error(`[worker] Heartbeat failed: ${msg(err)}`);
@@ -93,13 +106,30 @@ export async function runSweepOnce(ctx: SweepContext): Promise<void> {
           if (!isSessionNotFound(err)) throw err;
         }
         if (!admin) {
-          console.warn(`[worker] No offline session for ${op.shop}; deferring op ${op.id}.`);
+          // §9: defer +1h while the shop has no session; an op that has had no
+          // session for 7 days escalates to REVIEW_REQUIRED (locks stay).
+          const since = noSessionSince(op, ctx.now());
+          const sevenDaysUp = ctx.now().getTime() - since.getTime() >= REVIEW_MAX_AGE_MS;
+          console.warn(
+            `[worker] No offline session for ${op.shop}; ${sevenDaysUp ? "flagging" : "deferring"} op ${op.id}.`,
+          );
           try {
-            await ctx.ops.transition(op, {
-              expectedPhase: op.phase ?? undefined,
-              nextCheckAt: NO_SESSION_RETRY_MS,
-              lastError: "no offline session for the shop",
-            });
+            await ctx.ops.transition(
+              op,
+              sevenDaysUp
+                ? {
+                    expectedPhase: op.phase ?? undefined,
+                    phase: "REVIEW_REQUIRED",
+                    reviewReason: `No offline session for ${op.shop} since ${since.toISOString()} — the shop may have uninstalled.`,
+                    lastError: NO_SESSION_REASON,
+                    nextCheckAt: "now",
+                  }
+                : {
+                    expectedPhase: op.phase ?? undefined,
+                    nextCheckAt: NO_SESSION_RETRY_MS,
+                    lastError: `${NO_SESSION_REASON} since ${since.toISOString()}`,
+                  },
+            );
           } catch (err) {
             if (!(err instanceof OwnershipLostError)) throw err;
           }

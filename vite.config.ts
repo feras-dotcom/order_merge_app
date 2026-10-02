@@ -47,7 +47,9 @@ export default defineConfig({
     hmr: hmrConfig,
     fs: {
       // See https://vitejs.dev/config/server-options.html#server-fs-allow for more information
-      allow: ["app", "node_modules"],
+      // "scripts"/"tests" are required so `npx vite-node scripts/<name>.ts` can
+      // load operational scripts and test helpers on this machine.
+      allow: ["app", "node_modules", "scripts", "tests"],
     },
   },
   plugins: [

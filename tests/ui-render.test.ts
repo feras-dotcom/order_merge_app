@@ -52,6 +52,7 @@ const dash = (o: any = {}) => ({
   locationBlocked: false,
   activeLocationCount: 1,
   needsReview: [],
+  reviewWorkCount: 0,
   combinedCount: 0,
   recentCount: 0,
   historyLimit: 100,
@@ -143,6 +144,33 @@ describe("dashboard review state", () => {
     expect(text(view)).toContain("marked the orders for review");
     expect(text(view)).not.toContain("MergeShip-Review");
     for (const id of ["31", "32", "41"]) expect(view).toContain(`shopify:admin/orders/${id}`);
+  });
+
+  it("with exhausted work items: the banner reports them even with no flagged ops", async () => {
+    const view = text(await pageHtml("../app/routes/app._index", dash({ reviewWorkCount: 2 })));
+    expect(view).toContain("Orders need your review");
+    expect(view).toContain("2 orders could not be evaluated automatically");
+  });
+
+  it("a flagged op's review reason renders under its orders", async () => {
+    const view = text(
+      await pageHtml(
+        "../app/routes/app._index",
+        dash({
+          needsReview: [
+            {
+              id: "a",
+              primary: { id: "gid://shopify/Order/31", name: "#1031" },
+              secondaries: [],
+              reviewReason: "Commit outcome unknown; no evidence of the transfer after 60 minutes.",
+            },
+          ],
+          reviewWorkCount: 1,
+        }),
+      ),
+    );
+    expect(view).toContain("no evidence of the transfer");
+    expect(view).toContain("1 order could not be evaluated automatically");
   });
 });
 

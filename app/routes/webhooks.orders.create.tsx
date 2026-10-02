@@ -4,6 +4,7 @@ import { getSettings } from "../lib/settings.server";
 import { isOnboardingComplete } from "../lib/onboarding";
 import { LEASE_TTL_MS, newLeaseToken } from "../lib/ownership.server";
 import { prismaWorkStore, WORK_DEADLINE_MS } from "../lib/order-work.server";
+import { prismaOperationStore } from "../lib/operation-store.server";
 import { processOrderWork } from "../lib/order-work-processor.server";
 import { defaultMergeDeps } from "../lib/merge.server";
 
@@ -64,6 +65,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
   if (!item) {
     console.log(`[orders/create] Duplicate delivery for ${orderId} — skipping.`);
+    return new Response();
+  }
+
+  // Protocol v2 kill switches: the row is durable either way, so a disabled
+  // store simply leaves it for the sweeper to process once enabled. Inline
+  // processing is a latency optimization only.
+  const inline =
+    process.env.MERGESHIP_MUTATIONS === "enabled" &&
+    (await prismaOperationStore.isEnabled(shop, "newMergesEnabled"));
+  if (!inline) {
+    console.log(`[orders/create] Merge mutations not enabled for ${shop} — leaving the work item for the sweeper.`);
     return new Response();
   }
 

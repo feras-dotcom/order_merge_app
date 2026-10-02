@@ -594,3 +594,41 @@ it("16. tags are written by tagsAdd only; orderUpdate inputs never carry tags", 
   expect(shopify.order(1).tags).toContain("Consolidated");
   expect(shopify.order(2).tags).toContain("Merged");
 });
+
+// ── 17. Lease lost between the gate and the send (R1) ────────────────────────
+
+it("17. fence-before-send ownership loss: attempt REJECTED not dispatched, zero Shopify calls, op abandoned", async () => {
+  const ctx = setup();
+  const { shopify, deps, ops, work } = ctx;
+  const item = await linkedWork(ctx, id(2));
+  deps.workItem = { id: item.id, token: item.leaseToken! };
+  deps.hooks = {
+    afterDispatchGate: async () => {
+      // The dispatcher stalls here until its op lease expires; the gate has
+      // already flipped the phase and written the write-ahead attempt.
+      advance(deps, deps.leaseTtlMs + 1);
+    },
+  };
+  const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+  expect(result.code).toBe("OPERATION_CREATED");
+
+  // The stale dispatcher's fence throws before admin.graphql: the request
+  // provably never left the process, so the attempt is a REJECTED fact.
+  expect(await driveOperation(result.operation!, shopify.admin, deps)).toBeNull();
+  const attempt = ops.attempts.find((a) => a.kind === "EDIT_COMMIT")!;
+  expect(attempt.state).toBe("REJECTED");
+  expect(attempt.responseSummary).toContain("not dispatched");
+  expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
+
+  // A takeover reconciles: a REJECTED commit → COMMIT_REJECTED → quiet →
+  // ABANDONED, locks released, the work item requeued.
+  const taken = await ops.acquireOperationLease(result.operation!.id, "worker-b", deps.leaseTtlMs);
+  const done = await driveToIdle(ctx, taken!);
+  expect(done?.phase).toBe("ABANDONED");
+  expect(ops.locks.size).toBe(0);
+  expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
+  expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+  const requeued = work.items.get(item.id)!;
+  expect(requeued.status).toBe("PENDING");
+  expect(requeued.operationId).toBe(result.operation!.id);
+});

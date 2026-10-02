@@ -18,6 +18,9 @@ export interface ClaimStore {
   release(shop: string, orderIds: string[], token: string): Promise<void>;
   /** Deletes expired claims; returns count. */
   reapExpired(): Promise<number>;
+  /** The subset of orderIds with a live claim (leasedUntil > db clock) —
+   *  whose worker holds them is not reported; presence alone means "busy". */
+  findHeld(shop: string, orderIds: string[]): Promise<Set<string>>;
 }
 
 
@@ -82,6 +85,14 @@ export function prismaClaimStore(db: PrismaClient = defaultDb): ClaimStore {
     },
     async reapExpired() {
       return db.$executeRaw`DELETE FROM "MergeClaim" WHERE "leasedUntil" < ${DB_WALL}`;
+    },
+    async findHeld(shop, orderIds) {
+      const ids = [...new Set(orderIds)];
+      if (!ids.length) return new Set();
+      const rows = await db.$queryRaw<{ orderId: string }[]>`
+        SELECT "orderId" FROM "MergeClaim"
+        WHERE "shop" = ${shop} AND "orderId" = ANY(${ids}) AND "leasedUntil" > ${DB_WALL}`;
+      return new Set(rows.map((r) => r.orderId));
     },
   };
 }

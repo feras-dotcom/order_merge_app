@@ -8,7 +8,7 @@ Use the [Shopify AI Toolkit](https://shopify.dev/docs/apps/build/ai-toolkit) for
 
 - `npm test` — Vitest unit/integration tests (merge engine runs against an in-memory fake Shopify in `tests/fake-shopify.ts`).
 - `npx tsc --noEmit` — one pre-existing error in `app/shopify.server.ts` (duplicate `@shopify/shopify-api` session types) is known and unrelated.
-- `npx eslint app tests --ext .ts,.tsx`
+- `npx eslint app tests scripts --ext .ts,.tsx`
 - `npm run build`
 - Live end-to-end merge against a dev store (creates and cancels real test orders; overrides only the single-location check):
   `MERGESHIP_LIVE_STORE=<store>.myshopify.com MERGESHIP_LIVE_VARIANT=<variant gid> MERGESHIP_LIVE_CUSTOMER=<customer gid> npx vitest run tests/live-e2e.test.ts`

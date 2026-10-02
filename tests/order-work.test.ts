@@ -414,6 +414,31 @@ describe("runSweepOnce", () => {
       err.mockRestore();
     }
   });
+
+  it("defers an op +1h while the shop has no session, then flags REVIEW after 7 days", async () => {
+    const h = makeHarness([makeOrder(1), makeOrder(2)]);
+    // Park the op mid-flight: the commit response never arrives.
+    h.shopify.commitMode.set("*", "lose-never");
+    await h.webhook("gid://shopify/Order/2");
+    const opId = [...h.ops.ops.keys()][0];
+    expect(h.ops.ops.get(opId)?.phase).toBe("COMMIT_IN_DOUBT");
+
+    const noSession = async () => null;
+    h.advance(h.deps.leaseTtlMs + 1_000); // past the first ladder slot AND the op lease
+    await h.sweep({ adminFactory: noSession });
+    let op = (await h.ops.getOperation(opId))!;
+    expect(op.phase).toBe("COMMIT_IN_DOUBT");
+    expect(op.lastError).toContain("no offline session");
+    expect(op.nextCheckAt!.getTime() - h.clock().getTime()).toBe(60 * 60_000);
+
+    // Repeatedly deferred for 7 days: escalate to REVIEW_REQUIRED (locks stay).
+    h.advance(7 * 24 * 60 * 60_000 + 1_000);
+    await h.sweep({ adminFactory: noSession });
+    op = (await h.ops.getOperation(opId))!;
+    expect(op.phase).toBe("REVIEW_REQUIRED");
+    expect(h.ops.locks.size).toBe(2);
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+  });
 });
 
 describe("MemoryWorkStore stale-token guards", () => {

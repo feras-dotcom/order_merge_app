@@ -672,6 +672,16 @@ export class MemoryClaimStore implements ClaimStore {
     }
     return reaped;
   }
+
+  async findHeld(shop: string, orderIds: string[]) {
+    const now = this.clock().getTime();
+    return new Set(
+      [...new Set(orderIds)].filter((orderId) => {
+        const claim = this.claims.get(this.key(shop, orderId));
+        return claim != null && claim.leasedUntil >= now;
+      }),
+    );
+  }
 }
 
 export class MemoryJournal implements MergeJournal {
@@ -953,12 +963,13 @@ export class MemoryWorkStore implements WorkStore {
     item.leasedUntil = new Date(now + ttlMs);
   }
 
-  async markDone(id: string, token: string, outcome: WorkOutcome, reason: string) {
+  async markDone(id: string, token: string, outcome: WorkOutcome, reason: string, operationId?: string) {
     const item = this.owned(id, token);
     if (!item) return false;
     item.status = "DONE";
     item.outcome = outcome;
     item.lastReason = reason;
+    if (operationId !== undefined) item.operationId = operationId;
     item.doneAt = this.clock();
     item.retryAfter = null;
     item.leaseToken = null;

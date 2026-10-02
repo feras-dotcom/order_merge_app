@@ -33,6 +33,7 @@ import type {
   OperationPatch,
   OperationRecord,
   OperationSecondary,
+  OperationStore,
 } from "./operation-store.server";
 
 // Ladders and quiet periods (spec §5).
@@ -119,16 +120,39 @@ interface SendResult {
 /** Sends a Shopify mutation through the fenced client and classifies the
  *  outcome for the write-ahead attempt row. `ambiguous` maps a userErrors
  *  message to UNKNOWN when the wording does not prove rejection (e.g.
- *  "already been saved"). */
+ *  "already been saved").
+ *
+ *  OwnershipLostError can only come from the fence, which runs BEFORE
+ *  `admin.graphql` — the request provably never left the process, so the
+ *  attempt row is settled as a REJECTED "not dispatched" fact before the
+ *  error propagates. Any failure after `admin.graphql` was invoked stays
+ *  UNKNOWN. */
 async function sendAttempt(
+  ops: OperationStore,
+  attemptId: string,
+  dispatchToken: string,
+  sentSoFar: () => number,
   fn: () => Promise<{ jobId?: string | null } | void>,
   ambiguous: (message: string) => boolean,
 ): Promise<SendResult> {
+  const sentBefore = sentSoFar();
   try {
     const out = await fn();
     return { state: "SUCCEEDED", summary: null, jobId: out?.jobId ?? null };
   } catch (err) {
-    if (err instanceof OwnershipLostError) throw err;
+    // OwnershipLostError is thrown only by the fence, which runs before
+    // `admin.graphql`. When no Shopify call was invoked during `fn`, the
+    // request provably never left the process — a REJECTED fact, not doubt.
+    if (err instanceof OwnershipLostError) {
+      if (sentSoFar() === sentBefore) {
+        try {
+          await ops.recordAttempt(attemptId, dispatchToken, "REJECTED", "not dispatched: ownership lost before send");
+        } catch {
+          // Best effort — the dispatcher is stopping anyway.
+        }
+      }
+      throw err;
+    }
     const summary = reasonFromUnknown(err);
     if (err instanceof ShopifyGraphqlError && err.rejected) {
       return { state: ambiguous(summary) ? "UNKNOWN" : "REJECTED", summary };
@@ -177,9 +201,14 @@ export async function driveOperation(
     await deps.ops.renewOperation(current, deps.leaseTtlMs);
     await deps.outerFence?.();
   };
+  // Counts admin.graphql invocations so sendAttempt can prove "not sent"
+  // (fence threw before the first call of this attempt).
+  let dispatched = 0;
+  const sentSoFar = () => dispatched;
   const fenced: AdminClient = {
     graphql: async (query, options) => {
       await fence();
+      dispatched += 1;
       return admin.graphql(query, options);
     },
   };
@@ -281,6 +310,10 @@ export async function driveOperation(
     const names = current.secondaries.map((s) => s.name).join(", ");
     const staffNote = `MergeShip: merged items from ${names} · MS-${current.opToken}`;
     const result = await sendAttempt(
+      deps.ops,
+      attempt.id,
+      dispatchToken,
+      sentSoFar,
       () =>
         gql(
           fenced,
@@ -439,7 +472,9 @@ export async function driveOperation(
     for (;;) {
       const s = secondaries.find((x) => x.cancelPhase !== "CANCEL_VERIFIED");
       if (!s) {
-        await move({ phase: "COMPLETED", secondaries, nextCheckAt: SIDE_EFFECT_RETRY_MS });
+        // Side effects run inline in this same drive (stepCompleted below);
+        // partial failure reschedules at +5m.
+        await move({ phase: "COMPLETED", secondaries, nextCheckAt: "now" });
         return "again";
       }
       const sAttempts = cancelAttempts.filter((a) => a.targetOrderId === s.id);
@@ -510,7 +545,7 @@ export async function driveOperation(
       }
       await deps.hooks?.afterDispatchGate?.();
       const staffNote = `Repeat order merged into ${current.primaryOrderName} by MergeShip. Items transferred, inventory restocked, not refunded. Ref MS-${current.opToken}`;
-      const result = await sendAttempt(async () => {
+      const result = await sendAttempt(deps.ops, attempt.id, dispatchToken, sentSoFar, async () => {
         const res = await gql<{ job?: { id?: string } | null }>(
           fenced,
           `Cancel ${s.name}`,
@@ -683,7 +718,7 @@ export async function driveOperation(
       });
       if (!attempt) return false;
       await deps.hooks?.afterDispatchGate?.();
-      const result = await sendAttempt(send, () => false);
+      const result = await sendAttempt(deps.ops, attempt.id, dispatchToken, sentSoFar, send, () => false);
       await deps.hooks?.afterSend?.();
       await deps.ops.recordAttempt(attempt.id, dispatchToken, result.state, result.summary);
       return result.state === "SUCCEEDED";
@@ -793,7 +828,7 @@ export async function driveOperation(
         o?.note,
         `MergeShip: a merge involving this order needs review. (Ref MS-${current.opToken})`,
       );
-      const result = await sendAttempt(async () => {
+      const result = await sendAttempt(deps.ops, attempt.id, dispatchToken, sentSoFar, async () => {
         await gql(fenced, `Tag ${name}`, TAGS_ADD_MUTATION, { id: targetId, tags: [REVIEW_TAG] }, "tagsAdd");
         if (note) {
           await gql(fenced, `Note ${name}`, NOTE_MUTATION, { input: { id: targetId, note } }, "orderUpdate");

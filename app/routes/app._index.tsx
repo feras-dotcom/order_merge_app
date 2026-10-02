@@ -53,18 +53,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Interrupted v2 operations are driven by the background sweeper — the
   // dashboard only reads state (the review banner below).
 
-  const [settings, needsReview, combinedCount, recentCount, records, locationAccess] = await Promise.all([
-    getSettings(shop),
-    listOperationsNeedingReview(shop),
-    db.mergeRecord.count({ where: { shop } }),
-    db.mergeRecord.count({ where: { shop, createdAt: { gte: new Date(Date.now() - THIRTY_DAYS_MS) } } }),
-    db.mergeRecord.findMany({
-      where: { shop },
-      orderBy: { createdAt: "desc" },
-      take: HISTORY_LIMIT,
-    }),
-    getLocationAccess(admin, scopes, shop),
-  ]);
+  const [settings, needsReview, reviewWorkCount, combinedCount, recentCount, records, locationAccess] =
+    await Promise.all([
+      getSettings(shop),
+      listOperationsNeedingReview(shop),
+      // Work items that exhausted their retries wait here for a human too.
+      db.processedWebhook.count({ where: { shop, status: "REVIEW" } }),
+      db.mergeRecord.count({ where: { shop } }),
+      db.mergeRecord.count({ where: { shop, createdAt: { gte: new Date(Date.now() - THIRTY_DAYS_MS) } } }),
+      db.mergeRecord.findMany({
+        where: { shop },
+        orderBy: { createdAt: "desc" },
+        take: HISTORY_LIMIT,
+      }),
+      getLocationAccess(admin, scopes, shop),
+    ]);
 
   // Customer names and each fulfilled order's current item count are looked
   // up live in one request, so no personal data is stored locally.
@@ -132,7 +135,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       id: op.id,
       primary: { id: op.primaryOrderId, name: op.primaryOrderName },
       secondaries: ((op.secondaries as { id: string; name: string }[]) ?? []).map((s) => ({ id: s.id, name: s.name })),
+      reviewReason: op.reviewReason ?? null,
     })),
+    reviewWorkCount,
     combinedCount,
     recentCount,
     historyLimit: HISTORY_LIMIT,
@@ -171,6 +176,7 @@ export default function Index() {
     locationBlocked,
     activeLocationCount,
     needsReview,
+    reviewWorkCount,
     combinedCount,
     recentCount,
     historyLimit,
@@ -212,41 +218,61 @@ export default function Index() {
       <TitleBar title="MergeShip" />
       <BlockStack gap="500">
         {/* Shown only when a merge genuinely needs the merchant; absent otherwise. */}
-        {needsReview.length > 0 && (
+        {(needsReview.length > 0 || reviewWorkCount > 0) && (
           <Banner
             tone="warning"
             title={
-              needsReview.length === 1
-                ? "1 combine needs your review before fulfillment"
-                : `${needsReview.length} combines need your review before fulfillment`
+              needsReview.length === 0
+                ? "Orders need your review"
+                : needsReview.length === 1
+                  ? "1 combine needs your review before fulfillment"
+                  : `${needsReview.length} combines need your review before fulfillment`
             }
           >
             <BlockStack gap="300">
-              <p>
-                MergeShip couldn't confirm these finished, so it marked the
-                orders for review in Shopify. Open each one and check whether the
-                items are already on the first order before fulfilling or
-                cancelling.
-              </p>
+              {needsReview.length > 0 && (
+                <p>
+                  MergeShip couldn't confirm these finished, so it marked the
+                  orders for review in Shopify. Open each one and check whether the
+                  items are already on the first order before fulfilling or
+                  cancelling.
+                </p>
+              )}
+              {reviewWorkCount > 0 && (
+                <p>
+                  {reviewWorkCount === 1
+                    ? "1 order could not be evaluated automatically."
+                    : `${reviewWorkCount} orders could not be evaluated automatically.`}{" "}
+                  MergeShip stopped retrying them; check Shopify for whether they
+                  still need combining.
+                </p>
+              )}
               <BlockStack gap="100">
                 {needsReview.map((op) => (
-                  <InlineStack key={op.id} gap="150" blockAlign="center">
-                    <Link url={orderAdminUrl(op.primary.id)} target="_blank">
-                      {op.primary.name}
-                    </Link>
-                    {op.secondaries.length > 0 && (
-                      <>
-                        <Text as="span" tone="subdued">
-                          ← combined from
-                        </Text>
-                        {op.secondaries.map((s) => (
-                          <Link key={s.id} url={orderAdminUrl(s.id)} target="_blank">
-                            {s.name}
-                          </Link>
-                        ))}
-                      </>
+                  <BlockStack key={op.id} gap="050">
+                    <InlineStack gap="150" blockAlign="center">
+                      <Link url={orderAdminUrl(op.primary.id)} target="_blank">
+                        {op.primary.name}
+                      </Link>
+                      {op.secondaries.length > 0 && (
+                        <>
+                          <Text as="span" tone="subdued">
+                            ← combined from
+                          </Text>
+                          {op.secondaries.map((s) => (
+                            <Link key={s.id} url={orderAdminUrl(s.id)} target="_blank">
+                              {s.name}
+                            </Link>
+                          ))}
+                        </>
+                      )}
+                    </InlineStack>
+                    {op.reviewReason && (
+                      <Text as="span" tone="subdued">
+                        {op.reviewReason}
+                      </Text>
                     )}
-                  </InlineStack>
+                  </BlockStack>
                 ))}
               </BlockStack>
             </BlockStack>

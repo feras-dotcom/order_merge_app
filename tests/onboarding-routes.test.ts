@@ -14,6 +14,7 @@ const env = vi.hoisted(() => ({
   executeMerge: vi.fn(),
   processed: vi.fn(async () => ({ id: "work-1" })),
   processOrderWork: vi.fn(async () => {}),
+  isEnabled: vi.fn(async () => true),
 }));
 
 vi.mock("../app/shopify.server", () => {
@@ -92,6 +93,10 @@ vi.mock("../app/lib/order-work-processor.server", () => ({
   processOrderWork: env.processOrderWork,
 }));
 
+vi.mock("../app/lib/operation-store.server", () => ({
+  prismaOperationStore: { isEnabled: env.isEnabled },
+}));
+
 const appRoute = await import("../app/routes/app");
 const onboardingRoute = await import("../app/routes/app.onboarding");
 const settingsRoute = await import("../app/routes/app.settings");
@@ -129,6 +134,8 @@ beforeEach(() => {
   env.executeMerge.mockReset();
   env.processed.mockReset().mockImplementation(async () => ({ id: "work-1" }));
   env.processOrderWork.mockReset();
+  env.isEnabled.mockReset().mockResolvedValue(true);
+  process.env.MERGESHIP_MUTATIONS = "enabled";
 });
 
 describe("setup gate (app.tsx loader)", () => {
@@ -304,6 +311,22 @@ describe("orders/create webhook", () => {
     await deliver();
     expect(env.processed).toHaveBeenCalledTimes(1); // durable insertLeased
     expect(env.processOrderWork).toHaveBeenCalledTimes(1);
+  });
+
+  it("records the item but leaves it for the sweeper while the kill switch is off", async () => {
+    env.settings = completedShop();
+    env.isEnabled.mockResolvedValue(false); // AppControl.newMergesEnabled = false
+    await deliver();
+    expect(env.processed).toHaveBeenCalledTimes(1);
+    expect(env.processOrderWork).not.toHaveBeenCalled();
+  });
+
+  it("does not process inline while MERGESHIP_MUTATIONS is unset", async () => {
+    env.settings = completedShop();
+    delete process.env.MERGESHIP_MUTATIONS;
+    await deliver();
+    expect(env.processed).toHaveBeenCalledTimes(1);
+    expect(env.processOrderWork).not.toHaveBeenCalled();
   });
 });
 

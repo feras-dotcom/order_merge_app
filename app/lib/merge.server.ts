@@ -697,7 +697,7 @@ export async function executeMerge(
     for (const e of selection.excluded) console.log(`[merge] Excluded ${e.name}: ${e.reason}`);
     try {
       const byLocation = await excludeByLocation(fencedAdmin, selection.orders, lineItems);
-      if (!byLocation.ok) return skip(byLocation.reason);
+      if (!byLocation.ok) return skip(byLocation.reason, "terminal", "NO_COMPATIBLE_PARTNER");
       orders = byLocation.orders;
     } catch (err: any) {
       if (err instanceof OwnershipLostError) throw err;
@@ -717,7 +717,7 @@ export async function executeMerge(
     }
 
     const evaluation = evaluateMergeGroup(orders, lineItems);
-    if (!evaluation.ok) return skip(evaluation.reason);
+    if (!evaluation.ok) return skip(evaluation.reason, "terminal", "NO_COMPATIBLE_PARTNER");
     const { primary, secondaries } = evaluation;
     const primaryCountBefore = lineItems.get(primary.id)!.length;
     const primaryLineItemIdsBefore = lineItems

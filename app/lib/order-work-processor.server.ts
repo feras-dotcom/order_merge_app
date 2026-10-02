@@ -88,8 +88,8 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
   const random = args.random ?? Math.random;
   const label = () => `[work] ${shop} ${item.orderId} (attempt ${item.attempts})`;
 
-  const done = async (outcome: WorkOutcome, reason: string) => {
-    if (await work.markDone(item.id, token, outcome, reason)) {
+  const done = async (outcome: WorkOutcome, reason: string, operationId?: string) => {
+    if (await work.markDone(item.id, token, outcome, reason, operationId)) {
       console.log(`${label()}: ${outcome} — ${reason}`);
     } else {
       console.log(`${label()}: ownership lost; ${outcome} not recorded.`);
@@ -183,6 +183,7 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
         return done(
           "OPERATION_REVIEW",
           `${anchor.name} is part of merge operation ${anchorLock.operationId}, which needs review`,
+          anchorLock.operationId,
         );
       }
       return retry("contention", `${anchor.name} is part of an unfinished merge`);
@@ -210,12 +211,18 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
       const t = new Date(sibling.createdAt).getTime();
       return key === groupKey && !isNaN(t) && Math.abs(anchorTime - t) <= mergeWindowMs;
     });
-    const lockedSiblingIds = await deps.ops.findLockedOrderIds(
-      shop,
-      matching.map((s) => s.id as string),
-    );
-    const lockedOrBlocked = matching.filter((s) => lockedSiblingIds.has(s.id) || statuses.has(s.id));
-    const free = matching.filter((s) => !lockedSiblingIds.has(s.id) && !statuses.has(s.id));
+    const siblingIds = matching.map((s) => s.id as string);
+    const [lockedSiblingIds, heldSiblingIds] = await Promise.all([
+      deps.ops.findLockedOrderIds(shop, siblingIds),
+      deps.claims.findHeld(shop, siblingIds),
+    ]);
+    // MergeOrderLock = a v2 op owns it; a live MergeClaim = a planMerge is
+    // mid-flight on it; the v1 journal covers pre-v2 operations. All three
+    // mean "busy, retry later" — never a reason to pick different siblings.
+    const busy = (s: { id: string }) =>
+      lockedSiblingIds.has(s.id) || heldSiblingIds.has(s.id) || statuses.has(s.id);
+    const lockedOrBlocked = matching.filter(busy);
+    const free = matching.filter((s) => !busy(s));
 
     if (free.length) {
       const result = await executeMerge(
