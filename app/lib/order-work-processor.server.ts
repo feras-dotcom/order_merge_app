@@ -14,12 +14,12 @@ import {
   ORDER_STATE_QUERY,
   type MergeDeps,
 } from "./merge.server";
+import { driveOperation } from "./operation-protocol.server";
 import { OwnershipLostError } from "./ownership.server";
 import { isOnboardingComplete } from "./onboarding";
 import type { MergeSettings } from "./settings.server";
 import {
   INDEX_LAG_GRACE_MS,
-  MAX_ATTEMPTS,
   retryDelayMs,
   type WorkItem,
   type WorkOutcome,
@@ -101,11 +101,9 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
     reason: string,
     delayMs = retryDelayMs(kind, item.attempts, random),
   ) => {
-    if (item.attempts >= MAX_ATTEMPTS || (item.deadlineAt && now() > item.deadlineAt)) {
-      console.error(`${label()}: EXHAUSTED — ${reason}`);
-      await done("EXHAUSTED", reason);
-      return;
-    }
+    // v2: exhaustion is not decided here — the sweeper's exhaustDue() converts
+    // items past their limit before the next claim pass, and a stale owner's
+    // writes then fail on status <> 'PENDING'.
     console.log(`${label()}: retrying in ${Math.round(delayMs / 1000)}s (${kind}) — ${reason}`);
     if (!(await work.scheduleRetry(item.id, token, delayMs, reason))) {
       console.log(`${label()}: ownership lost; retry not recorded.`);
@@ -176,19 +174,30 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
     );
     const siblings = customer.orders?.nodes ?? [];
 
-    // 6 — Journal involvement on the anchor itself.
+    // 6 — Durable involvement on the anchor itself: a MergeOrderLock means a
+    // v2 operation owns it (review flag vs in-progress decides the outcome);
+    // the legacy journal status check covers pre-v2 operations.
+    const anchorLock = await deps.ops.lockOwner(shop, item.orderId);
+    if (anchorLock) {
+      if (anchorLock.phase === "REVIEW_REQUIRED") {
+        return done(
+          "OPERATION_REVIEW",
+          `${anchor.name} is part of merge operation ${anchorLock.operationId}, which needs review`,
+        );
+      }
+      return retry("contention", `${anchor.name} is part of an unfinished merge`);
+    }
     const statuses = await deps.journal.findBlockingOrderStatuses(shop);
     const anchorStatus = statuses.get(item.orderId);
     if (anchorStatus && ACTIVE_STATUSES.includes(anchorStatus)) {
       return retry("contention", `${anchor.name} is part of an unfinished merge`);
     }
     if (anchorStatus === "NEEDS_REVIEW") {
-      return done("REVIEW", `${anchor.name} is part of a merge flagged for review`);
+      return done("OPERATION_REVIEW", `${anchor.name} is part of a merge flagged for review`);
     }
 
-    // 7 — Same-group siblings inside the merge window, partitioned by journal
-    // involvement: review-flagged orders are excluded permanently, active ones
-    // mean the group is already being merged elsewhere.
+    // 7 — Same-group siblings inside the merge window, partitioned by durable
+    // involvement: locked/v1-flagged orders are lockedOrBlocked, the rest free.
     const anchorTime = new Date(anchor.createdAt).getTime();
     const mergeWindowMs = settings.mergeWindowHours * 60 * 60 * 1000;
     const matching = siblings.filter((sibling) => {
@@ -201,8 +210,12 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
       const t = new Date(sibling.createdAt).getTime();
       return key === groupKey && !isNaN(t) && Math.abs(anchorTime - t) <= mergeWindowMs;
     });
-    const active = matching.filter((s) => ACTIVE_STATUSES.includes(statuses.get(s.id) ?? ""));
-    const free = matching.filter((s) => !statuses.has(s.id));
+    const lockedSiblingIds = await deps.ops.findLockedOrderIds(
+      shop,
+      matching.map((s) => s.id as string),
+    );
+    const lockedOrBlocked = matching.filter((s) => lockedSiblingIds.has(s.id) || statuses.has(s.id));
+    const free = matching.filter((s) => !lockedSiblingIds.has(s.id) && !statuses.has(s.id));
 
     if (free.length) {
       const result = await executeMerge(
@@ -210,23 +223,61 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
         shop,
         [item.orderId, ...free.map((s) => s.id as string)],
         // Every merge fence also renews this work item's lease, so a long
-        // merge cannot lose it mid-flight.
-        { ...deps, outerFence: () => work.renew(item.id, token, deps.leaseTtlMs) },
+        // merge cannot lose it mid-flight; createOperation settles it
+        // (DONE/OPERATION_CREATED) inside its own transaction.
+        {
+          ...deps,
+          workItem: { id: item.id, token },
+          outerFence: () => work.renew(item.id, token, deps.leaseTtlMs),
+        },
       );
-      if (result.outcome === "merged") return done("MERGED", `merged into ${result.primaryName}`);
-      if (result.outcome === "needs_review") return done("REVIEW", result.reason ?? "merge needs review");
-      if (result.disposition === "terminal") {
-        return done(
-          result.code === "LOCATION_ACCESS" ? "LOCATION_ACCESS" : "INELIGIBLE",
-          result.reason ?? "not eligible",
-        );
+      if (result.outcome === "operation_created") {
+        // The work item is already DONE/OPERATION_CREATED. Drive the op
+        // inline until a waiting point — without the work-item fence (the row
+        // is settled; the op lease is the liveness now).
+        if (result.operation) {
+          const driveDeps = { ...deps };
+          delete driveDeps.workItem;
+          delete driveDeps.outerFence;
+          try {
+            await driveOperation(result.operation, admin, driveDeps);
+          } catch (err: any) {
+            console.error(`${label()}: inline drive failed — ${err?.message ?? err}`);
+          }
+        }
+        return;
       }
-      return retry(result.disposition, result.reason ?? result.outcome);
+      if (result.code === "LOCATION_ACCESS") {
+        return done("LOCATION_ACCESS", result.reason ?? "location access required");
+      }
+      if (result.code === "ANCHOR_INELIGIBLE") {
+        return done("INELIGIBLE", result.reason ?? "anchor not eligible");
+      }
+      if (result.code === "NO_COMPATIBLE_PARTNER") {
+        if (lockedOrBlocked.length) {
+          return retry(
+            "contention",
+            `sibling(s) ${lockedOrBlocked.map((s) => s.name ?? s.id).join(", ")} are part of an unfinished merge`,
+          );
+        }
+        const indexLagMs = item.createdAt.getTime() + INDEX_LAG_GRACE_MS - now().getTime();
+        if (indexLagMs > 0) {
+          return retry("transient", "no siblings yet; waiting for the search index", Math.max(indexLagMs, 5_000));
+        }
+        return done("NO_PARTNER", result.reason ?? "no compatible partner");
+      }
+      if (result.code === "CLAIM_CONFLICT" || result.code === "LOCKED" || result.code === "OWNERSHIP_LOST") {
+        return retry("contention", result.reason ?? result.code);
+      }
+      if (result.disposition === "terminal") {
+        return done("INELIGIBLE", result.reason ?? "not eligible");
+      }
+      return retry(result.disposition === "contention" ? "contention" : "transient", result.reason ?? result.outcome);
     }
-    if (active.length) {
+    if (lockedOrBlocked.length) {
       return retry(
         "contention",
-        `sibling(s) ${active.map((s) => s.name ?? s.id).join(", ")} are part of an unfinished merge`,
+        `sibling(s) ${lockedOrBlocked.map((s) => s.name ?? s.id).join(", ")} are part of an unfinished merge`,
       );
     }
 

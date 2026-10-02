@@ -16,7 +16,16 @@ import type {
 } from "../app/lib/merge-journal.server";
 import type { MergeDeps } from "../app/lib/merge.server";
 import type { ClaimStore } from "../app/lib/claims.server";
-import { OwnershipLostError } from "../app/lib/ownership.server";
+import type {
+  AttemptKind,
+  ControlRow,
+  MutationAttempt,
+  NewOperationV2,
+  OperationPatch,
+  OperationRecord,
+  OperationStore,
+} from "../app/lib/operation-store.server";
+import { ClaimContentionError, OwnershipLostError } from "../app/lib/ownership.server";
 import { isOnboardingComplete } from "../app/lib/onboarding";
 import type { MergeSettings } from "../app/lib/settings.server";
 import { runSweepOnce, type SweepContext } from "../app/lib/background-worker.server";
@@ -34,7 +43,15 @@ export interface FakeOrder extends OrderState {
   /** Reads of the order before a requested cancellation becomes visible. */
   cancelDelayReads?: number;
   pendingCancelReads?: number | null;
+  /** The staffNote a delayed cancellation applies once it becomes visible. */
+  pendingStaffNote?: string | null;
+  /** Job id of the in-flight orderCancel (delay mode). */
+  pendingCancelJobId?: string | null;
   cancelCount: number;
+  /** Shopify's Order.cancellation — set when the order is cancelled. */
+  cancellation?: { staffNote: string | null } | null;
+  /** OrderEditAgreement history (app + sales attribution for evidence). */
+  agreements?: any[];
   /** Explicit fulfillment orders; by default one OPEN fulfillment order at
    *  `location` covering every line item. */
   fulfillmentOrders?: FulfillmentOrderInfo[];
@@ -43,6 +60,10 @@ export interface FakeOrder extends OrderState {
 
 export const LOC_A = "gid://shopify/Location/1";
 export const LOC_B = "gid://shopify/Location/2";
+/** The app id evidence checks attribute OrderEditAgreements to. */
+export const APP_ID = "gid://shopify/App/426185785345";
+/** A different app id used for merchant/unrelated edits. */
+export const OTHER_APP_ID = "gid://shopify/App/999";
 
 export function makeFulfillmentOrder(
   location: string | null,
@@ -145,6 +166,8 @@ export function makeOrder(
     note: null,
     tags: [],
     lineItems: [makeLineItem()],
+    cancellation: null,
+    agreements: [],
     cancelCount: 0,
     ...overrides,
   };
@@ -163,11 +186,41 @@ export class FakeShopify {
   /** Index-lag knob: ids listed here are invisible to the candidate search
    *  (MergeCandidateOrders) only — direct order loads still see them. */
   hiddenFromSearch = new Set<string>();
+  /** v2: commit behaviour per calc id (or '*'):
+   *  apply — applies immediately and returns success;
+   *  lose-apply-later — the response is lost; the commit applies when
+   *    deliverPendingCommit(calcId) is called;
+   *  lose-never — the response is lost and the commit never applies;
+   *  reject — a definitive userError. */
+  commitMode = new Map<string, "apply" | "lose-apply-later" | "lose-never" | "reject">();
+  /** v2: orderCancel behaviour per order id (or '*'):
+   *  apply — cancels and returns the job;
+   *  delay — accepts the job; cancelledAt becomes visible after reads;
+   *  lose — applies but returns a top-level error (response lost);
+   *  reject — an orderCancelUserErrors entry, no state change. */
+  cancelMode = new Map<string, "apply" | "delay" | "lose" | "reject">();
+  /** job(id).done responses, keyed by job gid. */
+  jobs = new Map<string, { done: boolean }>();
+  /** orderUpdate inputs seen, for asserting tags are never written there. */
+  orderUpdateInputs: any[] = [];
+  /** Shared clock for agreement happenedAt / cancelledAt (the harness sets it
+   *  to the fake clock so evidence windows compare on one timeline). */
+  clock: () => Date = () => new Date();
   calls: string[] = [];
   interceptors = new Map<string, Interceptor>();
   private callCounts = new Map<string, number>();
-  private edits = new Map<string, { orderId: string; added: MergeLineItem[] }>();
+  private edits = new Map<
+    string,
+    {
+      orderId: string;
+      added: { calculatedLineItemId: string; variantId: string; quantity: number; description: string }[];
+      saved: boolean;
+    }
+  >();
+  private pendingCommits = new Map<string, { orderId: string; added: any[]; saved: boolean }>();
   private editSeq = 1;
+  private jobSeq = 1;
+  private agreementSeq = 1;
 
   constructor(orders: FakeOrder[]) {
     for (const o of orders) this.orders.set(o.id, o);
@@ -191,14 +244,37 @@ export class FakeShopify {
     // Simulate orderCancel being asynchronous.
     if (o.pendingCancelReads != null) {
       if (o.pendingCancelReads <= 0) {
-        o.cancelledAt = new Date().toISOString();
+        this.applyCancel(o, o.pendingStaffNote ?? null, o.pendingCancelJobId ?? null);
         o.pendingCancelReads = null;
+        o.pendingStaffNote = null;
+        o.pendingCancelJobId = null;
       } else {
         o.pendingCancelReads -= 1;
       }
     }
-    const { lineItems, cancelDelayReads, pendingCancelReads, cancelCount, fulfillmentOrders, location, ...state } = o;
+    const {
+      lineItems,
+      cancelDelayReads,
+      pendingCancelReads,
+      pendingStaffNote,
+      pendingCancelJobId,
+      cancelCount,
+      fulfillmentOrders,
+      location,
+      agreements,
+      ...state
+    } = o;
     return structuredClone(state);
+  }
+
+  /** Marks an order cancelled with the staffNote Shopify recorded. */
+  private applyCancel(o: FakeOrder, staffNote: string | null, jobId: string | null) {
+    o.cancelledAt = this.clock().toISOString();
+    o.cancellation = { staffNote };
+    if (jobId) {
+      const job = this.jobs.get(jobId);
+      if (job) job.done = true;
+    }
   }
 
   fulfillmentOrdersOf(o: FakeOrder): FulfillmentOrderInfo[] {
@@ -285,32 +361,155 @@ export class FakeShopify {
     },
     MergeEditBegin: ({ id }) => {
       const calcId = `gid://shopify/CalculatedOrder/${this.editSeq++}`;
-      this.edits.set(calcId, { orderId: id, added: [] });
+      this.edits.set(calcId, { orderId: id, added: [], saved: false });
       return { data: { orderEditBegin: { calculatedOrder: { id: calcId }, userErrors: [] } } };
     },
     MergeEditAddVariant: ({ id, variantId, quantity, locationId }) => {
       this.addVariantLocations.push(locationId);
       const edit = this.edits.get(id)!;
-      const item = makeLineItem({ variant: { id: variantId }, quantity, currentQuantity: quantity, unfulfilledQuantity: quantity });
-      edit.added.push(item);
-      return { data: { orderEditAddVariant: { calculatedLineItem: { id: `calc-${item.id}` }, userErrors: [] } } };
+      const calculatedLineItemId = `calc-li-${lineItemSeq++}`;
+      edit.added.push({ calculatedLineItemId, variantId, quantity, description: "" });
+      return { data: { orderEditAddVariant: { calculatedLineItem: { id: calculatedLineItemId }, userErrors: [] } } };
     },
-    MergeEditDiscount: () => ({
-      data: { orderEditAddLineItemDiscount: { calculatedLineItem: { id: "x" }, userErrors: [] } },
-    }),
+    MergeEditDiscount: ({ id, lineItemId, discount }) => {
+      const edit = this.edits.get(id)!;
+      const line = edit.added.find((a) => a.calculatedLineItemId === lineItemId);
+      if (line) line.description = discount.description ?? "";
+      return { data: { orderEditAddLineItemDiscount: { calculatedLineItem: { id: lineItemId }, userErrors: [] } } };
+    },
+    // Shopify stops returning a committed calculated order (2026-01+).
+    MergeCalculatedOrder: ({ id }) => {
+      const edit = this.edits.get(id) ?? this.pendingCommits.get(id);
+      if (!edit || edit.saved) return { data: { node: null } };
+      return {
+        data: {
+          node: {
+            id,
+            addedLineItems: {
+              nodes: edit.added.map((a) => ({
+                id: a.calculatedLineItemId,
+                quantity: a.quantity,
+                variant: { id: a.variantId },
+                calculatedDiscountAllocations: [
+                  { discountApplication: { description: a.description } },
+                ],
+              })),
+            },
+          },
+        },
+      };
+    },
     MergeEditCommit: ({ id }) => {
-      this.applyCommit(id);
-      return { data: { orderEditCommit: { order: { id: "x" }, userErrors: [] } } };
+      const edit = this.edits.get(id) ?? this.pendingCommits.get(id);
+      if (!edit || edit.saved) {
+        return {
+          data: {
+            orderEditCommit: {
+              order: null,
+              userErrors: [{ field: null, message: "The calculated order has already been saved." }],
+            },
+          },
+        };
+      }
+      const mode = this.commitMode.get(id) ?? this.commitMode.get("*") ?? "apply";
+      if (mode === "reject") {
+        return {
+          data: {
+            orderEditCommit: {
+              order: null,
+              userErrors: [{ field: null, message: "Calculated order can't be committed" }],
+            },
+          },
+        };
+      }
+      edit.saved = true;
+      if (mode === "apply") {
+        this.applyCommit(id);
+        return { data: { orderEditCommit: { order: { id: edit.orderId }, userErrors: [] } } };
+      }
+      // The response never reached the caller; the commit may still apply.
+      if (mode === "lose-apply-later") this.pendingCommits.set(id, edit);
+      return { errors: [{ message: "upstream request timeout" }] };
     },
-    MergeCancelSecondary: ({ orderId }) => {
+    MergeCancelSecondary: ({ orderId, staffNote }) => {
       const o = this.orders.get(orderId)!;
       o.cancelCount += 1;
-      if (o.cancelDelayReads) o.pendingCancelReads = o.cancelDelayReads;
-      else o.cancelledAt = new Date().toISOString();
-      return { data: { orderCancel: { job: { id: "job" }, orderCancelUserErrors: [] } } };
+      if (o.cancelledAt) {
+        return {
+          data: {
+            orderCancel: {
+              job: null,
+              order: { id: o.id },
+              orderCancelUserErrors: [{ field: null, message: "Order is already canceled" }],
+            },
+          },
+        };
+      }
+      const mode = this.cancelMode.get(orderId) ?? this.cancelMode.get("*") ?? "apply";
+      if (mode === "reject") {
+        return {
+          data: {
+            orderCancel: {
+              job: null,
+              order: { id: o.id },
+              orderCancelUserErrors: [{ field: null, message: "The order cannot be canceled" }],
+            },
+          },
+        };
+      }
+      const jobId = `gid://shopify/Job/${this.jobSeq++}`;
+      if (mode === "lose") {
+        // Applied but the response never reached the caller.
+        this.applyCancel(o, staffNote ?? null, jobId);
+        return { errors: [{ message: "upstream request timeout" }] };
+      }
+      if (mode === "delay" || o.cancelDelayReads) {
+        o.pendingCancelReads = o.cancelDelayReads ?? 2;
+        o.pendingStaffNote = staffNote ?? null;
+        o.pendingCancelJobId = jobId;
+        this.jobs.set(jobId, { done: false });
+        return { data: { orderCancel: { job: { id: jobId }, order: { id: o.id }, orderCancelUserErrors: [] } } };
+      }
+      this.jobs.set(jobId, { done: true });
+      this.applyCancel(o, staffNote ?? null, jobId);
+      return { data: { orderCancel: { job: { id: jobId }, order: { id: o.id }, orderCancelUserErrors: [] } } };
     },
+    MergeJob: ({ id }) => ({ data: { job: { done: this.jobs.get(id)?.done ?? false } } }),
+    MergeCurrentApp: () => ({ data: { currentAppInstallation: { app: { id: APP_ID } } } }),
+    // The §6 evidence read: line items with discount allocations + agreements.
+    MergeOrderEvidence: ({ id }) => {
+      const o = this.orders.get(id);
+      return {
+        data: {
+          order: o && {
+            lineItems: {
+              nodes: structuredClone(o.lineItems),
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+            agreements: { nodes: structuredClone(o.agreements ?? []) },
+          },
+        },
+      };
+    },
+    MergeTagsAdd: ({ id, tags }) => {
+      const o = this.orders.get(id)!;
+      o.tags = [...new Set([...(o.tags ?? []), ...(tags as string[])])];
+      return { data: { tagsAdd: { node: { id }, userErrors: [] } } };
+    },
+    MergeAnnotateNote: ({ input }) => {
+      const o = this.orders.get(input.id)!;
+      this.orderUpdateInputs.push(input);
+      if (input.note !== undefined) o.note = input.note;
+      return { data: { orderUpdate: { order: { id: o.id, note: o.note }, userErrors: [] } } };
+    },
+    MergeOrderClose: ({ input }) => {
+      this.orders.get(input.id)!.closed = true;
+      return { data: { orderClose: { order: { id: input.id }, userErrors: [] } } };
+    },
+    // Legacy names kept so older tests' interceptors keep working if called.
     MergeAnnotateOrder: ({ input }) => {
       const o = this.orders.get(input.id)!;
+      this.orderUpdateInputs.push(input);
       if (input.tags) o.tags = input.tags;
       if (input.note !== undefined) o.note = input.note;
       return { data: { orderUpdate: { order: { id: o.id }, userErrors: [] } } };
@@ -321,11 +520,77 @@ export class FakeShopify {
     },
   };
 
-  /** Applies a calculated order to the real order (what a commit does). */
+  /**
+   * Applies a calculated order to the real order (what a commit does): the
+   * added lines appear with a fully-covering ManualDiscountApplication whose
+   * description carries the op token, inside one OrderEditAgreement
+   * attributed to this app with happenedAt on the fake clock.
+   */
   applyCommit(calcId: string) {
-    const edit = this.edits.get(calcId)!;
-    this.orders.get(edit.orderId)!.lineItems.push(...edit.added);
+    const edit = this.edits.get(calcId) ?? this.pendingCommits.get(calcId);
+    if (!edit) return;
+    edit.saved = true;
+    const order = this.orders.get(edit.orderId)!;
+    const sales: any[] = [];
+    for (const added of edit.added) {
+      const price = (10 * added.quantity).toFixed(2);
+      const item: any = makeLineItem({
+        variant: { id: added.variantId },
+        quantity: added.quantity,
+        currentQuantity: added.quantity,
+        unfulfilledQuantity: added.quantity,
+      });
+      item.originalUnitPriceSet = { shopMoney: { amount: price } };
+      item.discountAllocations = [
+        {
+          allocatedAmountSet: { shopMoney: { amount: price } },
+          discountApplication: {
+            __typename: "ManualDiscountApplication",
+            title: added.description,
+            description: added.description,
+          },
+        },
+      ];
+      order.lineItems.push(item);
+      sales.push({ __typename: "ProductSale", quantity: added.quantity, lineItem: { id: item.id } });
+    }
+    (order.agreements ??= []).push({
+      __typename: "OrderEditAgreement",
+      id: `gid://shopify/OrderEditAgreement/${this.agreementSeq++}`,
+      happenedAt: this.clock().toISOString(),
+      app: { id: APP_ID },
+      sales: { nodes: sales },
+    });
     this.edits.delete(calcId);
+    this.pendingCommits.delete(calcId);
+  }
+
+  /** Applies a commit whose response was lost (lose-apply-later mode). */
+  deliverPendingCommit(calcId: string) {
+    this.applyCommit(calcId);
+  }
+
+  /** An order edit made outside MergeShip: a line without the token and an
+   *  agreement attributed to another app. */
+  merchantAddLine(orderId: string, variantId = "gid://shopify/ProductVariant/9", quantity = 1) {
+    const o = this.orders.get(orderId)!;
+    const item: any = makeLineItem({
+      variant: { id: variantId },
+      quantity,
+      currentQuantity: quantity,
+      unfulfilledQuantity: quantity,
+    });
+    item.originalUnitPriceSet = { shopMoney: { amount: (10 * quantity).toFixed(2) } };
+    item.discountAllocations = [];
+    o.lineItems.push(item);
+    (o.agreements ??= []).push({
+      __typename: "OrderEditAgreement",
+      id: `gid://shopify/OrderEditAgreement/${this.agreementSeq++}`,
+      happenedAt: this.clock().toISOString(),
+      app: { id: OTHER_APP_ID },
+      sales: { nodes: [{ __typename: "ProductSale", quantity, lineItem: { id: item.id } }] },
+    });
+    return item;
   }
 
   lastCalcId() {
@@ -499,28 +764,34 @@ export class MemoryJournal implements MergeJournal {
   }
 }
 
-export function testDeps(journal: MemoryJournal, overrides: Partial<MergeDeps> = {}): MergeDeps {
+export function testDeps(journal: MemoryJournal, overrides: Partial<MergeDeps> = {}): MergeDeps & {
+  ops: MemoryOperationStore;
+  workStore: MemoryWorkStore;
+} {
   let now = new Date("2026-10-01T12:00:00Z").getTime();
   journal.clock = () => new Date(now);
   const claims = new MemoryClaimStore();
   claims.clock = () => new Date(now);
+  const workStore = new MemoryWorkStore();
+  workStore.clock = () => new Date(now);
+  const ops = new MemoryOperationStore(claims, workStore, journal);
+  ops.clock = () => new Date(now);
   return {
     journal,
     claims,
     leaseTtlMs: 90_000,
-    sleep: async (ms) => {
+    sleep: async (ms: number) => {
       now += ms;
     },
     now: () => new Date(now),
     cancelPollAttempts: 3,
     cancelPollIntervalMs: 1000,
-    maxCancelAttempts: 2,
-    pendingCommitGraceMs: 5 * 60 * 1000,
-    cancelRequestGraceMs: 10 * 60 * 1000,
     ...overrides,
+    ops: (overrides.ops as MemoryOperationStore | undefined) ?? ops,
+    workStore,
     // allow tests to move time forward
     ...({ advance: (ms: number) => (now += ms) } as any),
-  };
+  } as unknown as MergeDeps & { ops: MemoryOperationStore; workStore: MemoryWorkStore };
 }
 
 export const advance = (deps: MergeDeps, ms: number) => (deps as any).advance(ms);
@@ -727,6 +998,460 @@ export class MemoryWorkStore implements WorkStore {
   }
 }
 
+// ── Memory operation store ────────────────────────────────────────────────────
+// Implements OperationStore with the SAME conditional semantics as the SQL
+// version: durable lock uniqueness, write-ahead attempt guards, lease/phase
+// CAS, and terminal lock deletion + work settlement — all on the fake clock.
+
+export class MemoryOperationStore implements OperationStore {
+  ops = new Map<string, OperationRecord>();
+  /** key `${shop} ${orderId}` → operationId */
+  locks = new Map<string, string>();
+  attempts: MutationAttempt[] = [];
+  control: ControlRow = {
+    id: "control",
+    newMergesEnabled: true,
+    completionEnabled: true,
+    allowShops: [],
+    note: null,
+  };
+  /** Mirrors the MERGESHIP_MUTATIONS env precheck. */
+  mutationsEnabled = true;
+  /** MergeRecord history written via recordHistoryAndVerifyCancel. */
+  records: MergeHistoryEntry[] = [];
+  instances = new Map<
+    string,
+    { instanceId: string; railwayDeploymentId: string | null; version: string | null; heartbeatAt: Date }
+  >();
+  private seq = 1;
+  private attemptSeq = 1;
+  clock: () => Date = () => new Date();
+
+  constructor(
+    claims?: MemoryClaimStore,
+    work?: MemoryWorkStore,
+    journal?: MemoryJournal,
+  ) {
+    this.claims = claims;
+    this.work = work;
+    this.journal = journal;
+  }
+
+  private claims?: MemoryClaimStore;
+  private work?: MemoryWorkStore;
+  private journal?: MemoryJournal;
+
+  private key(shop: string, orderId: string) {
+    return `${shop} ${orderId}`;
+  }
+
+  private owned(row: OperationRecord | undefined, op: { id: string; leaseToken: string | null }, marginMs = 0) {
+    const now = this.clock().getTime();
+    return (
+      !!row &&
+      row.leaseToken === op.leaseToken &&
+      row.leasedUntil != null &&
+      row.leasedUntil.getTime() > now + marginMs
+    );
+  }
+
+  private clone<T>(v: T): T {
+    return structuredClone(v);
+  }
+
+  async createOperation(input: NewOperationV2): Promise<OperationRecord> {
+    const ids = [...new Set(input.involvedOrderIds)].sort();
+    const now = this.clock().getTime();
+    // 1. Every claim held by this token with ≥30s of margin.
+    if (this.claims) {
+      for (const id of ids) {
+        const c = this.claims.claims.get(this.key(input.shop, id));
+        if (!c || c.token !== input.claimToken || c.leasedUntil <= now + 30_000) {
+          throw new OwnershipLostError(`Merge claims lost for ${input.shop} before operation create.`);
+        }
+      }
+    }
+    // 2. Settle the linked work item (same lease semantics as the SQL).
+    if (input.workItemId && this.work) {
+      const wi = this.work.items.get(input.workItemId);
+      if (
+        !wi ||
+        wi.status !== "PENDING" ||
+        wi.leaseToken !== input.workToken ||
+        !wi.leasedUntil ||
+        wi.leasedUntil.getTime() <= now
+      ) {
+        throw new OwnershipLostError(`Work item ${input.workItemId} is owned by another worker.`);
+      }
+    }
+    // 3. No blocking lock / v1 op.
+    for (const id of ids) {
+      if (this.locks.has(this.key(input.shop, id))) {
+        throw new ClaimContentionError(`Order ${id} is locked.`);
+      }
+    }
+    if (this.journal) {
+      for (const j of this.journal.ops.values()) {
+        if (
+          (j as any).protocolVersion !== 2 &&
+          j.shop === input.shop &&
+          ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(j.status) &&
+          j.involvedOrderIds.some((x) => ids.includes(x))
+        ) {
+          throw new ClaimContentionError(`Order involved in blocking op ${j.id}.`);
+        }
+      }
+    }
+    // Writes — nothing above may interleave.
+    const opId = `op-${this.seq++}`;
+    if (input.workItemId && this.work) {
+      const wi = this.work.items.get(input.workItemId)!;
+      wi.status = "DONE";
+      wi.outcome = "OPERATION_CREATED";
+      wi.operationId = opId;
+      wi.doneAt = this.clock();
+      wi.leaseToken = null;
+      wi.leasedUntil = null;
+      wi.retryAfter = null;
+    }
+    const record: OperationRecord = {
+      id: opId,
+      shop: input.shop,
+      status: "NEEDS_REVIEW",
+      protocolVersion: 2,
+      phase: "READY",
+      opToken: input.opToken,
+      primaryOrderId: input.primaryOrderId,
+      primaryOrderName: input.primaryOrderName,
+      customerId: input.customerId,
+      primaryLineItemCountBefore: input.primaryLineItemCountBefore,
+      addedLineItemCount: input.addedLineItemCount,
+      secondaries: this.clone(input.secondaries),
+      involvedOrderIds: ids,
+      attempts: 0,
+      lastError: null,
+      leaseToken: input.leaseToken,
+      leasedUntil: new Date(now + input.ttlMs),
+      calculatedOrderId: input.calculatedOrderId,
+      expectedTransfer: this.clone(input.expectedTransfer),
+      expectedLocationId: input.expectedLocationId,
+      primaryLineItemIdsBefore: [...input.primaryLineItemIdsBefore],
+      appliedEvidence: null,
+      firstDispatchAt: null,
+      nextCheckAt: this.clock(),
+      reviewReason: null,
+      reviewRequiredAt: null,
+      workItemId: input.workItemId ?? null,
+      sideEffectsDone: false,
+      createdAt: this.clock(),
+      updatedAt: this.clock(),
+    };
+    this.ops.set(record.id, record);
+    for (const id of ids) this.locks.set(this.key(input.shop, id), record.id);
+    return this.clone(record);
+  }
+
+  async acquireOperationLease(opId: string | undefined, token: string, ttlMs: number) {
+    const now = this.clock().getTime();
+    const due = [...this.ops.values()]
+      .filter(
+        (o) =>
+          o.protocolVersion === 2 &&
+          (opId === undefined || o.id === opId) &&
+          !(o.phase === "ABANDONED" || (o.phase === "COMPLETED" && o.sideEffectsDone)) &&
+          o.nextCheckAt != null &&
+          o.nextCheckAt.getTime() <= now &&
+          (!o.leasedUntil || o.leasedUntil.getTime() < now),
+      )
+      .sort((a, b) => a.nextCheckAt!.getTime() - b.nextCheckAt!.getTime());
+    const row = due[0];
+    if (!row) return null;
+    row.leaseToken = token;
+    row.leasedUntil = new Date(now + ttlMs);
+    row.updatedAt = this.clock();
+    return this.clone(row);
+  }
+
+  async renewOperation(op: Pick<OperationRecord, "id" | "leaseToken">, ttlMs: number) {
+    const row = this.ops.get(op.id);
+    if (!this.owned(row, op)) {
+      throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+    }
+    row!.leasedUntil = new Date(this.clock().getTime() + ttlMs);
+    row!.updatedAt = this.clock();
+  }
+
+  async transition(
+    op: Pick<OperationRecord, "id" | "leaseToken" | "workItemId">,
+    patch: OperationPatch,
+  ): Promise<void> {
+    const row = this.ops.get(op.id);
+    if (!this.owned(row, op)) {
+      throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+    }
+    if (patch.expectedPhase !== undefined && row!.phase !== patch.expectedPhase) {
+      throw new OwnershipLostError(`Merge operation ${op.id} is now ${row!.phase}; expected ${patch.expectedPhase}.`);
+    }
+    if (patch.phase !== undefined) {
+      row!.phase = patch.phase;
+      row!.status =
+        patch.phase === "COMPLETED" || patch.phase === "ABANDONED" ? patch.phase : "NEEDS_REVIEW";
+      if (patch.phase === "REVIEW_REQUIRED") row!.reviewRequiredAt = this.clock();
+    }
+    if (patch.nextCheckAt !== undefined) {
+      row!.nextCheckAt =
+        patch.nextCheckAt === null
+          ? null
+          : patch.nextCheckAt === "now"
+            ? this.clock()
+            : patch.nextCheckAt instanceof Date
+              ? patch.nextCheckAt
+              : new Date(this.clock().getTime() + patch.nextCheckAt);
+    }
+    if (patch.appliedEvidence !== undefined) row!.appliedEvidence = this.clone(patch.appliedEvidence);
+    if (patch.reviewReason !== undefined) row!.reviewReason = patch.reviewReason;
+    if (patch.secondaries !== undefined) row!.secondaries = this.clone(patch.secondaries);
+    if (patch.lastError !== undefined) row!.lastError = patch.lastError;
+    if (patch.firstDispatchAt === "now") row!.firstDispatchAt = this.clock();
+    if (patch.attempts !== undefined) row!.attempts = patch.attempts;
+    row!.updatedAt = this.clock();
+
+    if (row!.phase === "COMPLETED" || row!.phase === "ABANDONED") {
+      for (const id of row!.involvedOrderIds) this.locks.delete(this.key(row!.shop, id));
+      const wi = row!.workItemId ? this.work?.items.get(row!.workItemId) : undefined;
+      if (wi && wi.status === "DONE" && wi.outcome === "OPERATION_CREATED" && wi.operationId === row!.id) {
+        if (row!.phase === "COMPLETED") {
+          wi.outcome = "MERGED";
+          wi.doneAt = this.clock();
+        } else {
+          wi.status = "PENDING";
+          wi.retryAfter = this.clock();
+          wi.outcome = null;
+          wi.lastReason = row!.lastError ?? "operation abandoned";
+        }
+      }
+    } else if (row!.phase === "REVIEW_REQUIRED") {
+      const wi = row!.workItemId ? this.work?.items.get(row!.workItemId) : undefined;
+      if (wi && wi.status === "DONE" && wi.outcome === "OPERATION_CREATED" && wi.operationId === row!.id) {
+        wi.outcome = "OPERATION_REVIEW";
+        wi.doneAt = this.clock();
+      }
+    }
+  }
+
+  async openDispatchGate({
+    op,
+    kind,
+    targetOrderId,
+    dispatchToken,
+    requiredPhase,
+  }: {
+    op: Pick<OperationRecord, "id" | "shop" | "leaseToken">;
+    kind: AttemptKind;
+    targetOrderId: string;
+    dispatchToken: string;
+    requiredPhase: OperationRecord["phase"];
+  }): Promise<MutationAttempt | null> {
+    if (!this.mutationsEnabled) return null;
+    const row = this.ops.get(op.id);
+    if (!this.owned(row, op, 30_000) || row!.phase !== requiredPhase) return null;
+    const sw = kind === "EDIT_COMMIT" ? "newMergesEnabled" : "completionEnabled";
+    if (
+      !this.control[sw] ||
+      (this.control.allowShops.length > 0 && !this.control.allowShops.includes(row!.shop))
+    ) {
+      return null;
+    }
+    if (kind === "EDIT_COMMIT") {
+      if (this.attempts.some((a) => a.operationId === op.id && a.kind === "EDIT_COMMIT")) return null;
+    } else if (kind === "ORDER_CANCEL") {
+      const inDoubt = this.attempts.some(
+        (a) =>
+          a.operationId === op.id &&
+          a.kind === "ORDER_CANCEL" &&
+          a.targetOrderId === targetOrderId &&
+          ["DISPATCHING", "UNKNOWN", "SUCCEEDED"].includes(a.state),
+      );
+      const rejects = this.attempts.filter(
+        (a) =>
+          a.operationId === op.id &&
+          a.kind === "ORDER_CANCEL" &&
+          a.targetOrderId === targetOrderId &&
+          a.state === "REJECTED",
+      ).length;
+      if (inDoubt || rejects >= 3) return null;
+    } else {
+      const count = this.attempts.filter(
+        (a) => a.operationId === op.id && a.kind === kind && a.targetOrderId === targetOrderId,
+      ).length;
+      if (count >= 3) return null;
+    }
+    // Phase flip + 30s first-check throttle, mirroring the SQL gate.
+    const now = this.clock();
+    if (kind === "EDIT_COMMIT") {
+      row!.phase = "COMMIT_IN_DOUBT";
+      row!.firstDispatchAt ??= now;
+    }
+    row!.nextCheckAt = new Date(now.getTime() + 30_000);
+    row!.status = "NEEDS_REVIEW";
+    row!.updatedAt = now;
+    const attempt: MutationAttempt = {
+      id: `att-${this.attemptSeq++}`,
+      operationId: op.id,
+      kind,
+      targetOrderId,
+      attemptNo:
+        this.attempts.filter((a) => a.operationId === op.id && a.kind === kind && a.targetOrderId === targetOrderId)
+          .length + 1,
+      state: "DISPATCHING",
+      dispatchToken,
+      dispatchedAt: this.clock(),
+      respondedAt: null,
+      responseSummary: null,
+      jobId: null,
+    };
+    this.attempts.push(attempt);
+    return this.clone(attempt);
+  }
+
+  async recordAttempt(
+    attemptId: string,
+    dispatchToken: string,
+    state: Exclude<MutationAttempt["state"], "DISPATCHING">,
+    summary: string | null,
+    jobId?: string | null,
+  ): Promise<boolean> {
+    const row = this.attempts.find((a) => a.id === attemptId);
+    if (!row || row.state !== "DISPATCHING" || row.dispatchToken !== dispatchToken) return false;
+    row.state = state;
+    row.respondedAt = this.clock();
+    row.responseSummary = summary;
+    row.jobId = jobId ?? row.jobId;
+    return true;
+  }
+
+  async listAttempts(opId: string, kind?: AttemptKind, targetOrderId?: string) {
+    return this.clone(
+      this.attempts.filter(
+        (a) =>
+          a.operationId === opId &&
+          (kind === undefined || a.kind === kind) &&
+          (targetOrderId === undefined || a.targetOrderId === targetOrderId),
+      ),
+    );
+  }
+
+  async recordHistoryAndVerifyCancel(
+    op: OperationRecord,
+    secondaryId: string,
+    evidence: { cancelledAt: string },
+  ): Promise<void> {
+    const row = this.ops.get(op.id);
+    if (!this.owned(row, op) || row!.phase !== "APPLIED") {
+      throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+    }
+    row!.secondaries = row!.secondaries.map((s) =>
+      s.id === secondaryId
+        ? { ...s, cancelPhase: "CANCEL_VERIFIED" as const, cancelledAt: evidence.cancelledAt, staffNoteMatched: true, done: true }
+        : s,
+    );
+    row!.updatedAt = this.clock();
+    const secondary = row!.secondaries.find((s) => s.id === secondaryId);
+    const entry: MergeHistoryEntry = {
+      shop: row!.shop,
+      primaryOrderId: row!.primaryOrderId,
+      primaryOrderName: row!.primaryOrderName,
+      mergedOrderId: secondaryId,
+      mergedOrderName: secondary?.name ?? secondaryId,
+      customerId: row!.customerId,
+      itemsCombined: secondary?.items ?? 0,
+    };
+    if (!this.records.some((r) => r.shop === entry.shop && r.mergedOrderId === entry.mergedOrderId)) {
+      this.records.push(entry);
+    }
+    await this.journal?.recordHistory(entry);
+  }
+
+  async findLockedOrderIds(shop: string, ids: string[]) {
+    const found = new Set<string>();
+    for (const id of ids) if (this.locks.has(this.key(shop, id))) found.add(id);
+    return found;
+  }
+
+  async findBlockingV1(shop: string, ids: string[]) {
+    const found = new Set<string>();
+    for (const j of this.journal?.ops.values() ?? []) {
+      if (
+        (j as any).protocolVersion !== 2 &&
+        j.shop === shop &&
+        ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(j.status)
+      ) {
+        for (const id of j.involvedOrderIds) if (ids.includes(id)) found.add(id);
+      }
+    }
+    return found;
+  }
+
+  async getOperation(id: string) {
+    const row = this.ops.get(id);
+    return row ? this.clone(row) : null;
+  }
+
+  async lockOwner(shop: string, orderId: string) {
+    const operationId = this.locks.get(this.key(shop, orderId));
+    if (!operationId) return null;
+    const row = this.ops.get(operationId);
+    return { operationId, phase: row?.phase ?? null };
+  }
+
+  async markSideEffectsDone(op: Pick<OperationRecord, "id" | "leaseToken">) {
+    const row = this.ops.get(op.id);
+    if (!this.owned(row, op)) return false;
+    row!.sideEffectsDone = true;
+    row!.nextCheckAt = null;
+    row!.updatedAt = this.clock();
+    return true;
+  }
+
+  async getControl() {
+    return this.clone(this.control);
+  }
+
+  async setControl(patch: Partial<Omit<ControlRow, "id">>) {
+    Object.assign(this.control, this.clone(patch));
+  }
+
+  async isEnabled(shop: string, sw: "newMergesEnabled" | "completionEnabled") {
+    if (!this.control[sw]) return false;
+    return this.control.allowShops.length === 0 || this.control.allowShops.includes(shop);
+  }
+
+  async heartbeat(instanceId: string, railwayDeploymentId: string | null, version: string | null) {
+    this.instances.set(instanceId, {
+      instanceId,
+      railwayDeploymentId,
+      version,
+      heartbeatAt: this.clock(),
+    });
+  }
+
+  async listRecentInstances() {
+    return [...this.instances.values()].sort((a, b) => b.heartbeatAt.getTime() - a.heartbeatAt.getTime());
+  }
+
+  async purgeOldInstances(olderThanMs: number) {
+    const cutoff = this.clock().getTime() - olderThanMs;
+    let removed = 0;
+    for (const [id, inst] of this.instances) {
+      if (inst.heartbeatAt.getTime() < cutoff) {
+        this.instances.delete(id);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+}
+
 /** One shop, one fake clock shared by the journal/claims/work stores, the
  *  merge deps and the sweeper. `webhook` mirrors the orders/create route
  *  (settings gate, durable insert, background processing) and `sweep` runs
@@ -736,25 +1461,26 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
   let now = new Date("2026-10-01T12:00:00Z").getTime();
   const clock = () => new Date(now);
   const shopify = new FakeShopify(orders);
+  shopify.clock = clock;
   const journal = new MemoryJournal();
   journal.clock = clock;
   const claims = new MemoryClaimStore();
   claims.clock = clock;
   const work = new MemoryWorkStore();
   work.clock = clock;
+  const ops = new MemoryOperationStore(claims, work, journal);
+  ops.clock = clock;
   const deps: MergeDeps = {
     journal,
     claims,
-    leaseTtlMs: 90_000,
+    ops,
+    leaseTtlMs: 120_000,
     sleep: async (ms) => {
       now += ms;
     },
     now: clock,
     cancelPollAttempts: 3,
     cancelPollIntervalMs: 1000,
-    maxCancelAttempts: 2,
-    pendingCommitGraceMs: 5 * 60 * 1000,
-    cancelRequestGraceMs: 10 * 60 * 1000,
   };
   const settings: MergeSettings = {
     autoMergeEnabled: true,
@@ -794,6 +1520,7 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
     runSweepOnce({
       claims,
       journal,
+      ops,
       work,
       deps,
       adminFactory,
@@ -802,11 +1529,44 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
       random: () => 0.5,
       ...overrides,
     });
+  /** Drive `driveOperation` until the op reaches a waiting point that time
+   *  alone cannot pass within `maxMs` of advancement, or is terminal. */
+  const driveUntilIdle = async (opId: string, maxMs = 90 * 60 * 1000) => {
+    let advanced = 0;
+    for (let i = 0; i < 200; i++) {
+      const op = await ops.getOperation(opId);
+      if (!op) return null;
+      const terminal =
+        op.phase === "ABANDONED" ||
+        (op.phase === "COMPLETED" && op.sideEffectsDone) ||
+        op.phase === "REVIEW_REQUIRED";
+      if (terminal) return op;
+      if (op.nextCheckAt && op.nextCheckAt.getTime() > now) {
+        const jump = op.nextCheckAt.getTime() - now;
+        if (advanced + jump > maxMs) return op;
+        now += jump;
+        advanced += jump;
+        continue;
+      }
+      if (op.leasedUntil && op.leasedUntil.getTime() >= now) {
+        // Still leased — clear it on the store row so the sweep can pick the
+        // op up (the previous drive call counts as its owner's last act).
+        const row = ops.ops.get(op.id);
+        if (row) {
+          row.leasedUntil = null;
+          row.leaseToken = null;
+        }
+      }
+      await sweep();
+    }
+    return ops.getOperation(opId);
+  };
   return {
     shopify,
     journal,
     claims,
     work,
+    ops,
     deps,
     clock,
     settings,
@@ -814,6 +1574,7 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
     adminFactory,
     webhook,
     sweep,
+    driveUntilIdle,
     stats,
     advance: (ms: number) => (now += ms),
     SHOP,

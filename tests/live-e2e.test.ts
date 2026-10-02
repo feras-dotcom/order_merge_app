@@ -146,7 +146,7 @@ describe.skipIf(!STORE || !VARIANT || !CUSTOMER)("live end-to-end merge", () => 
       // Clean up: cancel the test primary too (restock, no refund).
       await run(
         `mutation LiveCleanup($id: ID!) {
-          orderCancel(orderId: $id, reason: OTHER, notifyCustomer: false, restock: true, refund: false, staffNote: "MergeShip live test cleanup") {
+          orderCancel(orderId: $id, reason: OTHER, notifyCustomer: false, restock: true, refundMethod: { originalPaymentMethodsRefund: false }, staffNote: "MergeShip live test cleanup") {
             orderCancelUserErrors { message }
           }
         }`,

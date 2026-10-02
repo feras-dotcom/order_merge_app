@@ -4,6 +4,8 @@
 // payload or any userErrors all throw. Callers never continue on a response
 // they could not positively confirm.
 
+import { OwnershipLostError } from "./ownership.server";
+
 export type AdminClient = {
   graphql: (
     query: string,
@@ -78,6 +80,9 @@ export async function gql<T = any>(
     body = await Promise.race([res.json(), timeout]);
   } catch (err: any) {
     if (err instanceof ShopifyGraphqlError) throw err;
+    // A lease fence refuses inside admin.graphql; ownership loss is never a
+    // Shopify failure and must reach callers as OwnershipLostError.
+    if (err instanceof OwnershipLostError) throw err;
     // The client throws on HTTP failures and (depending on version) on
     // GraphQL errors; surface whatever detail it carries.
     const detail = err?.body?.errors ?? err?.response?.errors ?? err?.message ?? err;

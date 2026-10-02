@@ -148,13 +148,31 @@ export interface OperationPatch {
   /** Condition: the op must currently be in this phase (0 rows otherwise). */
   expectedPhase?: OperationPhase;
   phase?: OperationPhase;
-  /** ms offset from the wall clock, "now" for due immediately, null to clear. */
-  nextCheckAt?: number | "now" | null;
+  /** ms offset from the wall clock, "now" for due immediately, null to clear,
+   *  or a Date for an absolute time (evidence/cancel ladder slots). */
+  nextCheckAt?: number | "now" | Date | null;
   appliedEvidence?: unknown;
   reviewReason?: string | null;
   secondaries?: OperationSecondary[];
   lastError?: string | null;
   firstDispatchAt?: "now";
+  /** v2 reuses the legacy attempts column as the COMPLETED side-effect retry
+   *  counter (bounded by MAX_SIDE_EFFECT_PASSES in operation-protocol). */
+  attempts?: number;
+}
+
+/** Per-secondary transfer expectations, frozen at plan time. */
+export interface ExpectedTransferLine {
+  sourceLineItemId: string | null;
+  variantId: string | null;
+  quantity: number;
+  description: string;
+}
+export interface ExpectedTransferEntry {
+  secondaryId: string;
+  /** 1-based index of the secondary within the op (the token suffix). */
+  secondaryIndex: number;
+  lines: ExpectedTransferLine[];
 }
 
 export interface DispatchGateArgs {
@@ -222,6 +240,17 @@ export interface OperationStore {
   findLockedOrderIds(shop: string, ids: string[]): Promise<Set<string>>;
   /** Order ids (of `ids`) involved in a v1 op in a blocking status. */
   findBlockingV1(shop: string, ids: string[]): Promise<Set<string>>;
+  /** Plain read of an operation row (no lease). */
+  getOperation(id: string): Promise<OperationRecord | null>;
+  /** The op holding a MergeOrderLock on this order, with its phase (v2) or
+   *  status (v1/unknown). Null when the order is not locked. */
+  lockOwner(
+    shop: string,
+    orderId: string,
+  ): Promise<{ operationId: string; phase: OperationPhase | null } | null>;
+  /** COMPLETED side effects finished: clears the retry schedule. Conditional
+   *  on the lease; false = ownership lost. */
+  markSideEffectsDone(op: Pick<OperationRecord, "id" | "leaseToken">): Promise<boolean>;
   getControl(): Promise<ControlRow | null>;
   setControl(patch: Partial<Omit<ControlRow, "id">>): Promise<void>;
   /** Read-side helper for entry points (the gate SQL is the enforcement). */
@@ -347,7 +376,9 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
         SET "leaseToken" = ${token}, "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
         WHERE id = (
           SELECT id FROM "MergeOperation"
-          WHERE "protocolVersion" = 2 AND "phase" NOT IN ('COMPLETED', 'ABANDONED')
+          WHERE "protocolVersion" = 2
+            AND ("phase" NOT IN ('COMPLETED', 'ABANDONED')
+              OR ("phase" = 'COMPLETED' AND "sideEffectsDone" = false))
             AND "nextCheckAt" <= ${DB_WALL}
             AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_WALL})
             ${opId ? Prisma.sql`AND id = ${opId}` : Prisma.empty}
@@ -385,7 +416,9 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
             ? Prisma.sql`"nextCheckAt" = NULL`
             : patch.nextCheckAt === "now"
               ? Prisma.sql`"nextCheckAt" = ${DB_WALL}`
-              : Prisma.sql`"nextCheckAt" = ${dbWallPlus(patch.nextCheckAt)}`,
+              : patch.nextCheckAt instanceof Date
+                ? Prisma.sql`"nextCheckAt" = ${patch.nextCheckAt}`
+                : Prisma.sql`"nextCheckAt" = ${dbWallPlus(patch.nextCheckAt)}`,
         );
       }
       if (patch.appliedEvidence !== undefined) {
@@ -397,6 +430,7 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       }
       if (patch.lastError !== undefined) sets.push(Prisma.sql`"lastError" = ${patch.lastError}`);
       if (patch.firstDispatchAt === "now") sets.push(Prisma.sql`"firstDispatchAt" = ${DB_WALL}`);
+      if (patch.attempts !== undefined) sets.push(Prisma.sql`"attempts" = ${patch.attempts}`);
       sets.push(Prisma.sql`"updatedAt" = ${DB_WALL}`);
 
       const condition = Prisma.sql`
@@ -584,6 +618,28 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
         WHERE "shop" = ${shop} AND "protocolVersion" = 1
           AND "status" = ANY(${V1_BLOCKING}) AND "involvedOrderIds" && ${ids}`;
       return new Set(rows.flatMap((r) => r.involvedOrderIds).filter((id) => ids.includes(id)));
+    },
+
+    async getOperation(id) {
+      const rows = await db.$queryRaw<any[]>`SELECT * FROM "MergeOperation" WHERE id = ${id}`;
+      return rows.length ? toOp(rows[0]) : null;
+    },
+
+    async lockOwner(shop, orderId) {
+      const rows = await db.$queryRaw<any[]>`
+        SELECT o.id AS "operationId", o.phase AS "phase"
+        FROM "MergeOrderLock" l JOIN "MergeOperation" o ON o.id = l."operationId"
+        WHERE l."shop" = ${shop} AND l."orderId" = ${orderId}`;
+      return rows.length ? { operationId: rows[0].operationId, phase: rows[0].phase } : null;
+    },
+
+    async markSideEffectsDone(op) {
+      const updated = await db.$executeRaw`
+        UPDATE "MergeOperation"
+        SET "sideEffectsDone" = true, "nextCheckAt" = NULL, "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${op.id} AND "leaseToken" = ${op.leaseToken}
+          AND "leasedUntil" > ${DB_WALL}`;
+      return updated === 1;
     },
 
     async getControl() {

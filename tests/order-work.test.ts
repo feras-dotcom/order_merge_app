@@ -10,7 +10,6 @@ import {
   MAX_ATTEMPTS,
   retryDelayMs,
 } from "../app/lib/order-work.server";
-import type { NewMergeOperation } from "../app/lib/merge-journal.server";
 import {
   makeHarness,
   makeOrder,
@@ -40,6 +39,7 @@ describe("order work items (spec §9)", () => {
     expect(await h.webhook(id(2))).toBeNull();
     expect(h.stats.processCalls).toBe(1);
     expect([...h.work.items.values()]).toHaveLength(1);
+    // v2: creating the operation settles the work item; the op carries it on.
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "MERGED" });
     expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
   });
@@ -57,7 +57,7 @@ describe("order work items (spec §9)", () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     const item = await h.webhook(id(2), false); // row created, worker died before processing
     expect(item).toMatchObject({ status: "PENDING", attempts: 1 });
-    h.advance(91_000); // the webhook lease expires
+    h.advance(121_000); // the webhook lease expires (TTL is 120s)
     await h.sweep();
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({
       status: "DONE",
@@ -91,7 +91,7 @@ describe("order work items (spec §9)", () => {
     h.shopify.on("MergeEditAddVariant", (_v, call) => (call === 1 ? topLevelError() : undefined));
     await h.webhook(id(2));
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "PENDING", attempts: 1 });
-    expect(h.journal.ops.size).toBe(0); // failed before the journal write
+    expect(h.ops.ops.size).toBe(0); // failed before the operation row existed
 
     h.advance(60_000);
     await h.sweep();
@@ -169,24 +169,32 @@ describe("order work items (spec §9)", () => {
     expect(new Set(h.shopify.order(1).lineItems.map((i) => i.id)).size).toBe(3);
     expect(h.shopify.order(2).cancelCount).toBe(1);
     expect(h.shopify.order(3).cancelCount).toBe(1);
-    expect([...h.journal.ops.values()].map((o) => o.status)).toEqual(["COMPLETED", "COMPLETED"]);
+    expect([...h.ops.ops.values()].map((o) => o.phase)).toEqual(["COMPLETED", "COMPLETED"]);
     expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(2);
   });
 
-  it("#8 sibling inside a PENDING_COMMIT op: contention retry; the reconciled ABANDONED op frees it", async () => {
+  it("#8 sibling under a durable operation lock: contention retry; the abandoned op frees it", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
-    const op: NewMergeOperation = {
+    // A stuck v2 operation holds order 1's durable lock.
+    await h.claims.acquire(h.SHOP, [id(1)], "holder", h.deps.leaseTtlMs);
+    const holder = await h.ops.createOperation({
       shop: h.SHOP,
-      status: "PENDING_COMMIT",
+      claimToken: "holder",
+      opToken: "HOLDERTK",
+      involvedOrderIds: [id(1)],
       primaryOrderId: id(1),
       primaryOrderName: "#1",
       customerId: null,
       primaryLineItemCountBefore: 1,
       addedLineItemCount: 1,
       secondaries: [],
-      involvedOrderIds: [id(1)],
-    };
-    await h.journal.create(op, "stuck-token", 90_000);
+      calculatedOrderId: null,
+      expectedTransfer: [],
+      expectedLocationId: null,
+      primaryLineItemIdsBefore: [],
+      leaseToken: "holder-op",
+      ttlMs: 60_000,
+    });
 
     await h.webhook(id(2));
     const pending = await h.work.find(h.SHOP, id(2));
@@ -194,15 +202,21 @@ describe("order work items (spec §9)", () => {
     expect(pending!.lastReason).toContain("unfinished merge");
     expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
 
-    h.advance(6 * 60_000); // past the op lease and the PENDING_COMMIT grace
+    // The stuck op is abandoned: its lock and claim release order 1.
+    await h.ops.transition(
+      { id: holder.id, leaseToken: "holder-op", workItemId: null },
+      { phase: "ABANDONED", lastError: "gave up" },
+    );
+    await h.claims.release(h.SHOP, [id(1)], "holder");
+    h.advance(120_000);
     await h.sweep();
-    expect([...h.journal.ops.values()].map((o) => o.status)).toEqual(["ABANDONED", "COMPLETED"]);
+    expect([...h.ops.ops.values()].map((o) => o.phase)).toEqual(["ABANDONED", "COMPLETED"]);
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "MERGED" });
     expect(h.shopify.order(1).lineItems).toHaveLength(2);
     expect(h.shopify.order(2).cancelledAt).not.toBeNull();
   });
 
-  it("#9 death after orderEditCommit: the sweep reconciles COMMITTED, cancels the secondary, re-drives the item", async () => {
+  it("#9 death after orderEditCommit: the sweep reconciles the in-doubt op from evidence, cancels the secondary", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     const g = gate();
     h.shopify.on("MergeEditCommit", async (vars, call) => {
@@ -214,22 +228,24 @@ describe("order work items (spec §9)", () => {
       return undefined;
     });
     void h.webhook(id(2));
-    await g.at; // committed, worker hung
+    await g.at; // committed, worker hung — the attempt row is stuck DISPATCHING
 
-    h.advance(6 * 60_000); // claims + op lease expire; past the commit grace
+    h.advance(121_000); // op lease expires (TTL is 120s)
     await h.sweep();
 
-    expect(h.journal.only().status).toBe("COMPLETED");
+    const op = [...h.ops.ops.values()][0];
+    expect(op.phase).toBe("COMPLETED");
     expect(h.journal.history).toHaveLength(1);
     expect(h.shopify.order(1).lineItems).toHaveLength(2); // items moved exactly once
     expect(h.shopify.order(2).cancelledAt).not.toBeNull();
-    // The anchor was the merged-away secondary.
-    expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "ANCHOR_GONE" });
+    // The work item was settled atomically when the operation was created.
+    expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "MERGED" });
     expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
   });
 
-  it("#14 retry exhaustion: repeated transient failures end DONE EXHAUSTED", async () => {
+  it("#14 retry exhaustion: repeated transient failures end REVIEW EXHAUSTED", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     h.shopify.on("MergeCandidateOrders", () => topLevelError("still down"));
     try {
@@ -242,10 +258,13 @@ describe("order work items (spec §9)", () => {
         sweeps += 1;
         item = await h.work.find(h.SHOP, id(2));
       }
-      expect(item).toMatchObject({ status: "DONE", outcome: "EXHAUSTED" });
+      // v2: exhaustDue converts the item to REVIEW — a human decides; the
+      // stale-owner guards then refuse any further writes on it.
+      expect(item).toMatchObject({ status: "REVIEW", outcome: "EXHAUSTED" });
       expect(item!.attempts).toBeGreaterThan(1);
-      expect(err).toHaveBeenCalledWith(expect.stringContaining("EXHAUSTED"));
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("Exhausted"));
     } finally {
+      log.mockRestore();
       err.mockRestore();
     }
   });
@@ -258,33 +277,40 @@ describe("order work items (spec §9)", () => {
     expect(item!.retryAfter).toBeNull();
     expect(item!.lastReason).toMatch(/fraud risk/);
     expect(h.shopify.calls).toEqual(["MergeOrderState"]); // the anchor load only
-    expect(h.journal.ops.size).toBe(0);
+    expect(h.ops.ops.size).toBe(0);
   });
 
-  it("#16 successful merge: DONE MERGED, journal COMPLETED, history recorded", async () => {
+  it("#16 successful merge: DONE MERGED, op COMPLETED, history recorded", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     await h.webhook(id(2));
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "MERGED" });
-    expect(h.journal.only().status).toBe("COMPLETED");
+    expect([...h.ops.ops.values()].map((o) => o.phase)).toEqual(["COMPLETED"]);
     expect(h.journal.history).toHaveLength(1);
     expect(h.shopify.order(1).lineItems).toHaveLength(2);
     expect(h.shopify.order(2).cancelledAt).not.toBeNull();
   });
 
-  it("#17 rejected commit: op ABANDONED, the retried work item merges cleanly", async () => {
+  it("#17 rejected commit: the op parks in COMMIT_REJECTED then abandons; the requeued work item merges cleanly", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
-    h.shopify.on("MergeEditCommit", (_v, call) =>
-      call === 1 ? userError("orderEditCommit") : undefined,
+    let rejects = true;
+    h.shopify.on("MergeEditCommit", () =>
+      rejects ? userError("orderEditCommit") : undefined,
     );
-    await h.webhook(id(2));
-    expect([...h.journal.ops.values()].map((o) => o.status)).toEqual(["ABANDONED"]);
-    expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "PENDING", attempts: 1 });
+    await h.webhook(id(2)); // op created + driven inline → COMMIT_REJECTED, work row settled
+    const rejected = [...h.ops.ops.values()][0];
+    expect(rejected.phase).toBe("COMMIT_REJECTED");
+    expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "OPERATION_CREATED" });
     expect(h.shopify.order(1).lineItems).toHaveLength(1); // rejected = not applied
 
-    h.advance(60_000);
+    h.advance(16 * 60_000); // past the 15-minute quiet period
+    rejects = false;
+    // The sweep abandons the op, requeues the work item and (same tick)
+    // processes it into a fresh operation that merges cleanly.
     await h.sweep();
+    expect(h.ops.ops.get(rejected.id)!.phase).toBe("ABANDONED");
+    expect(h.ops.locks.size).toBe(0);
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "MERGED" });
-    expect([...h.journal.ops.values()].map((o) => o.status)).toEqual(["ABANDONED", "COMPLETED"]);
+    expect([...h.ops.ops.values()].map((o) => o.phase)).toEqual(["ABANDONED", "COMPLETED"]);
     expect(h.shopify.order(1).lineItems).toHaveLength(2);
     expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(2);
   });
@@ -292,7 +318,7 @@ describe("order work items (spec §9)", () => {
   it("#18 uninstalled shop: no offline session ends DONE SHOP_UNINSTALLED", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     await h.webhook(id(2), false); // row exists; the delivering worker is gone
-    h.advance(91_000);
+    h.advance(121_000);
     await h.sweep({
       adminFactory: async () => {
         throw new SessionNotFoundError(`Could not find a session for shop ${h.SHOP}`);
@@ -344,33 +370,45 @@ describe("retryDelayMs", () => {
 });
 
 describe("runSweepOnce", () => {
-  it("runs reap -> resume -> claimDue -> purge and isolates a failing step", async () => {
+  it("runs reap -> op-drive -> exhaust -> claimDue -> purge and isolates a failing step", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     const order: string[] = [];
+    const mark = (name: string) => {
+      if (!order.includes(name)) order.push(name);
+    };
     const reaping = h.claims.reapExpired.bind(h.claims);
     h.claims.reapExpired = async () => {
-      order.push("reap");
+      mark("reap");
       return reaping();
     };
-    h.journal.findShopsWithUnfinished = async () => {
-      order.push("resume-scan");
-      throw new Error("db down"); // must not stop the rest of the tick
+    const acquiring = h.ops.acquireOperationLease.bind(h.ops);
+    h.ops.acquireOperationLease = async (opId, token, ttl) => {
+      if (!order.includes("ops-scan")) {
+        mark("ops-scan");
+        throw new Error("db down"); // must not stop the rest of the tick
+      }
+      return acquiring(opId, token, ttl);
+    };
+    const exhausting = h.work.exhaustDue.bind(h.work);
+    h.work.exhaustDue = async () => {
+      mark("exhaust");
+      return exhausting();
     };
     const claiming = h.work.claimDue.bind(h.work);
     h.work.claimDue = async (l, t) => {
-      order.push("claimDue");
+      mark("claimDue");
       return claiming(l, t);
     };
     const purging = h.work.purgeDone.bind(h.work);
     h.work.purgeDone = async (ms) => {
-      order.push("purge");
+      mark("purge");
       return purging(ms);
     };
 
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await h.sweep();
-      expect(order).toEqual(["reap", "resume-scan", "claimDue", "purge"]);
+      expect(order).toEqual(["reap", "ops-scan", "exhaust", "claimDue", "purge"]);
       expect(err).toHaveBeenCalledWith(expect.stringContaining("db down"));
     } finally {
       err.mockRestore();

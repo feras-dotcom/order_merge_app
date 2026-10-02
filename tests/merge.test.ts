@@ -1,60 +1,87 @@
 import { describe, expect, it } from "vitest";
-import { executeMerge, resumeIncompleteMerges, REVIEW_TAG } from "../app/lib/merge.server";
+import { executeMerge, REVIEW_TAG } from "../app/lib/merge.server";
+import { driveOperation } from "../app/lib/operation-protocol.server";
+import { newLeaseToken } from "../app/lib/ownership.server";
 import {
-  advance,
   customRate,
-  FakeShopify,
   LOC_A,
   LOC_B,
   makeFulfillmentOrder,
+  makeHarness,
   makeLineItem,
   makeOrder,
-  MemoryJournal,
-  testDeps,
   topLevelError,
   userError,
 } from "./fake-shopify";
 
-const SHOP = "test.myshopify.com";
 const IDS = ["gid://shopify/Order/2", "gid://shopify/Order/1"];
+const id = (n: number) => `gid://shopify/Order/${n}`;
 
-function setup(orders = [makeOrder(1), makeOrder(2)]) {
-  const shopify = new FakeShopify(orders);
-  const journal = new MemoryJournal();
-  const deps = testDeps(journal);
-  return { shopify, journal, deps };
+type Harness = ReturnType<typeof makeHarness>;
+
+const setup = (orders = [makeOrder(1), makeOrder(2)]) => makeHarness(orders);
+
+/** Runs one due-operation step (clearing a still-live lease first, as a
+ *  crashed worker's successor would see it). */
+async function driveOnce(h: Harness, opId: string) {
+  const row = h.ops.ops.get(opId);
+  if (row?.leasedUntil && row.leasedUntil.getTime() >= h.clock().getTime()) {
+    row.leasedUntil = null;
+    row.leaseToken = null;
+  }
+  const op = await h.ops.acquireOperationLease(opId, newLeaseToken(), h.deps.leaseTtlMs);
+  return op ? driveOperation(op, h.shopify.admin, h.deps) : null;
 }
 
-const WRITES = ["MergeEditCommit", "MergeCancelSecondary", "MergeAnnotateOrder", "MergeCloseSecondary"];
-const noWrites = (shopify: FakeShopify) => WRITES.every((w) => shopify.mutationCalls(w) === 0);
+/** Plans the merge and drives the created operation to a stopping point. */
+async function runMerge(h: Harness, ids: string[] = IDS, maxMs?: number) {
+  const result = await executeMerge(h.shopify.admin, h.SHOP, ids, h.deps);
+  const op = result.operationId ? await h.driveUntilIdle(result.operationId, maxMs) : null;
+  return { result, op };
+}
+
+// Order-affecting and cosmetic writes; none may run when the planning says no.
+const WRITES = [
+  "MergeEditCommit",
+  "MergeCancelSecondary",
+  "MergeTagsAdd",
+  "MergeAnnotateNote",
+  "MergeOrderClose",
+  "MergeAnnotateOrder",
+  "MergeCloseSecondary",
+];
+const noWrites = (h: Harness) => WRITES.every((w) => h.shopify.mutationCalls(w) === 0);
 
 describe("executeMerge — happy path", () => {
-  it("moves items to the oldest order, confirms the cancellation and records history once", async () => {
-    const { shopify, journal, deps } = setup();
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+  it("creates the operation, then drives it: items moved, cancellation confirmed, history recorded once", async () => {
+    const h = setup();
+    const { result, op } = await runMerge(h);
 
-    expect(result.outcome).toBe("merged");
+    expect(result.outcome).toBe("operation_created");
     expect(result.primaryName).toBe("#1");
-    expect(shopify.order(1).lineItems).toHaveLength(2);
-    expect(shopify.order(2).cancelledAt).not.toBeNull();
-    expect(shopify.order(2).cancelCount).toBe(1);
-    expect(shopify.order(1).tags).toContain("Consolidated");
-    expect(shopify.order(2).tags).toContain("Merged");
-    expect(journal.only().status).toBe("COMPLETED");
-    expect(journal.history).toHaveLength(1);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1).lineItems).toHaveLength(2);
+    expect(h.shopify.order(2).cancelledAt).not.toBeNull();
+    expect(h.shopify.order(2).cancelCount).toBe(1);
+    expect(h.shopify.order(1).tags).toContain("Consolidated");
+    expect(h.shopify.order(2).tags).toContain("Merged");
+    expect(h.journal.history).toHaveLength(1);
+    expect(h.ops.locks.size).toBe(0); // terminal transition released the locks
   });
 
   it("waits for an asynchronous cancellation to become visible", async () => {
-    const { shopify, deps } = setup([makeOrder(1), makeOrder(2, { cancelDelayReads: 2 })]);
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("merged");
+    const h = setup([makeOrder(1), makeOrder(2, { cancelDelayReads: 2 })]);
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(2).cancelCount).toBe(1);
   });
 
   it("carries the secondary's customer note and tags to the primary", async () => {
-    const { shopify, deps } = setup([makeOrder(1), makeOrder(2, { note: "Leave at back door", tags: ["VIP"] })]);
-    await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(shopify.order(1).note).toContain("Note from #2: Leave at back door");
-    expect(shopify.order(1).tags).toContain("VIP");
+    const h = setup([makeOrder(1), makeOrder(2, { note: "Leave at back door", tags: ["VIP"] })]);
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1).note).toContain("Note from #2: Leave at back door");
+    expect(h.shopify.order(1).tags).toContain("VIP");
   });
 });
 
@@ -67,46 +94,46 @@ describe("executeMerge — conservative eligibility (nothing changes)", () => {
     ["high fraud risk", [makeOrder(1), makeOrder(2, { riskLevel: "HIGH" })]],
     ["gift card", [makeOrder(1), makeOrder(2, { lineItems: [makeLineItem({ isGiftCard: true })] })]],
   ])("skips: %s", async (_label, orders) => {
-    const { shopify, journal, deps } = setup(orders as any);
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = setup(orders as any);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("skipped");
     expect(result.disposition).toBe("terminal");
-    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
-    expect(noWrites(shopify)).toBe(true);
-    expect(journal.ops.size).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(noWrites(h)).toBe(true);
+    expect(h.ops.ops.size).toBe(0);
   });
 
   it("skips multi-location shops", async () => {
-    const { shopify, deps } = setup();
-    shopify.activeLocations = 2;
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = setup();
+    h.shopify.activeLocations = 2;
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("skipped");
-    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
   });
 
   it("fails safely when the location count cannot be read", async () => {
-    const { shopify, deps } = setup();
-    shopify.on("MergeLocationCount", () => topLevelError("Access denied for locationsCount"));
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = setup();
+    h.shopify.on("MergeLocationCount", () => topLevelError("Access denied for locationsCount"));
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("failed");
-    expect(noWrites(shopify)).toBe(true);
+    expect(noWrites(h)).toBe(true);
   });
 
   it("does not commit if an order changes while the edit is being built", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditDiscount", () => {
-      shopify.order(2).displayFulfillmentStatus = "PARTIALLY_FULFILLED";
+    const h = setup();
+    h.shopify.on("MergeEditDiscount", () => {
+      h.shopify.order(2).displayFulfillmentStatus = "PARTIALLY_FULFILLED";
       return undefined;
     });
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result).toMatchObject({ outcome: "skipped", disposition: "transient" });
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
-    expect(shopify.order(1).lineItems).toHaveLength(1);
-    expect(journal.ops.size).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(h.shopify.order(1).lineItems).toHaveLength(1);
+    expect(h.ops.ops.size).toBe(0);
   });
 });
 
-describe("executeMerge — mutation failures before commit (nothing changes)", () => {
+describe("executeMerge — mutation failures before the operation exists (nothing durable changes)", () => {
   it.each([
     ["top-level error on add", "MergeEditAddVariant", topLevelError()],
     ["userErrors on add", "MergeEditAddVariant", userError("orderEditAddVariant")],
@@ -119,252 +146,215 @@ describe("executeMerge — mutation failures before commit (nothing changes)", (
     ],
     ["missing calculated order", "MergeEditBegin", { data: { orderEditBegin: { calculatedOrder: null, userErrors: [] } } }],
   ])("%s", async (_label, op, response) => {
-    const { shopify, journal, deps } = setup();
-    shopify.on(op, () => response);
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = setup();
+    h.shopify.on(op, () => response);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("failed");
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
-    expect(shopify.order(2).cancelCount).toBe(0);
-    expect(journal.ops.size).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(h.shopify.order(2).cancelCount).toBe(0);
+    expect(h.ops.ops.size).toBe(0); // no operation, no locks
   });
 
-  it("does not commit when the journal cannot be written", async () => {
-    const { shopify, journal, deps } = setup();
-    journal.failCreate = true;
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("failed");
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
+  it("does not dispatch a commit when the operation row cannot be written", async () => {
+    const h = setup();
+    h.deps.ops.createOperation = async () => {
+      throw new Error("db down");
+    };
+    await expect(executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps)).rejects.toThrow("db down");
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(h.ops.ops.size).toBe(0);
+    expect(h.ops.locks.size).toBe(0);
   });
 });
 
-describe("executeMerge — commit outcomes", () => {
-  it("rejected commit: abandoned, secondaries untouched, orders unblocked", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditCommit", () => userError("orderEditCommit"));
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result).toMatchObject({ outcome: "failed", disposition: "transient" });
-    expect(journal.only().status).toBe("ABANDONED");
-    expect(shopify.order(2).cancelCount).toBe(0);
-    expect((await journal.findBlockingOrderIds(SHOP)).size).toBe(0);
+describe("operation protocol — commit outcomes", () => {
+  it("rejected commit: COMMIT_REJECTED, quiet period, then ABANDONED; secondaries untouched, locks released", async () => {
+    const h = setup();
+    h.shopify.commitMode.set("*", "reject");
+    const { result, op } = await runMerge(h);
+    expect(result.outcome).toBe("operation_created");
+    expect(op?.phase).toBe("ABANDONED");
+    expect(h.shopify.order(2).cancelCount).toBe(0);
+    expect(h.ops.locks.size).toBe(0);
+    expect(h.shopify.order(1).lineItems).toHaveLength(1);
   });
 
-  it("top-level error alongside an empty-userErrors commit payload is NOT treated as success", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditCommit", () => ({
+  it("commit response lost and never applied: COMMIT_IN_DOUBT ladder ends in REVIEW_REQUIRED, locks held", async () => {
+    const h = setup();
+    h.shopify.commitMode.set("*", "lose-never");
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(h.shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+    expect(h.ops.locks.size).toBe(2); // review keeps the orders protected
+    expect(h.shopify.order(1).tags).toContain(REVIEW_TAG);
+    expect(h.shopify.order(2).tags).toContain(REVIEW_TAG);
+  });
+
+  it("a top-level error on an empty-userErrors commit payload is an UNKNOWN attempt, never a success", async () => {
+    const h = setup();
+    h.shopify.on("MergeEditCommit", () => ({
       errors: [{ message: "Internal error" }],
       data: { orderEditCommit: { order: null, userErrors: [] } },
     }));
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("in_progress");
-    expect(shopify.order(2).cancelCount).toBe(0);
-    expect(journal.only().status).toBe("PENDING_COMMIT");
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    const op = await driveOnce(h, result.operationId!);
+    expect(op?.phase).toBe("COMMIT_IN_DOUBT");
+    expect(h.ops.attempts).toEqual([
+      expect.objectContaining({ kind: "EDIT_COMMIT", state: "UNKNOWN" }),
+    ]);
+    expect(h.shopify.order(2).cancelCount).toBe(0);
   });
 
-  it("top-level error on commit is NOT treated as success: no cancellation", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditCommit", () => topLevelError("Internal error"));
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("in_progress");
-    expect(shopify.order(2).cancelCount).toBe(0);
-    expect(journal.only().status).toBe("PENDING_COMMIT");
-  });
+  it("commit response lost but applied later: reconciles from evidence and completes exactly once", async () => {
+    const h = setup();
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    h.shopify.commitMode.set(h.shopify.lastCalcId(), "lose-apply-later");
 
-  it("unknown commit outcome that DID apply: blocked, then resumed to completion after the grace period", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditCommit", () => {
-      shopify.applyCommit(shopify.lastCalcId()); // Shopify applied it...
-      return topLevelError("Timeout"); // ...but we never saw the response.
-    });
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("in_progress");
+    // A second merge attempt while the op is undecided hits the durable locks.
+    const blocked = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    expect(blocked).toMatchObject({ outcome: "skipped", code: "LOCKED" });
 
-    // A new merge attempt involving these orders must not run (no duplicate items).
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("skipped");
-    // Not reconciled while a slow commit might still be applying.
-    expect(await resumeIncompleteMerges(shopify.admin, SHOP, deps)).toHaveLength(0);
-
-    advance(deps, 6 * 60 * 1000);
-    const [resumed] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
-    expect(resumed.outcome).toBe("merged");
-    expect(shopify.order(1).lineItems).toHaveLength(2);
-    expect(shopify.order(2).cancelledAt).not.toBeNull();
-    expect(journal.only().status).toBe("COMPLETED");
-  });
-
-  it("unknown commit outcome that did NOT apply: abandoned on resume, secondary untouched", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditCommit", () => topLevelError("Timeout"));
-    await executeMerge(shopify.admin, SHOP, IDS, deps);
-    advance(deps, 6 * 60 * 1000);
-    await resumeIncompleteMerges(shopify.admin, SHOP, deps);
-    expect(journal.only().status).toBe("ABANDONED");
-    expect(shopify.order(2).cancelCount).toBe(0);
-    expect((await journal.findBlockingOrderIds(SHOP)).size).toBe(0);
-  });
-
-  it("unknown commit outcome with an unexplained line-item count: flagged for review", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditCommit", () => {
-      shopify.order(1).lineItems.push(makeLineItem(), makeLineItem()); // merchant edited it too
-      return topLevelError("Timeout");
-    });
-    await executeMerge(shopify.admin, SHOP, IDS, deps);
-    advance(deps, 6 * 60 * 1000);
-    const [result] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
-    expect(result.outcome).toBe("needs_review");
-    expect(journal.only().status).toBe("NEEDS_REVIEW");
-    expect(shopify.order(1).tags).toContain(REVIEW_TAG);
-    expect(shopify.order(2).tags).toContain(REVIEW_TAG);
-    expect(shopify.order(2).cancelCount).toBe(0);
+    let op = await driveOnce(h, result.operationId!);
+    expect(op?.phase).toBe("COMMIT_IN_DOUBT");
+    h.shopify.deliverPendingCommit(h.shopify.lastCalcId());
+    op = (await h.driveUntilIdle(result.operationId!)) ?? null;
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1).lineItems).toHaveLength(2); // applied exactly once
+    expect(h.shopify.order(2).cancelledAt).not.toBeNull();
+    expect(h.journal.history).toHaveLength(1);
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
   });
 });
 
-describe("executeMerge — after commit (secondary work)", () => {
-  it("interrupted after commit: no false success, orders blocked, resume finishes without re-adding items", async () => {
-    const { shopify, journal, deps } = setup();
-    // Simulate the process losing the cancel call.
-    shopify.on("MergeCancelSecondary", (_v, call) => (call === 1 ? topLevelError("Connection reset") : undefined));
-
-    const first = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(first.outcome).toBe("in_progress");
-    expect(shopify.order(1).tags).not.toContain("Consolidated");
-    expect(journal.history).toHaveLength(0);
-    expect(journal.only().status).toBe("COMMITTED");
-
-    // A later order for the same customer cannot re-merge the still-open secondary.
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("skipped");
-
-    // The lost request might have been accepted, so it is not re-issued yet.
-    // (2min > lease TTL: the finished worker's op lease has expired.)
-    advance(deps, 2 * 60 * 1000);
-    expect((await resumeIncompleteMerges(shopify.admin, SHOP, deps))[0].outcome).toBe("in_progress");
-    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(1);
-
-    advance(deps, 11 * 60 * 1000);
-    const [resumed] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
-    expect(resumed.outcome).toBe("merged");
-    expect(shopify.order(1).lineItems).toHaveLength(2); // items added exactly once
-    expect(shopify.order(2).cancelledAt).not.toBeNull();
-    expect(journal.history).toHaveLength(1);
+describe("operation protocol — after commit (secondary work)", () => {
+  it("a lost cancel response is verified by cancelledAt + staffNote and never re-issued", async () => {
+    const h = setup();
+    h.shopify.cancelMode.set(id(2), "lose");
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(2).cancelCount).toBe(1); // one orderCancel call ever
+    expect(h.shopify.order(2).cancelledAt).not.toBeNull();
+    expect(h.journal.history).toHaveLength(1);
   });
 
-  it("cancellation not yet visible: stays in progress, completes on a later resume", async () => {
-    const { shopify, journal, deps } = setup([makeOrder(1), makeOrder(2, { cancelDelayReads: 5 })]);
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("in_progress");
-    expect(journal.only().status).toBe("COMMITTED");
-    advance(deps, 2 * 60 * 1000); // past the op lease TTL, within the cancel grace
-    const [resumed] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
-    expect(resumed.outcome).toBe("merged");
-    expect(shopify.order(2).cancelCount).toBe(1); // never cancelled twice
+  it("cancellation not yet visible: waits on the ladder, then verifies", async () => {
+    const h = setup([makeOrder(1), makeOrder(2, { cancelDelayReads: 5 })]);
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(2).cancelCount).toBe(1);
   });
 
   it("repeatedly rejected cancellation escalates to review and flags both orders", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeCancelSecondary", () => userError("orderCancel", "orderCancelUserErrors", "Cannot cancel"));
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("in_progress");
-    advance(deps, 2 * 60 * 1000); // past the op lease TTL so resume can take it
-    const [second] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
-    expect(second.outcome).toBe("needs_review");
-    expect(journal.only().status).toBe("NEEDS_REVIEW");
-    expect(shopify.order(2).tags).toContain(REVIEW_TAG);
-    expect(shopify.order(2).note).toContain("Do not fulfill");
-    expect(await journal.findBlockingOrderIds(SHOP)).toContain("gid://shopify/Order/2");
+    const h = setup();
+    h.shopify.cancelMode.set(id(2), "reject");
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(op?.reviewReason).toMatch(/rejected/i);
+    expect(h.shopify.order(2).cancelledAt).toBeNull();
+    expect(h.ops.attempts.filter((a) => a.kind === "ORDER_CANCEL")).toHaveLength(3);
+    expect(h.shopify.order(1).tags).toContain(REVIEW_TAG);
+    expect(h.shopify.order(2).tags).toContain(REVIEW_TAG);
+    expect(h.ops.locks.size).toBe(2); // review holds the locks
   });
 
-  it("secondary fulfilled after its items moved: flagged, not cancelled", async () => {
-    const { shopify, journal, deps } = setup();
-    shopify.on("MergeEditCommit", () => {
-      shopify.applyCommit(shopify.lastCalcId());
-      shopify.order(2).displayFulfillmentStatus = "FULFILLED";
-      return { data: { orderEditCommit: { order: { id: "x" }, userErrors: [] } } };
+  it("secondary fulfilled after its items moved: flagged for review, not cancelled", async () => {
+    const h = setup();
+    h.shopify.on("MergeEditCommit", (vars) => {
+      h.shopify.applyCommit(vars.id);
+      h.shopify.order(2).displayFulfillmentStatus = "FULFILLED";
+      return { data: { orderEditCommit: { order: { id: id(1) }, userErrors: [] } } };
     });
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("needs_review");
-    expect(shopify.order(2).cancelCount).toBe(0);
-    expect(journal.only().status).toBe("NEEDS_REVIEW");
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(h.shopify.order(2).cancelCount).toBe(0);
+    expect(h.ops.locks.size).toBe(2);
   });
 
-  it("annotation failures after a confirmed cancel do not affect the outcome", async () => {
-    const { shopify, deps } = setup();
-    shopify.on("MergeAnnotateOrder", () => topLevelError());
-    shopify.on("MergeCloseSecondary", () => topLevelError());
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("merged");
+  it("cosmetic side-effect failures after a confirmed cancel do not affect the outcome", async () => {
+    const h = setup();
+    h.shopify.on("MergeTagsAdd", () => topLevelError());
+    h.shopify.on("MergeAnnotateNote", () => topLevelError());
+    h.shopify.on("MergeOrderClose", () => topLevelError());
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(2).cancelledAt).not.toBeNull();
+    expect(h.journal.history).toHaveLength(1);
   });
 });
 
-describe("executeMerge — three orders", () => {
+describe("operation protocol — three orders", () => {
   it("merges two secondaries and records both", async () => {
-    const { shopify, journal, deps } = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
-    const result = await executeMerge(shopify.admin, SHOP, ["gid://shopify/Order/3", ...IDS], deps);
-    expect(result.outcome).toBe("merged");
-    expect(result.mergedCount).toBe(2);
-    expect(shopify.order(1).lineItems).toHaveLength(3);
-    expect(journal.history).toHaveLength(2);
+    const h = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
+    const { result, op } = await runMerge(h, [id(3), ...IDS]);
+    expect(result.outcome).toBe("operation_created");
+    expect(result.operation!.secondaries).toHaveLength(2);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1).lineItems).toHaveLength(3);
+    expect(h.journal.history).toHaveLength(2);
   });
 
-  it("second cancellation fails: first is recorded, op stays unfinished, resume completes only the second", async () => {
-    const { shopify, journal, deps } = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
-    shopify.on("MergeCancelSecondary", (vars, call) =>
-      vars.orderId === "gid://shopify/Order/3" && call === 2 ? userError("orderCancel", "orderCancelUserErrors") : undefined,
-    );
-    const first = await executeMerge(shopify.admin, SHOP, ["gid://shopify/Order/3", ...IDS], deps);
-    expect(first.outcome).toBe("in_progress");
-    expect(journal.history.map((h) => h.mergedOrderName)).toEqual(["#2"]);
-
-    advance(deps, 2 * 60 * 1000); // past the op lease TTL so resume can take it
-    const [resumed] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
-    expect(resumed.outcome).toBe("merged");
-    expect(shopify.order(2).cancelCount).toBe(1);
-    expect(shopify.order(3).cancelCount).toBe(1); // the rejected request never reached Shopify
-    expect(journal.history).toHaveLength(2);
+  it("one sibling's cancellation keeps failing: the verified sibling is recorded, the op parks in review", async () => {
+    const h = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
+    h.shopify.cancelMode.set(id(3), "reject");
+    const { op } = await runMerge(h, [id(3), ...IDS]);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(h.journal.history.map((x) => x.mergedOrderName)).toEqual(["#2"]);
+    expect(h.shopify.order(2).cancelCount).toBe(1);
+    expect(h.shopify.order(2).cancelledAt).not.toBeNull();
+    expect(h.shopify.order(3).cancelledAt).toBeNull(); // rejected — never cancelled
+    expect(h.shopify.order(1).lineItems).toHaveLength(3);
   });
 });
 
 describe("executeMerge — fulfillment location rule", () => {
   function multiLocation(orders = [makeOrder(1), makeOrder(2)], scope = true) {
-    const ctx = setup(orders);
-    ctx.shopify.activeLocations = 4;
-    ctx.shopify.fulfillmentOrdersScope = scope;
-    ctx.shopify.locationsScope = scope;
-    return ctx;
+    const h = setup(orders);
+    h.shopify.activeLocations = 4;
+    h.shopify.fulfillmentOrdersScope = scope;
+    h.shopify.locationsScope = scope;
+    return h;
   }
 
   it("fulfillment orders granted but read_locations missing: skipped with Shopify's reason (live regression)", async () => {
-    const { shopify, journal, deps } = multiLocation();
-    shopify.locationsScope = false;
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = multiLocation();
+    h.shopify.locationsScope = false;
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("skipped");
     expect(result.reason).toContain("read_locations");
-    expect(noWrites(shopify)).toBe(true);
-    expect(journal.ops.size).toBe(0);
+    expect(noWrites(h)).toBe(true);
+    expect(h.ops.ops.size).toBe(0);
   });
 
   it("single-location shop with only the fulfillment-orders scope: falls back and still merges", async () => {
-    const { shopify, deps } = setup();
-    shopify.fulfillmentOrdersScope = true;
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("merged");
+    const h = setup();
+    h.shopify.fulfillmentOrdersScope = true;
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
   });
 
   it("multi-location shop: merges when every item of both orders is at the same location, anchoring added items there", async () => {
-    const { shopify, deps } = multiLocation([makeOrder(1, { location: LOC_B }), makeOrder(2, { location: LOC_B })]);
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("merged");
-    expect(shopify.addVariantLocations).toEqual([LOC_B]);
-    expect(shopify.mutationCalls("MergeLocationCount")).toBe(0);
+    const h = multiLocation([makeOrder(1, { location: LOC_B }), makeOrder(2, { location: LOC_B })]);
+    const { result, op } = await runMerge(h);
+    expect(result.outcome).toBe("operation_created");
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.addVariantLocations).toEqual([LOC_B]);
+    expect(h.shopify.mutationCalls("MergeLocationCount")).toBe(0);
   });
 
   it("multi-location shop without the optional scope: skipped, nothing changed", async () => {
-    const { shopify, journal, deps } = multiLocation(undefined, false);
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = multiLocation(undefined, false);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result).toMatchObject({ outcome: "skipped", disposition: "terminal", code: "LOCATION_ACCESS" });
     expect(result.reason).toContain("allow location access");
-    expect(noWrites(shopify)).toBe(true);
-    expect(journal.ops.size).toBe(0);
+    expect(noWrites(h)).toBe(true);
+    expect(h.ops.ops.size).toBe(0);
   });
 
   it("single-location shop without the optional scope: still merges (existing behaviour)", async () => {
-    const { shopify, deps } = setup();
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("merged");
-    expect(shopify.addVariantLocations).toEqual([null]);
+    const h = setup();
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.addVariantLocations).toEqual([null]);
   });
 
   const skipCases: [string, () => ReturnType<typeof makeOrder>[]][] = [
@@ -449,56 +439,57 @@ describe("executeMerge — fulfillment location rule", () => {
   ];
 
   it.each(skipCases)("skips: %s", async (_label, build) => {
-    const { shopify, journal, deps } = multiLocation(build());
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = multiLocation(build());
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("skipped");
-    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
-    expect(noWrites(shopify)).toBe(true);
-    expect(journal.ops.size).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(noWrites(h)).toBe(true);
+    expect(h.ops.ops.size).toBe(0);
   });
 
   it("ignores closed/cancelled fulfillment orders when the open ones match", async () => {
     const item = makeLineItem();
-    const { shopify, deps } = multiLocation([
+    const h = multiLocation([
       makeOrder(1),
       makeOrder(2, {
         lineItems: [item],
         fulfillmentOrders: [makeFulfillmentOrder(LOC_B, [], { status: "CLOSED" }), makeFulfillmentOrder(LOC_A, [item])],
       }),
     ]);
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("merged");
+    const { op } = await runMerge(h);
+    expect(op?.phase).toBe("COMPLETED");
   });
 
   it("the stricter rule also applies to single-location shops once the scope is granted", async () => {
     const item = makeLineItem();
-    const { shopify, deps } = setup([
+    const h = setup([
       makeOrder(1),
       makeOrder(2, { lineItems: [item], fulfillmentOrders: [makeFulfillmentOrder(LOC_A, [item], { status: "SCHEDULED" })] }),
     ]);
-    shopify.fulfillmentOrdersScope = true;
-    shopify.locationsScope = true;
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("skipped");
+    h.shopify.fulfillmentOrdersScope = true;
+    h.shopify.locationsScope = true;
+    expect((await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps)).outcome).toBe("skipped");
   });
 
   it("does not commit if the location changes while the edit is being built", async () => {
-    const { shopify, journal, deps } = multiLocation();
-    shopify.on("MergeEditDiscount", () => {
-      shopify.order(2).location = LOC_B;
+    const h = multiLocation();
+    h.shopify.on("MergeEditDiscount", () => {
+      h.shopify.order(2).location = LOC_B;
       return undefined;
     });
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("skipped");
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
-    expect(journal.ops.size).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(h.ops.ops.size).toBe(0);
   });
 
   it("fails safely (no writes) when fulfillment orders can't be loaded for another reason", async () => {
-    const { shopify, deps } = multiLocation();
-    shopify.on("MergeFulfillmentOrders", () => topLevelError("Throttled"));
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const h = multiLocation();
+    h.shopify.on("MergeFulfillmentOrders", () => topLevelError("Throttled"));
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(result.outcome).toBe("failed");
-    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
-    expect(noWrites(shopify)).toBe(true);
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(noWrites(h)).toBe(true);
   });
 });
 
@@ -511,82 +502,88 @@ describe("executeMerge — live regressions (ordermergetest2, Custom shipping)",
   const shopLocation = (n: number, amount: string, source: string | null = "shopify") =>
     makeOrder(n, { shippingLines: { nodes: [customRate(amount, { source })] }, location: LOC_A });
   const multi = (orders: ReturnType<typeof makeOrder>[]) => {
-    const ctx = setup(orders);
-    ctx.shopify.activeLocations = 3;
-    ctx.shopify.fulfillmentOrdersScope = true;
-    ctx.shopify.locationsScope = true;
-    return ctx;
+    const h = setup(orders);
+    h.shopify.activeLocations = 3;
+    h.shopify.fulfillmentOrdersScope = true;
+    h.shopify.locationsScope = true;
+    return h;
   };
-  const id = (n: number) => `gid://shopify/Order/${n}`;
 
   it("Karine #1021–#1023: the matching $20 Custom pair combines; the 3PL $10 order is left untouched", async () => {
-    const { shopify, deps } = multi([threePl(1021, "10.0"), shopLocation(1022, "20.0"), shopLocation(1023, "20.0")]);
-    const result = await executeMerge(shopify.admin, SHOP, [id(1023), id(1022), id(1021)], deps);
-    expect(result).toMatchObject({ outcome: "merged", primaryName: "#1022", mergedCount: 1 });
-    expect(shopify.order(1023).cancelledAt).not.toBeNull();
-    expect(shopify.order(1021).cancelCount).toBe(0);
-    expect(shopify.order(1021).lineItems).toHaveLength(1);
+    const h = multi([threePl(1021, "10.0"), shopLocation(1022, "20.0"), shopLocation(1023, "20.0")]);
+    const { result, op } = await runMerge(h, [id(1023), id(1022), id(1021)]);
+    expect(result).toMatchObject({ outcome: "operation_created", primaryName: "#1022" });
+    expect(result.operation!.secondaries).toHaveLength(1);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1023).cancelledAt).not.toBeNull();
+    expect(h.shopify.order(1021).cancelCount).toBe(0);
+    expect(h.shopify.order(1021).lineItems).toHaveLength(1);
   });
 
   it("Russell, anchor #1020 (3PL): nothing is touched", async () => {
     const orders = [shopLocation(1017, "15.0", null), threePl(1018, "5.0"), shopLocation(1019, "5.0"), threePl(1020, "5.0")];
-    const { shopify, journal, deps } = multi(orders);
-    const result = await executeMerge(shopify.admin, SHOP, [id(1020), id(1019), id(1018), id(1017)], deps);
+    const h = multi(orders);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, [id(1020), id(1019), id(1018), id(1017)], h.deps);
     expect(result.outcome).toBe("skipped");
-    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
-    expect(journal.ops.size).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(h.ops.ops.size).toBe(0);
   });
 
   it("Russell, anchor #1019 ($5 Custom): $15 Custom and 3PL orders don't qualify, so nothing is touched", async () => {
     const orders = [shopLocation(1017, "15.0", null), threePl(1018, "5.0"), shopLocation(1019, "5.0")];
-    const { shopify, deps } = multi(orders);
-    const result = await executeMerge(shopify.admin, SHOP, [id(1019), id(1018), id(1017)], deps);
+    const h = multi(orders);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, [id(1019), id(1018), id(1017)], h.deps);
     expect(result.outcome).toBe("skipped");
     expect(result.reason).toMatch(/No other order/);
-    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
   });
 
   it("a second $5 Custom order at the shop location does combine with #1019", async () => {
     const orders = [shopLocation(1017, "15.0", null), shopLocation(1019, "5.0"), shopLocation(1025, "5.0")];
-    const { shopify, deps } = multi(orders);
-    const result = await executeMerge(shopify.admin, SHOP, [id(1025), id(1019), id(1017)], deps);
-    expect(result).toMatchObject({ outcome: "merged", primaryName: "#1019", mergedCount: 1 });
-    expect(shopify.order(1017).cancelCount).toBe(0);
+    const h = multi(orders);
+    const { result, op } = await runMerge(h, [id(1025), id(1019), id(1017)]);
+    expect(result).toMatchObject({ outcome: "operation_created", primaryName: "#1019" });
+    expect(result.operation!.secondaries).toHaveLength(1);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1017).cancelCount).toBe(0);
   });
 
-  it("an excluded order is re-verified away: the pre-commit recheck only covers the combined orders", async () => {
-    const { shopify, deps } = multi([threePl(1021, "10.0"), shopLocation(1022, "20.0"), shopLocation(1023, "20.0")]);
+  it("an excluded order is re-verified away: the pre-op recheck only covers the combined orders", async () => {
+    const h = multi([threePl(1021, "10.0"), shopLocation(1022, "20.0"), shopLocation(1023, "20.0")]);
     // #1021 changing mid-merge must not affect the #1022/#1023 combine.
-    shopify.on("MergeEditDiscount", () => {
-      shopify.order(1021).displayFulfillmentStatus = "FULFILLED";
+    h.shopify.on("MergeEditDiscount", () => {
+      h.shopify.order(1021).displayFulfillmentStatus = "FULFILLED";
       return undefined;
     });
-    expect((await executeMerge(shopify.admin, SHOP, [id(1023), id(1022), id(1021)], deps)).outcome).toBe("merged");
+    const { op } = await runMerge(h, [id(1023), id(1022), id(1021)]);
+    expect(op?.phase).toBe("COMPLETED");
   });
 });
 
 describe("executeMerge — per-order exclusion is general (standard shipping)", () => {
   const multi = (orders: ReturnType<typeof makeOrder>[]) => {
-    const ctx = setup(orders);
-    ctx.shopify.activeLocations = 3;
-    ctx.shopify.fulfillmentOrdersScope = true;
-    ctx.shopify.locationsScope = true;
-    return ctx;
+    const h = setup(orders);
+    h.shopify.activeLocations = 3;
+    h.shopify.fulfillmentOrdersScope = true;
+    h.shopify.locationsScope = true;
+    return h;
   };
-  const id = (n: number) => `gid://shopify/Order/${n}`;
 
   it("a standard-shipping order at a fulfillment service doesn't block a compatible standard pair", async () => {
-    const { shopify, deps } = multi([makeOrder(1, { fulfillmentOrders: [] }), makeOrder(2), makeOrder(3)]);
-    const result = await executeMerge(shopify.admin, SHOP, [id(3), id(2), id(1)], deps);
-    expect(result).toMatchObject({ outcome: "merged", primaryName: "#2", mergedCount: 1 });
-    expect(shopify.order(1).cancelCount).toBe(0);
-    expect(shopify.order(1).lineItems).toHaveLength(1);
+    const h = multi([makeOrder(1, { fulfillmentOrders: [] }), makeOrder(2), makeOrder(3)]);
+    const { result, op } = await runMerge(h, [id(3), id(2), id(1)]);
+    expect(result).toMatchObject({ outcome: "operation_created", primaryName: "#2" });
+    expect(result.operation!.secondaries).toHaveLength(1);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1).cancelCount).toBe(0);
+    expect(h.shopify.order(1).lineItems).toHaveLength(1);
   });
 
   it("a standard-shipping order at a different location doesn't block a compatible standard pair", async () => {
-    const { shopify, deps } = multi([makeOrder(1, { location: LOC_B }), makeOrder(2), makeOrder(3)]);
-    const result = await executeMerge(shopify.admin, SHOP, [id(3), id(2), id(1)], deps);
-    expect(result).toMatchObject({ outcome: "merged", primaryName: "#2", mergedCount: 1 });
-    expect(shopify.order(1).cancelCount).toBe(0);
+    const h = multi([makeOrder(1, { location: LOC_B }), makeOrder(2), makeOrder(3)]);
+    const { result, op } = await runMerge(h, [id(3), id(2), id(1)]);
+    expect(result).toMatchObject({ outcome: "operation_created", primaryName: "#2" });
+    expect(op?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1).cancelCount).toBe(0);
   });
 });

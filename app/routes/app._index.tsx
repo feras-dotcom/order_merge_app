@@ -19,7 +19,6 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getSettings } from "../lib/settings.server";
-import { defaultMergeDeps, resumeIncompleteMerges } from "../lib/merge.server";
 import { listOperationsNeedingReview } from "../lib/merge-journal.server";
 import { getLocationAccess } from "../lib/location-access.server";
 import { StatusDot } from "../components/StatusDot";
@@ -51,14 +50,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session, scopes } = await authenticate.admin(request);
   const shop = session.shop;
 
-  // Finish any merge that was interrupted (e.g. a secondary whose cancellation
-  // was not yet confirmed) even if no new order webhook arrives.
-  try {
-    // Single confirmation read: never hold the page for the full polling loop.
-    await resumeIncompleteMerges(admin, shop, { ...defaultMergeDeps(), cancelPollAttempts: 1 });
-  } catch (err: any) {
-    console.error(`[dashboard] Resuming unfinished merges failed: ${err?.message}`);
-  }
+  // Interrupted v2 operations are driven by the background sweeper — the
+  // dashboard only reads state (the review banner below).
 
   const [settings, needsReview, combinedCount, recentCount, records, locationAccess] = await Promise.all([
     getSettings(shop),

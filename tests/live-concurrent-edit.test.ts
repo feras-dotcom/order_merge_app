@@ -192,13 +192,13 @@ const variantQty = async (variantId: string): Promise<number> => {
 const cancelOrder = async (orderId: string) => {
   const data = await admin(
     `mutation ($orderId: ID!) {
-      orderCancel(orderId: $orderId, reason: OTHER, refund: false, restock: true, notifyCustomer: false) {
-        userErrors { field message }
+      orderCancel(orderId: $orderId, reason: OTHER, refundMethod: { originalPaymentMethodsRefund: false }, restock: true, notifyCustomer: false) {
+        orderCancelUserErrors { field message }
       }
     }`,
     { orderId },
   );
-  return data.orderCancel.userErrors;
+  return data.orderCancel.orderCancelUserErrors;
 };
 
 const cancelAll = async (orderIds: string[]) => {

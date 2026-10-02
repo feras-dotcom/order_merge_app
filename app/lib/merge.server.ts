@@ -1,49 +1,50 @@
-// ── Merge execution ───────────────────────────────────────────────────────────
-// Merge execution and recovery used by the background webhook handler
-// (webhooks.orders.create.tsx). Successful consolidations are recorded in the
-// MergeRecord table, which feeds the dashboard (app._index.tsx).
+// ── Merge planning (protocol v2, spec §4) ────────────────────────────────────
+// executeMerge plans a merge and records it: it claims the orders, rejects
+// durably locked / v1-blocked ones, evaluates fresh state and the location
+// rule, builds the calculated order edit (every moved line discounted to 0 so
+// the customer is never double-charged; the ManualDiscountApplication
+// description carries `MS-<opToken>-<index>` — the evidence token), verifies
+// the calculated order and the group, and inserts the v2 operation plus one
+// durable MergeOrderLock per involved order in ONE transaction
+// (createOperation). It then releases the claims and returns OPERATION_CREATED.
 //
-// Safety model
-//   • Nothing is changed until every eligibility rule passes on freshly loaded
-//     state (see eligibility.ts), the location rule passes (every order's items
-//     verifiably assigned to one shared location, or a single-location shop —
-//     see resolveMergeLocation), and the state is re-verified immediately
-//     before the commit.
-//   • Every Shopify call goes through gql(), which fails on transport errors,
-//     top-level GraphQL errors, missing payloads and userErrors.
-//   • A merge holds a lease on every order it touches (MergeClaim, see
-//     claims.server.ts), renewed before every Shopify mutation and before the
-//     journal write. A worker that loses its lease issues no further writes;
-//     an expired lease can be taken over by another worker.
-//   • A MergeOperation journal row is written BEFORE the primary's order edit
-//     is committed. After the commit, each secondary is cancelled and the
-//     cancellation is confirmed by reading the order back (orderCancel is
-//     asynchronous). Only when every secondary is confirmed cancelled is the
-//     merge reported as successful.
-//   • Interrupted merges are resumed by resumeIncompleteMerges(), which takes
-//     a lease on the journal row before driving it. When the outcome cannot
-//     be determined, the operation is marked NEEDS_REVIEW, the orders are
-//     tagged/annotated in Shopify, and they are excluded from every future
-//     merge.
+// No Shopify mutation that changes an order is sent from here. driveOperation
+// (operation-protocol.server.ts) performs every orderEditCommit / orderCancel
+// / tag / note through the write-ahead dispatch gate, and reconciles from
+// Shopify evidence — never replaces (spec §0).
+//
+// Ownership: claims are a transient lease renewed before EVERY Shopify call
+// (gql() caps a call at 45s, the TTL is 120s). Durable locks + the operation
+// row + evidence are the safety mechanism.
 
 import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
 import { prismaClaimStore, type ClaimStore } from "./claims.server";
-import { LEASE_TTL_MS, newLeaseToken, OwnershipLostError } from "./ownership.server";
+import {
+  newLeaseToken,
+  newOpToken,
+  ClaimContentionError,
+  OwnershipLostError,
+} from "./ownership.server";
 import {
   REVIEW_TAG,
+  buildAddressKey,
   evaluateFulfillmentLocation,
   evaluateMergeGroup,
+  lineItemIneligibility,
+  orderShippingSignature,
+  orderStateIneligibility,
   selectCompatibleOrders,
   type OrderFulfillmentOrders,
   type MergeLineItem,
   type OrderState,
 } from "./eligibility";
+import { prismaMergeJournal, type MergeJournal } from "./merge-journal.server";
 import {
-  prismaMergeJournal,
-  type JournalSecondary,
-  type MergeJournal,
-  type MergeOperationRecord,
-} from "./merge-journal.server";
+  prismaOperationStore,
+  type ExpectedTransferEntry,
+  type OperationRecord,
+  type OperationStore,
+} from "./operation-store.server";
 
 export {
   buildAddressKey,
@@ -57,70 +58,92 @@ export { REVIEW_TAG };
 
 // ── Dependencies (injectable for tests) ───────────────────────────────────────
 
+/** Observability barriers awaited by the engine and the protocol driver
+ *  (spec §12). All optional; default no-op. */
+export interface ProtocolHooks {
+  afterClaimCheck?: () => Promise<void>;
+  beforeOpInsert?: () => Promise<void>;
+  afterOpInsert?: () => Promise<void>;
+  afterDispatchGate?: () => Promise<void>;
+  afterSend?: () => Promise<void>;
+  beforeAttemptRecord?: () => Promise<void>;
+  beforeHistoryTx?: () => Promise<void>;
+}
+
 export interface MergeDeps {
+  /** v1 journal: read-side queries only (e.g. blocking statuses). */
   journal: MergeJournal;
   /** Per-order merge claims (see claims.server.ts). */
   claims: ClaimStore;
-  /** Lease length for claims and journal operation leases. */
+  /** v2 operation store: durable locks, write-ahead attempts, control. */
+  ops: OperationStore;
+  /** Present when the merge is driven by a work item — createOperation
+   *  settles it (DONE/OPERATION_CREATED) inside its transaction. */
+  workItem?: { id: string; token: string };
+  /** Lease length for claims and the new operation lease (default 120s — a
+   *  held lease must outlive any single 45s Shopify call with margin). */
   leaseTtlMs: number;
   /** Extra ownership check run inside every fence (e.g. the work processor
    *  renews its work-item lease here). Throws OwnershipLostError. */
   outerFence?: () => Promise<void>;
   sleep: (ms: number) => Promise<void>;
   now: () => Date;
-  /** Reads of the secondary after orderCancel before giving up for now. */
+  /** Reads of a cancelled secondary before giving up for now (CANCEL_IN_DOUBT
+   *  inline poll). */
   cancelPollAttempts: number;
   cancelPollIntervalMs: number;
-  /** Rejected cancellations tolerated before escalating to NEEDS_REVIEW. */
-  maxCancelAttempts: number;
-  /** A PENDING_COMMIT op is only reconciled once it is at least this old, so
-   *  a slow commit that is still being applied is never misjudged. */
-  pendingCommitGraceMs: number;
-  /** How long an accepted orderCancel is awaited before it is re-issued. */
-  cancelRequestGraceMs: number;
+  /** MergeShip's app id on the shop (defaults to a cached
+   *  currentAppInstallation query — see evidence.server.ts). */
+  appId?: (admin: AdminClient, shop: string) => Promise<string>;
+  hooks?: ProtocolHooks;
 }
 
 export const defaultMergeDeps = (): MergeDeps => ({
   journal: prismaMergeJournal,
   claims: prismaClaimStore(),
-  leaseTtlMs: LEASE_TTL_MS,
+  ops: prismaOperationStore,
+  leaseTtlMs: 120_000,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => new Date(),
   cancelPollAttempts: 6,
   cancelPollIntervalMs: 1500,
-  maxCancelAttempts: 3,
-  pendingCommitGraceMs: 5 * 60 * 1000,
-  cancelRequestGraceMs: 10 * 60 * 1000,
 });
 
 // ── Result ────────────────────────────────────────────────────────────────────
 
 export type MergeOutcome =
-  /** Every secondary is confirmed cancelled; the merge is complete. */
-  | "merged"
-  /** Not eligible; nothing was changed. */
+  /** The operation row + durable locks exist; the caller drives it. */
+  | "operation_created"
+  /** Not eligible / blocked; nothing was changed. */
   | "skipped"
-  /** Failed before the commit; nothing was changed. */
-  | "failed"
-  /** Committed (or possibly committed) but not yet confirmed complete. The
-   *  journal keeps the orders blocked and the merge is resumed later. */
-  | "in_progress"
-  /** Outcome could not be confirmed; orders are flagged for the merchant. */
-  | "needs_review";
+  /** Failed before the operation was created; nothing was changed. */
+  | "failed";
 
 /** How the caller should treat the result: "terminal" is done, "contention"
  *  means another worker is involved (retry soon), "transient" means a
  *  Shopify/DB failure (retry). */
 export type MergeDisposition = "terminal" | "contention" | "transient";
 
+export type MergeResultCode =
+  | "OPERATION_CREATED"
+  | "ANCHOR_INELIGIBLE"
+  | "NO_COMPATIBLE_PARTNER"
+  | "LOCATION_ACCESS"
+  | "CLAIM_CONFLICT"
+  | "LOCKED"
+  | "OWNERSHIP_LOST"
+  | "TRANSIENT";
+
 export interface MergeResult {
   outcome: MergeOutcome;
   reason?: string;
   primaryName?: string;
-  mergedCount?: number;
   operationId?: string;
+  /** The fresh operation row when outcome is "operation_created" — the caller
+   *  drives it with driveOperation until a waiting point. */
+  operation?: OperationRecord;
   disposition: MergeDisposition;
-  code?: "LOCATION_ACCESS" | "CLAIM_CONFLICT" | "BLOCKED" | "OWNERSHIP_LOST";
+  code?: MergeResultCode;
 }
 
 // ── Shopify reads ─────────────────────────────────────────────────────────────
@@ -133,6 +156,7 @@ export const ORDER_STATE_QUERY = `#graphql
         name
         createdAt
         cancelledAt
+        cancellation { staffNote }
         closed
         displayFinancialStatus
         displayFulfillmentStatus
@@ -204,7 +228,10 @@ const LINE_ITEMS_QUERY = `#graphql
 /** Every line item of the order, paginated — never truncated. Includes items
  *  whose currentQuantity is 0 (removed), so the count is a stable fingerprint
  *  of the order's line-item list. */
-async function fetchAllLineItems(admin: AdminClient, orderId: string): Promise<MergeLineItem[]> {
+export async function fetchAllLineItems(
+  admin: AdminClient,
+  orderId: string,
+): Promise<MergeLineItem[]> {
   const items: MergeLineItem[] = [];
   let after: string | null = null;
   do {
@@ -219,7 +246,7 @@ async function fetchAllLineItems(admin: AdminClient, orderId: string): Promise<M
   return items;
 }
 
-async function fetchLineItemsById(admin: AdminClient, orders: OrderState[]) {
+export async function fetchLineItemsById(admin: AdminClient, orders: OrderState[]) {
   const map = new Map<string, MergeLineItem[]>();
   for (const order of orders) map.set(order.id, await fetchAllLineItems(admin, order.id));
   return map;
@@ -277,9 +304,13 @@ const isAccessDenied = (err: unknown) =>
 
 /** Observability only: reports whether the transferred items stayed at the
  *  shared location. Never throws and never affects the merge. */
-async function logMergedLocation(admin: AdminClient, primary: OrderState, locationId: string) {
+export async function logMergedLocation(
+  admin: AdminClient,
+  primary: Pick<OrderState, "id" | "name">,
+  locationId: string,
+) {
   try {
-    const fos = await fetchFulfillmentOrdersById(admin, [primary]);
+    const fos = await fetchFulfillmentOrdersById(admin, [primary as OrderState]);
     const locations = new Set(
       fos
         .get(primary.id)!
@@ -339,7 +370,7 @@ async function excludeByLocation(
   return { ok: true, orders: kept };
 }
 
-type LocationDecision =
+export type LocationDecision =
   | { ok: true; locationId: string | null }
   | { ok: false; reason: string; accessDenied?: boolean };
 
@@ -353,7 +384,7 @@ type LocationDecision =
  *   • Without them: only shops with exactly one active location qualify.
  * Anything that cannot be verified is skipped.
  */
-async function resolveMergeLocation(
+export async function resolveMergeLocation(
   admin: AdminClient,
   orders: OrderState[],
   lineItems: Map<string, MergeLineItem[]>,
@@ -381,368 +412,183 @@ async function resolveMergeLocation(
   };
 }
 
-// ── Best-effort annotations (never affect merge correctness) ──────────────────
+// ── Order edit building (uncommitted — a dropped calc changes nothing) ────────
 
-function uniqueTags(tags: string[]): string[] {
-  const tagMap = new Map<string, string>();
-  for (const tag of tags) {
-    const trimmed = tag.trim();
-    if (trimmed && !tagMap.has(trimmed.toLowerCase())) tagMap.set(trimmed.toLowerCase(), trimmed);
-  }
-  return [...tagMap.values()];
-}
-
-async function annotateOrder(
-  admin: AdminClient,
-  fence: () => Promise<void>,
-  order: Pick<OrderState, "id" | "name" | "note" | "tags">,
-  addTags: string[],
-  noteLines: string | string[] | null,
-): Promise<void> {
-  const existingNote = (order.note ?? "").trim();
-  const newLines = (Array.isArray(noteLines) ? noteLines : noteLines ? [noteLines] : []).filter(
-    (line) => line && !existingNote.includes(line),
-  );
-  try {
-    await fence();
-    await gql(
-      admin,
-      `Annotate ${order.name}`,
-      `#graphql
-        mutation MergeAnnotateOrder($input: OrderInput!) {
-          orderUpdate(input: $input) {
-            order { id }
-            userErrors { field message }
-          }
-        }`,
-      {
-        input: {
-          id: order.id,
-          tags: uniqueTags([...(order.tags ?? []), ...addTags]),
-          ...(newLines.length && {
-            note: [existingNote, ...newLines].filter(Boolean).join("\n"),
-          }),
-        },
-      },
-      "orderUpdate",
-    );
-  } catch (err: any) {
-    // Ownership loss must propagate — a stale worker stops, not annotates.
-    if (err instanceof OwnershipLostError) throw err;
-    console.warn(`[merge] Could not annotate ${order.name}: ${err?.message}`);
-  }
-}
-
-// ── Journal helpers ───────────────────────────────────────────────────────────
-
-async function flagForReview(
-  admin: AdminClient,
-  op: MergeOperationRecord,
-  reason: string,
-  deps: MergeDeps,
-  fence: () => Promise<void>,
-): Promise<MergeResult> {
-  console.error(`[merge] NEEDS REVIEW ${op.primaryOrderName} (${op.id}): ${reason}`);
-  await deps.journal.update(op, { status: "NEEDS_REVIEW", lastError: reason });
-  op.status = "NEEDS_REVIEW";
-
-  const pending = op.secondaries.filter((s) => !s.done);
-  try {
-    const states = await fetchOrderStates(admin, [op.primaryOrderId, ...pending.map((s) => s.id)]);
-    const [primary, ...secondaryStates] = states;
-    await annotateOrder(
-      admin,
-      fence,
-      primary,
-      [REVIEW_TAG],
-      `MergeShip: a merge into this order needs review. ${reason}`,
-    );
-    for (const secondary of secondaryStates) {
-      await annotateOrder(
-        admin,
-        fence,
-        secondary,
-        [REVIEW_TAG],
-        `MergeShip: items from this order may already have been added to ${op.primaryOrderName}. Do not fulfill this order until reviewed.`,
-      );
-    }
-  } catch (err: any) {
-    if (err instanceof OwnershipLostError) throw err;
-    console.warn(`[merge] Could not flag orders for review on ${op.id}: ${err?.message}`);
-  }
-
-  return {
-    outcome: "needs_review",
-    reason,
-    primaryName: op.primaryOrderName,
-    operationId: op.id,
-    disposition: "terminal",
-  };
-}
-
-/**
- * Determines whether a PENDING_COMMIT operation's order edit was applied by
- * comparing the primary's line-item count with the journalled fingerprint.
- * Each transferred item is added with allowDuplicates, so a committed edit
- * adds exactly addedLineItemCount line items.
- */
-async function reconcilePendingCommit(
-  admin: AdminClient,
-  op: MergeOperationRecord,
-  deps: MergeDeps,
-): Promise<"COMMITTED" | "ABANDONED" | "NEEDS_REVIEW"> {
-  const count = (await fetchAllLineItems(admin, op.primaryOrderId)).length;
-  if (count === op.primaryLineItemCountBefore) {
-    await deps.journal.update(op, { status: "ABANDONED", lastError: "Order edit was not committed." });
-    op.status = "ABANDONED";
-    return "ABANDONED";
-  }
-  if (count === op.primaryLineItemCountBefore + op.addedLineItemCount) {
-    await deps.journal.update(op, { status: "COMMITTED" });
-    op.status = "COMMITTED";
-    return "COMMITTED";
-  }
-  return "NEEDS_REVIEW";
-}
-
-/**
- * Finishes a COMMITTED operation: cancels every remaining secondary, confirms
- * each cancellation by reading the order back, records history, and marks the
- * operation COMPLETED only when every secondary is confirmed.
- */
-async function completeCommittedOperation(
-  admin: AdminClient,
-  op: MergeOperationRecord,
-  deps: MergeDeps,
-  fence: () => Promise<void>,
-): Promise<MergeResult> {
-  const secondaries: JournalSecondary[] = op.secondaries.map((s) => ({ ...s }));
-
-  for (const secondary of secondaries) {
-    if (secondary.done) continue;
-
-    let [state] = await fetchOrderStates(admin, [secondary.id]);
-
-    if (!state.cancelledAt) {
-      // Its items are already on the primary. If it has started fulfilling in
-      // the meantime, cancelling could hide a shipment in progress — stop.
-      if (state.displayFulfillmentStatus !== "UNFULFILLED" || state.fulfillments.length > 0) {
-        return flagForReview(
-          admin,
-          { ...op, secondaries },
-          `${secondary.name} has fulfillment activity, but its items were already added to ${op.primaryOrderName}.`,
-          deps,
-          fence,
-        );
-      }
-
-      const requestedAt = secondary.cancelRequestedAt ? new Date(secondary.cancelRequestedAt).getTime() : null;
-      const awaitingEarlierRequest =
-        requestedAt !== null && deps.now().getTime() - requestedAt < deps.cancelRequestGraceMs;
-
-      if (!awaitingEarlierRequest) {
-        try {
-          await fence();
-          await requestCancel(admin, secondary, op.primaryOrderName);
-          secondary.cancelRequestedAt = deps.now().toISOString();
-          await deps.journal.update(op, { secondaries });
-        } catch (err: any) {
-          if (err instanceof OwnershipLostError) throw err;
-          op.attempts += 1;
-          const rejected = err instanceof ShopifyGraphqlError && err.rejected;
-          // Outcome unknown: treat as possibly accepted so it isn't re-issued
-          // until the grace period passes.
-          if (!rejected) secondary.cancelRequestedAt = deps.now().toISOString();
-          await deps.journal.update(op, {
-            attempts: op.attempts,
-            lastError: err?.message ?? String(err),
-            secondaries,
-          });
-          if (rejected) {
-            if (op.attempts >= deps.maxCancelAttempts) {
-              return flagForReview(admin, { ...op, secondaries }, `Shopify rejected cancelling ${secondary.name}: ${err.message}`, deps, fence);
+export const CALCULATED_ORDER_QUERY = `#graphql
+  query MergeCalculatedOrder($id: ID!) {
+    node(id: $id) {
+      ... on CalculatedOrder {
+        id
+        addedLineItems(first: 100) {
+          nodes {
+            id
+            quantity
+            variant { id }
+            calculatedDiscountAllocations {
+              discountApplication { description }
             }
-            return inProgress(op, `Cancelling ${secondary.name} was rejected; will retry.`);
           }
-          // Fall through and read the order back.
         }
       }
-
-      for (let i = 0; i < deps.cancelPollAttempts && !state.cancelledAt; i++) {
-        await deps.sleep(deps.cancelPollIntervalMs);
-        [state] = await fetchOrderStates(admin, [secondary.id]);
-      }
-      if (!state.cancelledAt) {
-        return inProgress(op, `Cancellation of ${secondary.name} is not yet confirmed.`);
-      }
     }
+  }`;
 
-    // Confirmed cancelled: record history before marking done so a crash
-    // between the two only re-runs an idempotent insert.
-    await deps.journal.recordHistory({
-      shop: op.shop,
-      primaryOrderId: op.primaryOrderId,
-      primaryOrderName: op.primaryOrderName,
-      mergedOrderId: secondary.id,
-      mergedOrderName: secondary.name,
-      customerId: op.customerId,
-      itemsCombined: secondary.items,
-    });
-    secondary.done = true;
-    await deps.journal.update(op, { secondaries });
-    op.secondaries = secondaries;
+const EDIT_BEGIN_MUTATION = `#graphql
+  mutation MergeEditBegin($id: ID!) {
+    orderEditBegin(id: $id) {
+      calculatedOrder { id }
+      userErrors { field message }
+    }
+  }`;
 
-    await annotateOrder(admin, fence, state, ["Merged"], `Consolidated into primary order ${op.primaryOrderName} by MergeShip`);
-    try {
-      await fence();
+const EDIT_ADD_VARIANT_MUTATION = `#graphql
+  mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
+    orderEditAddVariant(
+      id: $id
+      variantId: $variantId
+      quantity: $quantity
+      locationId: $locationId
+      allowDuplicates: true
+    ) {
+      calculatedLineItem { id }
+      userErrors { field message }
+    }
+  }`;
+
+const EDIT_LINE_DISCOUNT_MUTATION = `#graphql
+  mutation MergeEditDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
+    orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
+      calculatedLineItem { id }
+      userErrors { field message }
+    }
+  }`;
+
+interface AddedLine {
+  sourceLineItemId: string | null;
+  variantId: string | null;
+  quantity: number;
+  description: string;
+}
+
+/** Builds the uncommitted calculated order: every secondary line is added at
+ *  its currentQuantity with a 100% manual discount whose description carries
+ *  the op token — the evidence marker §6 verifies after the commit. */
+async function buildOrderEdit(
+  admin: AdminClient,
+  primary: OrderState,
+  secondaries: OrderState[],
+  lineItems: Map<string, MergeLineItem[]>,
+  locationId: string | null,
+  opToken: string,
+): Promise<{ calcId: string; transfer: ExpectedTransferEntry[]; lineCount: number }> {
+  const begin = await gql<{ calculatedOrder: { id: string } | null }>(
+    admin,
+    `Begin edit of ${primary.name}`,
+    EDIT_BEGIN_MUTATION,
+    { id: primary.id },
+    "orderEditBegin",
+  );
+  const calcId = begin.calculatedOrder?.id;
+  if (!calcId) throw new ShopifyGraphqlError("orderEditBegin returned no calculated order.", false);
+
+  const transfer: ExpectedTransferEntry[] = [];
+  let lineCount = 0;
+  for (const [index, secondary] of secondaries.entries()) {
+    const secondaryIndex = index + 1; // 1-based within the op
+    const description = `Merged from ${secondary.name}, already paid · MS-${opToken}-${secondaryIndex}`;
+    const lines: AddedLine[] = [];
+    for (const item of lineItems.get(secondary.id)!) {
+      if (item.currentQuantity <= 0) continue;
+      const added = await gql<{ calculatedLineItem?: { id: string } | null }>(
+        admin,
+        `Add "${item.name}" from ${secondary.name}`,
+        EDIT_ADD_VARIANT_MUTATION,
+        // Anchor transferred items to the orders' shared location.
+        { id: calcId, variantId: item.variant!.id, quantity: item.currentQuantity, locationId },
+        "orderEditAddVariant",
+      );
+      const calcLineItemId = added.calculatedLineItem?.id;
+      if (!calcLineItemId) {
+        throw new ShopifyGraphqlError(`No line item returned for "${item.name}".`, false);
+      }
       await gql(
         admin,
-        `Close ${secondary.name}`,
-        `#graphql
-          mutation MergeCloseSecondary($input: OrderCloseInput!) {
-            orderClose(input: $input) {
-              order { id }
-              userErrors { field message }
-            }
-          }`,
-        { input: { id: secondary.id } },
-        "orderClose",
+        `Discount "${item.name}" from ${secondary.name}`,
+        EDIT_LINE_DISCOUNT_MUTATION,
+        {
+          id: calcId,
+          lineItemId: calcLineItemId,
+          discount: { percentValue: 100, description },
+        },
+        "orderEditAddLineItemDiscount",
       );
-    } catch (err: any) {
-      if (err instanceof OwnershipLostError) throw err;
-      // Cosmetic (Orders badge); the cancellation is already confirmed.
-      console.warn(`[merge] Could not close ${secondary.name}: ${err?.message}`);
+      lines.push({
+        sourceLineItemId: item.id ?? null,
+        variantId: item.variant?.id ?? null,
+        quantity: item.currentQuantity,
+        description,
+      });
+      lineCount += 1;
     }
+    transfer.push({ secondaryId: secondary.id, secondaryIndex, lines });
   }
-
-  // Carry the secondaries' customer notes and merchant tags to the primary —
-  // the order that is actually fulfilled. Lines MergeShip wrote are excluded.
-  const [primary, ...secondaryStates] = await fetchOrderStates(admin, [
-    op.primaryOrderId,
-    ...secondaries.map((s) => s.id),
-  ]);
-  const carriedNotes = secondaryStates.flatMap((s) =>
-    (s.note ?? "")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("MergeShip") && !line.startsWith("Consolidated into primary order"))
-      .map((line) => `Note from ${s.name}: ${line}`),
-  );
-  const carriedTags = secondaryStates
-    .flatMap((s) => s.tags ?? [])
-    .filter((t) => !["merged", REVIEW_TAG.toLowerCase()].includes(t.trim().toLowerCase()));
-  await annotateOrder(admin, fence, primary, [...carriedTags, "Consolidated"], [
-    ...carriedNotes,
-    `MergeShip: merged items from ${secondaries.map((s) => s.name).join(", ")} (already paid; shipping was not refunded).`,
-  ]);
-  await deps.journal.update(op, { status: "COMPLETED", lastError: null });
-  op.status = "COMPLETED";
-  console.log(`[merge] Completed ${op.primaryOrderName} ← ${secondaries.map((s) => s.name).join(", ")}`);
-  return {
-    outcome: "merged",
-    primaryName: op.primaryOrderName,
-    mergedCount: secondaries.length,
-    operationId: op.id,
-    disposition: "terminal",
-  };
+  if (!lineCount) throw new ShopifyGraphqlError("Nothing eligible to move.", false);
+  return { calcId, transfer, lineCount };
 }
-
-/** Requests cancellation (restock, no refund, no customer notification). */
-async function requestCancel(admin: AdminClient, secondary: JournalSecondary, primaryName: string) {
-  await gql(
-    admin,
-    `Cancel ${secondary.name}`,
-    `#graphql
-      mutation MergeCancelSecondary($orderId: ID!, $staffNote: String) {
-        orderCancel(
-          orderId: $orderId
-          reason: OTHER
-          notifyCustomer: false
-          restock: true
-          refund: false
-          staffNote: $staffNote
-        ) {
-          job { id }
-          orderCancelUserErrors { field message }
-        }
-      }`,
-    {
-      orderId: secondary.id,
-      staffNote: `Repeat order merged into ${primaryName} by MergeShip. Items transferred, inventory restocked, not refunded.`,
-    },
-    "orderCancel",
-    "orderCancelUserErrors",
-  );
-}
-
-function inProgress(op: MergeOperationRecord, reason: string): MergeResult {
-  console.warn(`[merge] In progress ${op.primaryOrderName} (${op.id}): ${reason}`);
-  return {
-    outcome: "in_progress",
-    reason,
-    primaryName: op.primaryOrderName,
-    operationId: op.id,
-    disposition: "contention",
-  };
-}
-
-// ── Resume ────────────────────────────────────────────────────────────────────
 
 /**
- * Resumes every unfinished merge for the shop, taking a lease on each
- * operation first so a concurrent or stale worker cannot drive it too. Safe
- * to call on every webhook and dashboard load: completed work is skipped and
- * each step is idempotent.
+ * Freeze-verify the calculated order (§4.5): the staged added lines must equal
+ * the expected transfer as a multiset of (variantId, quantity, description).
+ * `node` null => the calc expired or was committed — treated like any other
+ * mismatch by callers (the calc is simply dropped). Returns the failure
+ * reason, or null when the calc matches.
  */
-export async function resumeIncompleteMerges(
+export async function verifyCalculatedOrder(
   admin: AdminClient,
-  shop: string,
-  deps: MergeDeps = defaultMergeDeps(),
-): Promise<MergeResult[]> {
-  const results: MergeResult[] = [];
-  for (const op of await deps.journal.findUnfinished(shop)) {
-    if (
-      op.status === "PENDING_COMMIT" &&
-      deps.now().getTime() - op.updatedAt.getTime() < deps.pendingCommitGraceMs
-    ) {
-      continue;
-    }
-    const leased = await deps.journal.acquireLease(op.id, newLeaseToken(), deps.leaseTtlMs);
-    if (!leased) continue;
-    // The op lease is left to expire rather than released once work stops.
-    const fence = async () => {
-      await deps.outerFence?.();
-      await deps.journal.renew(leased, deps.leaseTtlMs);
-    };
-    try {
-      if (leased.status === "PENDING_COMMIT") {
-        const state = await reconcilePendingCommit(admin, leased, deps);
-        if (state === "ABANDONED") continue;
-        if (state === "NEEDS_REVIEW") {
-          results.push(
-            await flagForReview(admin, leased, `Could not confirm whether the edit to ${leased.primaryOrderName} was applied.`, deps, fence),
-          );
-          continue;
-        }
-      }
-      results.push(await completeCommittedOperation(admin, leased, deps, fence));
-    } catch (err: any) {
-      if (err instanceof OwnershipLostError) {
-        console.log(`[merge] Lost the lease on ${leased.id}; another worker owns it now.`);
-        continue;
-      }
-      console.error(`[merge] Resume of ${leased.id} failed; will retry: ${err?.message}`);
-    }
+  calcId: string | null,
+  expectedTransfer: unknown,
+): Promise<string | null> {
+  if (!calcId) return "No calculated order was recorded for this operation.";
+  const node: any = await gql(
+    admin,
+    "Verify calculated order",
+    CALCULATED_ORDER_QUERY,
+    { id: calcId },
+    "node",
+    null,
+  );
+  if (!node) return "The calculated order is no longer available (committed or expired).";
+  const have = (node.addedLineItems?.nodes ?? []).flatMap((n: any) => {
+    const descriptions = (n.calculatedDiscountAllocations ?? []).map(
+      (a: any) => a.discountApplication?.description ?? "",
+    );
+    // A line with no calculated discount allocation is an unmatched extra.
+    return (descriptions.length ? descriptions : [""]).map((description: string) => ({
+      variantId: n.variant?.id ?? null,
+      quantity: n.quantity,
+      description,
+    }));
+  });
+  const want = (expectedTransfer as ExpectedTransferEntry[]).flatMap((e) =>
+    e.lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity, description: l.description })),
+  );
+  const key = (l: { variantId: string | null; quantity: number; description: string }) =>
+    `${l.variantId}\0${l.quantity}\0${l.description}`;
+  const counts = new Map<string, number>();
+  for (const h of have) counts.set(key(h), (counts.get(key(h)) ?? 0) + 1);
+  for (const w of want) counts.set(key(w), (counts.get(key(w)) ?? 0) - 1);
+  if ([...counts.values()].some((n) => n !== 0)) {
+    return "The calculated order's contents no longer match the recorded transfer.";
   }
-  return results;
+  return null;
 }
 
-// ── Execute ───────────────────────────────────────────────────────────────────
+// ── Execute (planning only) ──────────────────────────────────────────────────
 
 const skip = (
   reason: string,
   disposition: MergeDisposition = "terminal",
-  code?: MergeResult["code"],
+  code?: MergeResultCode,
 ): MergeResult => {
   console.log(`[merge] Skipped: ${reason}`);
   return { outcome: "skipped", reason, disposition, ...(code && { code }) };
@@ -750,7 +596,7 @@ const skip = (
 
 const fail = (reason: string): MergeResult => {
   console.error(`[merge] Failed (no orders changed): ${reason}`);
-  return { outcome: "failed", reason, disposition: "transient" };
+  return { outcome: "failed", reason, disposition: "transient", code: "TRANSIENT" };
 };
 
 /** The result when a fence detects this worker lost its lease. No further
@@ -769,11 +615,10 @@ const fingerprint = (items: Map<string, MergeLineItem[]>) =>
   );
 
 /**
- * Merges the given orders: the oldest is the primary; every other order's
- * items are added to it at a 100 % discount, then those orders are cancelled
- * (restocked, not refunded, customer not notified).
+ * Plans a merge for the given orders and creates the v2 operation that owns
+ * it (durable locks inserted atomically). The oldest order is the primary.
  *
- * orderIds[0] is the anchor (the newly placed order). It must qualify; other
+ * orderIds[0] is the anchor (the newly placed order): it must qualify; other
  * candidates that can't combine with it are excluded and left untouched.
  */
 export async function executeMerge(
@@ -785,51 +630,73 @@ export async function executeMerge(
   if (orderIds.length < 2) return skip("At least two orders are required to merge.");
 
   // 0 ── Claim every order before touching anything ────────────────────────────
-  // All-or-nothing: if another merge holds any of these orders, nothing here
-  // changes. Claims are renewed by fence() before every mutation and released
-  // when the merge ends — a crashed worker's claims expire with the lease.
+  // Claims are transient liveness; durable locks are created before release.
   const ids = [...new Set(orderIds)].sort();
   const token = newLeaseToken();
   if (!(await deps.claims.acquire(shop, ids, token, deps.leaseTtlMs))) {
     return skip("Another merge is holding one of the orders.", "contention", "CLAIM_CONFLICT");
   }
   let held = ids;
-  let op: MergeOperationRecord | undefined;
   const fence = async () => {
     await deps.outerFence?.();
     await deps.claims.renew(shop, held, token, deps.leaseTtlMs);
-    if (op) await deps.journal.renew(op, deps.leaseTtlMs);
+  };
+  // Every Shopify call (reads included) renews the claims first — a worker
+  // that lost them stops before touching Shopify.
+  const fencedAdmin: AdminClient = {
+    graphql: async (query, options) => {
+      await fence();
+      return admin.graphql(query, options);
+    },
   };
   try {
-    // 1 ── Never touch orders that belong to an unfinished or flagged merge ──
-    // Re-checked AFTER claiming: journal rows are only created while the
-    // creator holds the claims, so this either sees the row or the creator's
-    // claim would still be held — closing the check-then-act window.
-    const blocked = await deps.journal.findBlockingOrderIds(shop);
-    const blockedId = ids.find((id) => blocked.has(id));
+    await deps.hooks?.afterClaimCheck?.();
+
+    // 1 ── Durable blockers: a MergeOrderLock or a blocking v1 op on any id ──
+    const [lockedIds, v1Blocked] = await Promise.all([
+      deps.ops.findLockedOrderIds(shop, ids),
+      deps.ops.findBlockingV1(shop, ids),
+    ]);
+    const blockedId = ids.find((id) => lockedIds.has(id) || v1Blocked.has(id));
     if (blockedId) {
-      return skip(`Order ${blockedId} is part of an unfinished or flagged merge.`, "contention", "BLOCKED");
+      return skip(`Order ${blockedId} is held by an unfinished merge operation.`, "contention", "LOCKED");
     }
 
     // 2 ── Load and evaluate fresh state ─────────────────────────────────────
     let orders: OrderState[];
     let lineItems: Map<string, MergeLineItem[]>;
     try {
-      orders = await fetchOrderStates(admin, orderIds);
-      lineItems = await fetchLineItemsById(admin, orders);
+      orders = await fetchOrderStates(fencedAdmin, orderIds);
+      lineItems = await fetchLineItemsById(fencedAdmin, orders);
     } catch (err: any) {
       if (err instanceof OwnershipLostError) throw err;
       return fail(err?.message ?? "Could not load orders.");
     }
 
+    // 2a ── Classify anchor ineligibility BEFORE compatible-sibling selection,
+    // so ANCHOR_INELIGIBLE and NO_COMPATIBLE_PARTNER stay distinguishable.
+    const anchor = orders.find((o) => o.id === orderIds[0]);
+    let anchorReason: string | null = null;
+    if (!anchor) {
+      anchorReason = "The new order could not be loaded.";
+    } else {
+      const anchorShipping = orderShippingSignature(anchor);
+      anchorReason =
+        orderStateIneligibility(anchor) ??
+        lineItemIneligibility(anchor.name, lineItems.get(anchor.id) ?? [], false) ??
+        (!anchorShipping.ok ? anchorShipping.reason : null) ??
+        (buildAddressKey(anchor.customer?.id, anchor.shippingAddress)
+          ? null
+          : `Order ${anchor.name} has no usable shipping address.`);
+    }
+    if (anchorReason) return skip(anchorReason, "terminal", "ANCHOR_INELIGIBLE");
+
     // 2b ── Keep only the orders that can combine with the new order ─────────
-    // One unsuitable candidate is excluded (and left untouched) rather than
-    // blocking an otherwise safe combine of the others.
     const selection = selectCompatibleOrders(orderIds[0], orders, lineItems);
-    if (!selection.ok) return skip(selection.reason);
+    if (!selection.ok) return skip(selection.reason, "terminal", "NO_COMPATIBLE_PARTNER");
     for (const e of selection.excluded) console.log(`[merge] Excluded ${e.name}: ${e.reason}`);
     try {
-      const byLocation = await excludeByLocation(admin, selection.orders, lineItems);
+      const byLocation = await excludeByLocation(fencedAdmin, selection.orders, lineItems);
       if (!byLocation.ok) return skip(byLocation.reason);
       orders = byLocation.orders;
     } catch (err: any) {
@@ -853,10 +720,14 @@ export async function executeMerge(
     if (!evaluation.ok) return skip(evaluation.reason);
     const { primary, secondaries } = evaluation;
     const primaryCountBefore = lineItems.get(primary.id)!.length;
+    const primaryLineItemIdsBefore = lineItems
+      .get(primary.id)!
+      .map((i) => i.id)
+      .filter((id): id is string => Boolean(id));
 
     let location: LocationDecision;
     try {
-      location = await resolveMergeLocation(admin, orders, lineItems);
+      location = await resolveMergeLocation(fencedAdmin, orders, lineItems);
     } catch (err: any) {
       if (err instanceof OwnershipLostError) throw err;
       return fail(err?.message ?? "Could not verify fulfillment locations.");
@@ -867,178 +738,100 @@ export async function executeMerge(
     const locationId = location.locationId;
 
     // 3 ── Build the order edit (uncommitted — abandoning it changes nothing) ──
-    let calcId: string;
-    let addedLineItemCount = 0;
+    const opToken = newOpToken();
+    let edit: { calcId: string; transfer: ExpectedTransferEntry[]; lineCount: number };
     try {
-      await fence();
-      const begin = await gql(
-        admin,
-        `Begin edit of ${primary.name}`,
-        `#graphql
-          mutation MergeEditBegin($id: ID!) {
-            orderEditBegin(id: $id) {
-              calculatedOrder { id }
-              userErrors { field message }
-            }
-          }`,
-        { id: primary.id },
-        "orderEditBegin",
-      );
-      calcId = begin.calculatedOrder?.id;
-      if (!calcId) throw new ShopifyGraphqlError("orderEditBegin returned no calculated order.", false);
-
-      for (const secondary of secondaries) {
-        for (const item of lineItems.get(secondary.id)!) {
-          if (item.currentQuantity <= 0) continue;
-          await fence();
-          const added = await gql(
-            admin,
-            `Add "${item.name}" from ${secondary.name}`,
-            `#graphql
-              mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
-                orderEditAddVariant(
-                  id: $id
-                  variantId: $variantId
-                  quantity: $quantity
-                  locationId: $locationId
-                  allowDuplicates: true
-                ) {
-                  calculatedLineItem { id }
-                  userErrors { field message }
-                }
-              }`,
-            // Anchor transferred items to the orders' shared location.
-            { id: calcId, variantId: item.variant!.id, quantity: item.currentQuantity, locationId },
-            "orderEditAddVariant",
-          );
-          const calcLineItemId = added.calculatedLineItem?.id;
-          if (!calcLineItemId) throw new ShopifyGraphqlError(`No line item returned for "${item.name}".`, false);
-          addedLineItemCount += 1;
-
-          await fence();
-          await gql(
-            admin,
-            `Discount "${item.name}" from ${secondary.name}`,
-            `#graphql
-              mutation MergeEditDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
-                orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
-                  calculatedLineItem { id }
-                  userErrors { field message }
-                }
-              }`,
-            {
-              id: calcId,
-              lineItemId: calcLineItemId,
-              discount: { percentValue: 100, description: `Merged from ${secondary.name}, already paid` },
-            },
-            "orderEditAddLineItemDiscount",
-          );
-        }
-      }
+      edit = await buildOrderEdit(fencedAdmin, primary, secondaries, lineItems, locationId, opToken);
     } catch (err: any) {
       if (err instanceof OwnershipLostError) throw err;
       return fail(err?.message ?? "Could not build the order edit.");
     }
 
-    // 4 ── Re-verify immediately before committing ────────────────────────────
-    // Orders can be fulfilled, edited, refunded or cancelled while the edit
-    // was being built; commit only if nothing relevant changed. A changed
-    // group is transient: a retry re-evaluates fresh state (and turns
-    // terminal if the orders truly no longer qualify).
+    // 3b ── Freeze-verify: the staged calc must equal the recorded transfer;
+    // a concurrent edit changing it drops the calc (transient — retried).
     try {
-      const freshOrders = await fetchOrderStates(admin, groupIds);
-      const freshItems = await fetchLineItemsById(admin, freshOrders);
-      const recheck = evaluateMergeGroup(freshOrders, freshItems);
-      if (!recheck.ok) return skip(`Orders changed during the merge: ${recheck.reason}`, "transient");
-      if (fingerprint(freshItems) !== fingerprint(lineItems)) {
-        return skip("Order line items changed during the merge.", "transient");
+      const calcReason = await verifyCalculatedOrder(fencedAdmin, edit.calcId, edit.transfer);
+      if (calcReason) {
+        return skip(`The calculated order changed before it could be recorded: ${calcReason}`, "transient", "TRANSIENT");
       }
-      const freshLocation = await resolveMergeLocation(admin, freshOrders, freshItems);
+    } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
+      return fail(err?.message ?? "Could not verify the calculated order.");
+    }
+
+    // 4 ── Re-verify the group immediately before creating the operation ──────
+    try {
+      const freshOrders = await fetchOrderStates(fencedAdmin, groupIds);
+      const freshItems = await fetchLineItemsById(fencedAdmin, freshOrders);
+      const recheck = evaluateMergeGroup(freshOrders, freshItems);
+      if (!recheck.ok) return skip(`Orders changed during the merge: ${recheck.reason}`, "transient", "TRANSIENT");
+      if (fingerprint(freshItems) !== fingerprint(lineItems)) {
+        return skip("Order line items changed during the merge.", "transient", "TRANSIENT");
+      }
+      const freshLocation = await resolveMergeLocation(fencedAdmin, freshOrders, freshItems);
       if (!freshLocation.ok) {
         return skip(
           `Orders changed during the merge: ${freshLocation.reason}`,
           "transient",
-          freshLocation.accessDenied ? "LOCATION_ACCESS" : undefined,
+          freshLocation.accessDenied ? "LOCATION_ACCESS" : "TRANSIENT",
         );
       }
       if (freshLocation.locationId !== locationId) {
-        return skip("Fulfillment location changed during the merge.", "transient");
+        return skip("Fulfillment location changed during the merge.", "transient", "TRANSIENT");
       }
     } catch (err: any) {
       if (err instanceof OwnershipLostError) throw err;
       return fail(err?.message ?? "Could not re-verify orders.");
     }
 
-    // 5 ── Journal the intent BEFORE committing ───────────────────────────────
+    // 5 ── The durable point of no return: operation + locks in ONE tx ────────
+    await deps.hooks?.beforeOpInsert?.();
+    let op: OperationRecord;
     try {
-      await fence();
-      op = await deps.journal.create(
-        {
-          shop,
-          status: "PENDING_COMMIT",
-          primaryOrderId: primary.id,
-          primaryOrderName: primary.name,
-          customerId: primary.customer?.id ?? null,
-          primaryLineItemCountBefore: primaryCountBefore,
-          addedLineItemCount,
-          secondaries: secondaries.map((s) => ({
-            id: s.id,
-            name: s.name,
-            items: lineItems.get(s.id)!.reduce((n, i) => n + Math.max(i.currentQuantity, 0), 0),
-            done: false,
-          })),
-          involvedOrderIds: [primary.id, ...secondaries.map((s) => s.id)],
-        },
-        token,
-        deps.leaseTtlMs,
-      );
+      op = await deps.ops.createOperation({
+        shop,
+        claimToken: token,
+        involvedOrderIds: groupIds,
+        primaryOrderId: primary.id,
+        primaryOrderName: primary.name,
+        customerId: primary.customer?.id ?? null,
+        primaryLineItemCountBefore: primaryCountBefore,
+        addedLineItemCount: edit.lineCount,
+        secondaries: secondaries.map((s, i) => ({
+          id: s.id,
+          name: s.name,
+          items: lineItems.get(s.id)!.reduce((n, item) => n + Math.max(item.currentQuantity, 0), 0),
+          cancelPhase: "TRANSFER_PENDING" as const,
+          secondaryIndex: i + 1,
+        })),
+        workItemId: deps.workItem?.id,
+        workToken: deps.workItem?.token,
+        opToken,
+        calculatedOrderId: edit.calcId,
+        expectedTransfer: edit.transfer,
+        expectedLocationId: locationId,
+        primaryLineItemIdsBefore,
+        leaseToken: newLeaseToken(),
+        ttlMs: deps.leaseTtlMs,
+      });
     } catch (err: any) {
-      if (err instanceof OwnershipLostError) throw err;
-      return fail(`Could not record the merge before committing: ${err?.message}`);
-    }
-    const operation = op;
-
-    // 6 ── Commit ──────────────────────────────────────────────────────────────
-    try {
-      await fence();
-      await gql(
-        admin,
-        `Commit edit of ${primary.name}`,
-        `#graphql
-          mutation MergeEditCommit($id: ID!, $staffNote: String) {
-            orderEditCommit(id: $id, notifyCustomer: false, staffNote: $staffNote) {
-              order { id }
-              userErrors { field message }
-            }
-          }`,
-        { id: calcId, staffNote: `MergeShip: merged items from ${secondaries.map((s) => s.name).join(", ")}.` },
-        "orderEditCommit",
-      );
-      await deps.journal.update(operation, { status: "COMMITTED" });
-      operation.status = "COMMITTED";
-    } catch (err: any) {
-      if (err instanceof OwnershipLostError) throw err;
-      if (err instanceof ShopifyGraphqlError && err.rejected) {
-        await deps.journal.update(operation, { status: "ABANDONED", lastError: err.message });
-        return fail(err.message);
+      if (err instanceof ClaimContentionError) {
+        return skip(err.message, "contention", "LOCKED");
       }
-      // Unknown outcome: the edit may or may not have been applied. Leave the
-      // op PENDING_COMMIT (orders stay blocked); resume reconciles it after
-      // the grace period.
-      await deps.journal.update(operation, { lastError: err?.message ?? String(err) });
-      return inProgress(operation, `Commit outcome unknown: ${err?.message}`);
+      if (err instanceof OwnershipLostError) return ownershipLost(err);
+      throw err;
     }
-
-    if (locationId) await logMergedLocation(admin, primary, locationId);
-
-    // 7 ── Cancel secondaries and confirm ──────────────────────────────────────
-    try {
-      return await completeCommittedOperation(admin, operation, deps, fence);
-    } catch (err: any) {
-      if (err instanceof OwnershipLostError) throw err;
-      await deps.journal.update(operation, { lastError: err?.message ?? String(err) });
-      return inProgress(operation, err?.message ?? "Could not finish the merge.");
-    }
+    await deps.hooks?.afterOpInsert?.();
+    // The durable locks own the orders now; the claims are released below.
+    return {
+      outcome: "operation_created",
+      reason: `Operation ${op.id} planned for ${primary.name} ← ${secondaries.map((s) => s.name).join(", ")}`,
+      primaryName: primary.name,
+      operationId: op.id,
+      operation: op,
+      disposition: "terminal",
+      code: "OPERATION_CREATED",
+    };
   } catch (err: any) {
     if (err instanceof OwnershipLostError) return ownershipLost(err);
     throw err;

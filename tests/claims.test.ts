@@ -8,12 +8,10 @@ import { executeMerge } from "../app/lib/merge.server";
 import type { NewMergeOperation } from "../app/lib/merge-journal.server";
 import { OwnershipLostError } from "../app/lib/ownership.server";
 import {
-  advance,
-  FakeShopify,
+  makeHarness,
   makeOrder,
   MemoryClaimStore,
   MemoryJournal,
-  testDeps,
 } from "./fake-shopify";
 
 const SHOP = "test.myshopify.com";
@@ -33,10 +31,12 @@ function gate() {
 }
 
 function setup(orders = [makeOrder(1), makeOrder(2)]) {
-  const shopify = new FakeShopify(orders);
-  const journal = new MemoryJournal();
-  const deps = testDeps(journal);
-  return { shopify, journal, deps, claims: deps.claims as MemoryClaimStore };
+  return makeHarness(orders);
+}
+
+/** v2: planning returns the operation; driving it performs the merge. */
+async function finish(h: ReturnType<typeof setup>, operationId: string) {
+  return h.driveUntilIdle(operationId);
 }
 
 const newOp = (overrides: Partial<NewMergeOperation> = {}): NewMergeOperation => ({
@@ -53,21 +53,20 @@ const newOp = (overrides: Partial<NewMergeOperation> = {}): NewMergeOperation =>
 });
 
 describe("claims — contention between workers", () => {
-  it("blocked journal row: skipped/contention/BLOCKED, claims released on the way out", async () => {
-    const { shopify, deps, claims } = setup();
-    const journal = deps.journal as MemoryJournal;
-    await journal.create(newOp({ status: "NEEDS_REVIEW" }), "tok", 60_000);
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result).toMatchObject({ outcome: "skipped", disposition: "contention", code: "BLOCKED" });
-    expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
-    expect(claims.claims.size).toBe(0);
+  it("blocked v1 journal row: skipped/contention/LOCKED, claims released on the way out", async () => {
+    const h = setup();
+    await h.journal.create(newOp({ status: "NEEDS_REVIEW" }), "tok", 60_000);
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    expect(result).toMatchObject({ outcome: "skipped", disposition: "contention", code: "LOCKED" });
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
+    expect(h.claims.claims.size).toBe(0);
   });
 
   // Spec §9 #10.
   it("lease expiry after worker death mid-edit: second worker merges once; the first worker's late fence throws", async () => {
-    const { shopify, journal, deps } = setup();
+    const h = setup();
     const g = gate();
-    shopify.on("MergeEditAddVariant", async (_v, call) => {
+    h.shopify.on("MergeEditAddVariant", async (_v, call) => {
       if (call === 1) {
         g.reached();
         await g.release;
@@ -75,12 +74,13 @@ describe("claims — contention between workers", () => {
       return undefined;
     });
 
-    const first = executeMerge(shopify.admin, SHOP, IDS, deps);
+    const first = executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     await g.at; // worker 1 holds the claims and sits inside the edit
-    advance(deps, 120_000); // its claims expire
+    h.advance(121_000); // its claims expire (lease TTL is 120s)
 
-    const second = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(second.outcome).toBe("merged");
+    const second = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    expect(second.outcome).toBe("operation_created");
+    expect((await finish(h, second.operationId!))?.phase).toBe("COMPLETED");
 
     g.open();
     await expect(first).resolves.toMatchObject({
@@ -88,17 +88,17 @@ describe("claims — contention between workers", () => {
       disposition: "contention",
       code: "OWNERSHIP_LOST",
     });
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(1);
-    expect(shopify.order(1).lineItems).toHaveLength(2); // items moved exactly once
-    expect(shopify.order(2).cancelCount).toBe(1);
-    expect(journal.only().status).toBe("COMPLETED");
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+    expect(h.shopify.order(1).lineItems).toHaveLength(2); // items moved exactly once
+    expect(h.shopify.order(2).cancelCount).toBe(1);
+    expect(h.ops.ops.get(second.operationId!)?.phase).toBe("COMPLETED");
   });
 
   // Spec §9 #11.
   it("two workers on the same group: exactly one acquires; the other gets CLAIM_CONFLICT and its retry is a no-op", async () => {
-    const { shopify, deps } = setup();
+    const h = setup();
     const g = gate();
-    shopify.on("MergeEditBegin", async (_v, call) => {
+    h.shopify.on("MergeEditBegin", async (_v, call) => {
       if (call === 1) {
         g.reached();
         await g.release;
@@ -106,27 +106,29 @@ describe("claims — contention between workers", () => {
       return undefined;
     });
 
-    const first = executeMerge(shopify.admin, SHOP, IDS, deps);
+    const first = executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     await g.at; // worker 1 holds the claims
 
-    const loser = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const loser = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     expect(loser).toMatchObject({ outcome: "skipped", disposition: "contention", code: "CLAIM_CONFLICT" });
 
     g.open();
-    expect((await first).outcome).toBe("merged");
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(1);
+    const winner = await first;
+    expect(winner.outcome).toBe("operation_created");
+    expect((await finish(h, winner.operationId!))?.phase).toBe("COMPLETED");
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
 
     // Retried later: order 2 is already cancelled, so nothing happens twice.
-    expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("skipped");
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(1);
-    expect(shopify.order(1).lineItems).toHaveLength(2);
+    expect((await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps)).outcome).toBe("skipped");
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+    expect(h.shopify.order(1).lineItems).toHaveLength(2);
   });
 
   // Spec §9 #12.
   it("overlapping order sets {A,B} vs {B,C}: exactly one wins; the retry merges the remainder without duplicating items", async () => {
-    const { shopify, deps } = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
+    const h = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
     const g = gate();
-    shopify.on("MergeEditBegin", async (_v, call) => {
+    h.shopify.on("MergeEditBegin", async (_v, call) => {
       if (call === 1) {
         g.reached();
         await g.release;
@@ -134,33 +136,37 @@ describe("claims — contention between workers", () => {
       return undefined;
     });
 
-    const first = executeMerge(shopify.admin, SHOP, [id(2), id(1)], deps);
+    const first = executeMerge(h.shopify.admin, h.SHOP, [id(2), id(1)], h.deps);
     await g.at; // holds {1, 2}
 
-    const loser = await executeMerge(shopify.admin, SHOP, [id(3), id(2)], deps);
+    const loser = await executeMerge(h.shopify.admin, h.SHOP, [id(3), id(2)], h.deps);
     expect(loser).toMatchObject({ outcome: "skipped", disposition: "contention", code: "CLAIM_CONFLICT" });
 
     g.open();
-    expect((await first).outcome).toBe("merged");
-    expect(shopify.order(1).lineItems).toHaveLength(2);
+    const winner = await first;
+    expect(winner.outcome).toBe("operation_created");
+    expect((await finish(h, winner.operationId!))?.phase).toBe("COMPLETED");
+    expect(h.shopify.order(1).lineItems).toHaveLength(2);
 
     // The original set no longer qualifies — order 2 was merged away.
-    expect((await executeMerge(shopify.admin, SHOP, [id(3), id(2)], deps)).outcome).toBe("skipped");
+    expect((await executeMerge(h.shopify.admin, h.SHOP, [id(3), id(2)], h.deps)).outcome).toBe("skipped");
     // The still-eligible remainder merges on retry.
-    expect((await executeMerge(shopify.admin, SHOP, [id(3), id(1)], deps)).outcome).toBe("merged");
+    const second = await executeMerge(h.shopify.admin, h.SHOP, [id(3), id(1)], h.deps);
+    expect(second.outcome).toBe("operation_created");
+    expect((await finish(h, second.operationId!))?.phase).toBe("COMPLETED");
 
-    expect(shopify.order(1).lineItems).toHaveLength(3);
-    expect(new Set(shopify.order(1).lineItems.map((i) => i.id)).size).toBe(3);
-    expect(shopify.order(2).cancelledAt).not.toBeNull();
-    expect(shopify.order(3).cancelledAt).not.toBeNull();
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(2);
+    expect(h.shopify.order(1).lineItems).toHaveLength(3);
+    expect(new Set(h.shopify.order(1).lineItems.map((i) => i.id)).size).toBe(3);
+    expect(h.shopify.order(2).cancelledAt).not.toBeNull();
+    expect(h.shopify.order(3).cancelledAt).not.toBeNull();
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(2);
   });
 
   // Spec §9 #13.
   it("stalled worker: its next fence throws after the lease lapsed and another worker took the claims; no commit issued", async () => {
-    const { shopify, deps, claims } = setup();
+    const h = setup();
     const g = gate();
-    shopify.on("MergeEditBegin", async (_v, call) => {
+    h.shopify.on("MergeEditBegin", async (_v, call) => {
       if (call === 1) {
         g.reached();
         await g.release;
@@ -168,11 +174,11 @@ describe("claims — contention between workers", () => {
       return undefined;
     });
 
-    const first = executeMerge(shopify.admin, SHOP, IDS, deps);
+    const first = executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
     await g.at; // stalled between its fence and the mutation
 
-    advance(deps, 120_000); // the claims expire
-    expect(await claims.acquire(SHOP, IDS, "other-worker", 60_000)).toBe(true); // taken over
+    h.advance(121_000); // the claims expire (lease TTL is 120s)
+    expect(await h.claims.acquire(SHOP, IDS, "other-worker", 60_000)).toBe(true); // taken over
 
     g.open();
     await expect(first).resolves.toMatchObject({
@@ -180,10 +186,10 @@ describe("claims — contention between workers", () => {
       disposition: "contention",
       code: "OWNERSHIP_LOST",
     });
-    expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(0);
     // The stale worker's release cannot remove the other worker's claims.
-    expect(claims.claims.size).toBe(2);
-    expect([...claims.claims.values()].every((c) => c.token === "other-worker")).toBe(true);
+    expect(h.claims.claims.size).toBe(2);
+    expect([...h.claims.claims.values()].every((c) => c.token === "other-worker")).toBe(true);
   });
 });
 
