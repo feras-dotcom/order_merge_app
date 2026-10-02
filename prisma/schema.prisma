@@ -30,17 +30,45 @@ model Settings {
   shopifyShopGid      String?
 }
 
-// Tracks webhook deliveries that have already been processed.
-// The unique constraint on (shop, orderId) ensures a duplicate ORDERS_CREATE
-// delivery for the same order is skipped rather than merged twice.
+// The durable work item for an ORDERS_CREATE event: PENDING until a terminal
+// outcome or a merge completion/review. status defaults to DONE so rows
+// inserted by pre-migration code during a deploy overlap stay inert; legacy
+// rows are backfilled with outcome LEGACY. The unique constraint on
+// (shop, orderId) deduplicates repeat deliveries.
 model ProcessedWebhook {
-  id        String   @id @default(cuid())
-  shop      String
-  orderId   String
-  createdAt DateTime @default(now())
+  id          String    @id @default(cuid())
+  shop        String
+  orderId     String
+  status      String    @default("DONE")
+  attempts    Int       @default(0)
+  retryAfter  DateTime?
+  leaseToken  String?
+  leasedUntil DateTime?
+  outcome     String?
+  lastReason  String?
+  deadlineAt  DateTime?
+  doneAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
 
   @@unique([shop, orderId])
   @@index([createdAt])
+  @@index([status, retryAfter])
+}
+
+// Lease on an order while a merge is running. A merge may only mutate orders
+// it currently claims; the token fences every ownership-sensitive write so a
+// stale worker can never take over, release or extend another worker's lease.
+model MergeClaim {
+  id          String   @id @default(cuid())
+  shop        String
+  orderId     String
+  leaseToken  String
+  leasedUntil DateTime
+  createdAt   DateTime @default(now())
+
+  @@unique([shop, orderId])
+  @@index([leasedUntil])
 }
 
 // One row per order absorbed by a successful merge (Consolidation History).
@@ -83,6 +111,8 @@ model MergeOperation {
   involvedOrderIds           String[]
   attempts                   Int      @default(0)
   lastError                  String?
+  leaseToken                 String?
+  leasedUntil                DateTime?
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt
 

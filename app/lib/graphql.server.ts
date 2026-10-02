@@ -7,9 +7,13 @@
 export type AdminClient = {
   graphql: (
     query: string,
-    options?: { variables?: Record<string, unknown> },
+    options?: { variables?: Record<string, unknown>; signal?: AbortSignal },
   ) => Promise<Response>;
 };
+
+/** Hard cap on a single Shopify call. With a 90s lease TTL, a mutation issued
+ *  right after a successful renew always finishes inside its lease window. */
+export const GQL_TIMEOUT_MS = 45_000;
 
 export class ShopifyGraphqlError extends Error {
   /** true when Shopify definitively rejected the operation (userErrors), so
@@ -40,6 +44,7 @@ function describeErrors(errors: unknown): string {
  * @param userErrorsKey  Field on the payload holding user errors
  *                    ("userErrors" by default; orderCancel uses
  *                    "orderCancelUserErrors"). Pass null for queries.
+ * @param timeoutMs   Abort the call after this long (default GQL_TIMEOUT_MS).
  */
 export async function gql<T = any>(
   admin: AdminClient,
@@ -48,16 +53,31 @@ export async function gql<T = any>(
   variables: Record<string, unknown>,
   root: string,
   userErrorsKey: string | null = "userErrors",
+  timeoutMs: number = GQL_TIMEOUT_MS,
 ): Promise<T> {
   let body: any;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      // Raced so the cap holds even if the client ignores the signal.
+      reject(new ShopifyGraphqlError(`${label} timed out after ${timeoutMs}ms.`, false));
+    }, timeoutMs);
+  });
   try {
-    const res = await admin.graphql(query, { variables });
+    const res = await Promise.race([
+      admin.graphql(query, { variables, signal: controller.signal }),
+      timeout,
+    ]);
     body = await res.json();
   } catch (err: any) {
     // The client throws on HTTP failures and (depending on version) on
     // GraphQL errors; surface whatever detail it carries.
     const detail = err?.body?.errors ?? err?.response?.errors ?? err?.message ?? err;
     throw new ShopifyGraphqlError(`${label} failed: ${describeErrors(detail)}`, false);
+  } finally {
+    clearTimeout(timer!);
   }
 
   if (body?.errors && (!Array.isArray(body.errors) || body.errors.length)) {

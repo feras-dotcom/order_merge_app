@@ -11,17 +11,24 @@
 //     before the commit.
 //   • Every Shopify call goes through gql(), which fails on transport errors,
 //     top-level GraphQL errors, missing payloads and userErrors.
+//   • A merge holds a lease on every order it touches (MergeClaim, see
+//     claims.server.ts), renewed before every Shopify mutation and before the
+//     journal write. A worker that loses its lease issues no further writes;
+//     an expired lease can be taken over by another worker.
 //   • A MergeOperation journal row is written BEFORE the primary's order edit
 //     is committed. After the commit, each secondary is cancelled and the
 //     cancellation is confirmed by reading the order back (orderCancel is
 //     asynchronous). Only when every secondary is confirmed cancelled is the
 //     merge reported as successful.
-//   • Interrupted merges are resumed by resumeIncompleteMerges(). When the
-//     outcome cannot be determined, the operation is marked NEEDS_REVIEW, the
-//     orders are tagged/annotated in Shopify, and they are excluded from every
-//     future merge.
+//   • Interrupted merges are resumed by resumeIncompleteMerges(), which takes
+//     a lease on the journal row before driving it. When the outcome cannot
+//     be determined, the operation is marked NEEDS_REVIEW, the orders are
+//     tagged/annotated in Shopify, and they are excluded from every future
+//     merge.
 
 import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
+import { prismaClaimStore, type ClaimStore } from "./claims.server";
+import { LEASE_TTL_MS, newLeaseToken, OwnershipLostError } from "./ownership.server";
 import {
   REVIEW_TAG,
   evaluateFulfillmentLocation,
@@ -52,6 +59,13 @@ export { REVIEW_TAG };
 
 export interface MergeDeps {
   journal: MergeJournal;
+  /** Per-order merge claims (see claims.server.ts). */
+  claims: ClaimStore;
+  /** Lease length for claims and journal operation leases. */
+  leaseTtlMs: number;
+  /** Extra ownership check run inside every fence (e.g. the work processor
+   *  renews its work-item lease here). Throws OwnershipLostError. */
+  outerFence?: () => Promise<void>;
   sleep: (ms: number) => Promise<void>;
   now: () => Date;
   /** Reads of the secondary after orderCancel before giving up for now. */
@@ -68,6 +82,8 @@ export interface MergeDeps {
 
 export const defaultMergeDeps = (): MergeDeps => ({
   journal: prismaMergeJournal,
+  claims: prismaClaimStore(),
+  leaseTtlMs: LEASE_TTL_MS,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => new Date(),
   cancelPollAttempts: 6,
@@ -92,17 +108,24 @@ export type MergeOutcome =
   /** Outcome could not be confirmed; orders are flagged for the merchant. */
   | "needs_review";
 
+/** How the caller should treat the result: "terminal" is done, "contention"
+ *  means another worker is involved (retry soon), "transient" means a
+ *  Shopify/DB failure (retry). */
+export type MergeDisposition = "terminal" | "contention" | "transient";
+
 export interface MergeResult {
   outcome: MergeOutcome;
   reason?: string;
   primaryName?: string;
   mergedCount?: number;
   operationId?: string;
+  disposition: MergeDisposition;
+  code?: "LOCATION_ACCESS" | "CLAIM_CONFLICT" | "BLOCKED" | "OWNERSHIP_LOST";
 }
 
 // ── Shopify reads ─────────────────────────────────────────────────────────────
 
-const ORDER_STATE_QUERY = `#graphql
+export const ORDER_STATE_QUERY = `#graphql
   query MergeOrderState($ids: [ID!]!) {
     nodes(ids: $ids) {
       ... on Order {
@@ -145,7 +168,7 @@ const ORDER_STATE_QUERY = `#graphql
     }
   }`;
 
-async function fetchOrderStates(admin: AdminClient, ids: string[]): Promise<OrderState[]> {
+export async function fetchOrderStates(admin: AdminClient, ids: string[]): Promise<OrderState[]> {
   const nodes = await gql<any[]>(admin, "Load orders", ORDER_STATE_QUERY, { ids }, "nodes", null);
   const byId = new Map(nodes.filter((n) => n?.id).map((n) => [n.id as string, n as OrderState]));
   const orders = ids.map((id) => byId.get(id));
@@ -316,7 +339,9 @@ async function excludeByLocation(
   return { ok: true, orders: kept };
 }
 
-type LocationDecision = { ok: true; locationId: string | null } | { ok: false; reason: string };
+type LocationDecision =
+  | { ok: true; locationId: string | null }
+  | { ok: false; reason: string; accessDenied?: boolean };
 
 /**
  * Location rule.
@@ -352,6 +377,7 @@ async function resolveMergeLocation(
     ok: false,
     // Include Shopify's message: it names the exact missing scope.
     reason: `Shop has more than one active location and MergeShip cannot read fulfillment locations (allow location access in Settings). ${denied}`,
+    accessDenied: true,
   };
 }
 
@@ -368,6 +394,7 @@ function uniqueTags(tags: string[]): string[] {
 
 async function annotateOrder(
   admin: AdminClient,
+  fence: () => Promise<void>,
   order: Pick<OrderState, "id" | "name" | "note" | "tags">,
   addTags: string[],
   noteLines: string | string[] | null,
@@ -377,6 +404,7 @@ async function annotateOrder(
     (line) => line && !existingNote.includes(line),
   );
   try {
+    await fence();
     await gql(
       admin,
       `Annotate ${order.name}`,
@@ -399,22 +427,23 @@ async function annotateOrder(
       "orderUpdate",
     );
   } catch (err: any) {
+    // Ownership loss must propagate — a stale worker stops, not annotates.
+    if (err instanceof OwnershipLostError) throw err;
     console.warn(`[merge] Could not annotate ${order.name}: ${err?.message}`);
   }
 }
 
 // ── Journal helpers ───────────────────────────────────────────────────────────
 
-const inFlight = new Set<string>();
-
 async function flagForReview(
   admin: AdminClient,
   op: MergeOperationRecord,
   reason: string,
   deps: MergeDeps,
+  fence: () => Promise<void>,
 ): Promise<MergeResult> {
   console.error(`[merge] NEEDS REVIEW ${op.primaryOrderName} (${op.id}): ${reason}`);
-  await deps.journal.update(op.id, { status: "NEEDS_REVIEW", lastError: reason });
+  await deps.journal.update(op, { status: "NEEDS_REVIEW", lastError: reason });
   op.status = "NEEDS_REVIEW";
 
   const pending = op.secondaries.filter((s) => !s.done);
@@ -423,6 +452,7 @@ async function flagForReview(
     const [primary, ...secondaryStates] = states;
     await annotateOrder(
       admin,
+      fence,
       primary,
       [REVIEW_TAG],
       `MergeShip: a merge into this order needs review. ${reason}`,
@@ -430,12 +460,14 @@ async function flagForReview(
     for (const secondary of secondaryStates) {
       await annotateOrder(
         admin,
+        fence,
         secondary,
         [REVIEW_TAG],
         `MergeShip: items from this order may already have been added to ${op.primaryOrderName}. Do not fulfill this order until reviewed.`,
       );
     }
   } catch (err: any) {
+    if (err instanceof OwnershipLostError) throw err;
     console.warn(`[merge] Could not flag orders for review on ${op.id}: ${err?.message}`);
   }
 
@@ -444,6 +476,7 @@ async function flagForReview(
     reason,
     primaryName: op.primaryOrderName,
     operationId: op.id,
+    disposition: "terminal",
   };
 }
 
@@ -460,12 +493,12 @@ async function reconcilePendingCommit(
 ): Promise<"COMMITTED" | "ABANDONED" | "NEEDS_REVIEW"> {
   const count = (await fetchAllLineItems(admin, op.primaryOrderId)).length;
   if (count === op.primaryLineItemCountBefore) {
-    await deps.journal.update(op.id, { status: "ABANDONED", lastError: "Order edit was not committed." });
+    await deps.journal.update(op, { status: "ABANDONED", lastError: "Order edit was not committed." });
     op.status = "ABANDONED";
     return "ABANDONED";
   }
   if (count === op.primaryLineItemCountBefore + op.addedLineItemCount) {
-    await deps.journal.update(op.id, { status: "COMMITTED" });
+    await deps.journal.update(op, { status: "COMMITTED" });
     op.status = "COMMITTED";
     return "COMMITTED";
   }
@@ -481,6 +514,7 @@ async function completeCommittedOperation(
   admin: AdminClient,
   op: MergeOperationRecord,
   deps: MergeDeps,
+  fence: () => Promise<void>,
 ): Promise<MergeResult> {
   const secondaries: JournalSecondary[] = op.secondaries.map((s) => ({ ...s }));
 
@@ -498,6 +532,7 @@ async function completeCommittedOperation(
           { ...op, secondaries },
           `${secondary.name} has fulfillment activity, but its items were already added to ${op.primaryOrderName}.`,
           deps,
+          fence,
         );
       }
 
@@ -507,23 +542,25 @@ async function completeCommittedOperation(
 
       if (!awaitingEarlierRequest) {
         try {
+          await fence();
           await requestCancel(admin, secondary, op.primaryOrderName);
           secondary.cancelRequestedAt = deps.now().toISOString();
-          await deps.journal.update(op.id, { secondaries });
+          await deps.journal.update(op, { secondaries });
         } catch (err: any) {
+          if (err instanceof OwnershipLostError) throw err;
           op.attempts += 1;
           const rejected = err instanceof ShopifyGraphqlError && err.rejected;
           // Outcome unknown: treat as possibly accepted so it isn't re-issued
           // until the grace period passes.
           if (!rejected) secondary.cancelRequestedAt = deps.now().toISOString();
-          await deps.journal.update(op.id, {
+          await deps.journal.update(op, {
             attempts: op.attempts,
             lastError: err?.message ?? String(err),
             secondaries,
           });
           if (rejected) {
             if (op.attempts >= deps.maxCancelAttempts) {
-              return flagForReview(admin, { ...op, secondaries }, `Shopify rejected cancelling ${secondary.name}: ${err.message}`, deps);
+              return flagForReview(admin, { ...op, secondaries }, `Shopify rejected cancelling ${secondary.name}: ${err.message}`, deps, fence);
             }
             return inProgress(op, `Cancelling ${secondary.name} was rejected; will retry.`);
           }
@@ -552,11 +589,12 @@ async function completeCommittedOperation(
       itemsCombined: secondary.items,
     });
     secondary.done = true;
-    await deps.journal.update(op.id, { secondaries });
+    await deps.journal.update(op, { secondaries });
     op.secondaries = secondaries;
 
-    await annotateOrder(admin, state, ["Merged"], `Consolidated into primary order ${op.primaryOrderName} by MergeShip`);
+    await annotateOrder(admin, fence, state, ["Merged"], `Consolidated into primary order ${op.primaryOrderName} by MergeShip`);
     try {
+      await fence();
       await gql(
         admin,
         `Close ${secondary.name}`,
@@ -571,6 +609,7 @@ async function completeCommittedOperation(
         "orderClose",
       );
     } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
       // Cosmetic (Orders badge); the cancellation is already confirmed.
       console.warn(`[merge] Could not close ${secondary.name}: ${err?.message}`);
     }
@@ -592,11 +631,11 @@ async function completeCommittedOperation(
   const carriedTags = secondaryStates
     .flatMap((s) => s.tags ?? [])
     .filter((t) => !["merged", REVIEW_TAG.toLowerCase()].includes(t.trim().toLowerCase()));
-  await annotateOrder(admin, primary, [...carriedTags, "Consolidated"], [
+  await annotateOrder(admin, fence, primary, [...carriedTags, "Consolidated"], [
     ...carriedNotes,
     `MergeShip: merged items from ${secondaries.map((s) => s.name).join(", ")} (already paid; shipping was not refunded).`,
   ]);
-  await deps.journal.update(op.id, { status: "COMPLETED", lastError: null });
+  await deps.journal.update(op, { status: "COMPLETED", lastError: null });
   op.status = "COMPLETED";
   console.log(`[merge] Completed ${op.primaryOrderName} ← ${secondaries.map((s) => s.name).join(", ")}`);
   return {
@@ -604,6 +643,7 @@ async function completeCommittedOperation(
     primaryName: op.primaryOrderName,
     mergedCount: secondaries.length,
     operationId: op.id,
+    disposition: "terminal",
   };
 }
 
@@ -637,14 +677,22 @@ async function requestCancel(admin: AdminClient, secondary: JournalSecondary, pr
 
 function inProgress(op: MergeOperationRecord, reason: string): MergeResult {
   console.warn(`[merge] In progress ${op.primaryOrderName} (${op.id}): ${reason}`);
-  return { outcome: "in_progress", reason, primaryName: op.primaryOrderName, operationId: op.id };
+  return {
+    outcome: "in_progress",
+    reason,
+    primaryName: op.primaryOrderName,
+    operationId: op.id,
+    disposition: "contention",
+  };
 }
 
 // ── Resume ────────────────────────────────────────────────────────────────────
 
 /**
- * Resumes every unfinished merge for the shop. Safe to call on every webhook
- * and dashboard load: completed work is skipped and each step is idempotent.
+ * Resumes every unfinished merge for the shop, taking a lease on each
+ * operation first so a concurrent or stale worker cannot drive it too. Safe
+ * to call on every webhook and dashboard load: completed work is skipped and
+ * each step is idempotent.
  */
 export async function resumeIncompleteMerges(
   admin: AdminClient,
@@ -653,30 +701,37 @@ export async function resumeIncompleteMerges(
 ): Promise<MergeResult[]> {
   const results: MergeResult[] = [];
   for (const op of await deps.journal.findUnfinished(shop)) {
-    if (inFlight.has(op.id)) continue;
     if (
       op.status === "PENDING_COMMIT" &&
       deps.now().getTime() - op.updatedAt.getTime() < deps.pendingCommitGraceMs
     ) {
       continue;
     }
-    inFlight.add(op.id);
+    const leased = await deps.journal.acquireLease(op.id, newLeaseToken(), deps.leaseTtlMs);
+    if (!leased) continue;
+    // The op lease is left to expire rather than released once work stops.
+    const fence = async () => {
+      await deps.outerFence?.();
+      await deps.journal.renew(leased, deps.leaseTtlMs);
+    };
     try {
-      if (op.status === "PENDING_COMMIT") {
-        const state = await reconcilePendingCommit(admin, op, deps);
+      if (leased.status === "PENDING_COMMIT") {
+        const state = await reconcilePendingCommit(admin, leased, deps);
         if (state === "ABANDONED") continue;
         if (state === "NEEDS_REVIEW") {
           results.push(
-            await flagForReview(admin, op, `Could not confirm whether the edit to ${op.primaryOrderName} was applied.`, deps),
+            await flagForReview(admin, leased, `Could not confirm whether the edit to ${leased.primaryOrderName} was applied.`, deps, fence),
           );
           continue;
         }
       }
-      results.push(await completeCommittedOperation(admin, op, deps));
+      results.push(await completeCommittedOperation(admin, leased, deps, fence));
     } catch (err: any) {
-      console.error(`[merge] Resume of ${op.id} failed; will retry: ${err?.message}`);
-    } finally {
-      inFlight.delete(op.id);
+      if (err instanceof OwnershipLostError) {
+        console.log(`[merge] Lost the lease on ${leased.id}; another worker owns it now.`);
+        continue;
+      }
+      console.error(`[merge] Resume of ${leased.id} failed; will retry: ${err?.message}`);
     }
   }
   return results;
@@ -684,15 +739,28 @@ export async function resumeIncompleteMerges(
 
 // ── Execute ───────────────────────────────────────────────────────────────────
 
-const skip = (reason: string): MergeResult => {
+const skip = (
+  reason: string,
+  disposition: MergeDisposition = "terminal",
+  code?: MergeResult["code"],
+): MergeResult => {
   console.log(`[merge] Skipped: ${reason}`);
-  return { outcome: "skipped", reason };
+  return { outcome: "skipped", reason, disposition, ...(code && { code }) };
 };
 
 const fail = (reason: string): MergeResult => {
   console.error(`[merge] Failed (no orders changed): ${reason}`);
-  return { outcome: "failed", reason };
+  return { outcome: "failed", reason, disposition: "transient" };
 };
+
+/** The result when a fence detects this worker lost its lease. No further
+ *  DB or Shopify writes are made. */
+const ownershipLost = (err: any): MergeResult => ({
+  outcome: "failed",
+  reason: `Lost ownership of the merge: ${err?.message ?? err}`,
+  disposition: "contention",
+  code: "OWNERSHIP_LOST",
+});
 
 /** Line-item fingerprint used to detect changes between checks and commit. */
 const fingerprint = (items: Map<string, MergeLineItem[]>) =>
@@ -716,166 +784,223 @@ export async function executeMerge(
 ): Promise<MergeResult> {
   if (orderIds.length < 2) return skip("At least two orders are required to merge.");
 
-  // 1 ── Never touch orders that belong to an unfinished or flagged merge ─────
-  const blocked = await deps.journal.findBlockingOrderIds(shop);
-  const blockedId = orderIds.find((id) => blocked.has(id));
-  if (blockedId) return skip(`Order ${blockedId} is part of an unfinished or flagged merge.`);
-
-  // 2 ── Load and evaluate fresh state ─────────────────────────────────────────
-  let orders: OrderState[];
-  let lineItems: Map<string, MergeLineItem[]>;
-  try {
-    orders = await fetchOrderStates(admin, orderIds);
-    lineItems = await fetchLineItemsById(admin, orders);
-  } catch (err: any) {
-    return fail(err?.message ?? "Could not load orders.");
+  // 0 ── Claim every order before touching anything ────────────────────────────
+  // All-or-nothing: if another merge holds any of these orders, nothing here
+  // changes. Claims are renewed by fence() before every mutation and released
+  // when the merge ends — a crashed worker's claims expire with the lease.
+  const ids = [...new Set(orderIds)].sort();
+  const token = newLeaseToken();
+  if (!(await deps.claims.acquire(shop, ids, token, deps.leaseTtlMs))) {
+    return skip("Another merge is holding one of the orders.", "contention", "CLAIM_CONFLICT");
   }
-
-  // 2b ── Keep only the orders that can combine with the new order ───────────
-  // One unsuitable candidate is excluded (and left untouched) rather than
-  // blocking an otherwise safe combine of the others.
-  const selection = selectCompatibleOrders(orderIds[0], orders, lineItems);
-  if (!selection.ok) return skip(selection.reason);
-  for (const e of selection.excluded) console.log(`[merge] Excluded ${e.name}: ${e.reason}`);
+  let held = ids;
+  let op: MergeOperationRecord | undefined;
+  const fence = async () => {
+    await deps.outerFence?.();
+    await deps.claims.renew(shop, held, token, deps.leaseTtlMs);
+    if (op) await deps.journal.renew(op, deps.leaseTtlMs);
+  };
   try {
-    const byLocation = await excludeByLocation(admin, selection.orders, lineItems);
-    if (!byLocation.ok) return skip(byLocation.reason);
-    orders = byLocation.orders;
-  } catch (err: any) {
-    return fail(err?.message ?? "Could not verify fulfillment locations.");
-  }
-  lineItems = new Map(orders.map((o) => [o.id, lineItems.get(o.id)!]));
-  const groupIds = orders.map((o) => o.id);
+    // 1 ── Never touch orders that belong to an unfinished or flagged merge ──
+    // Re-checked AFTER claiming: journal rows are only created while the
+    // creator holds the claims, so this either sees the row or the creator's
+    // claim would still be held — closing the check-then-act window.
+    const blocked = await deps.journal.findBlockingOrderIds(shop);
+    const blockedId = ids.find((id) => blocked.has(id));
+    if (blockedId) {
+      return skip(`Order ${blockedId} is part of an unfinished or flagged merge.`, "contention", "BLOCKED");
+    }
 
-  const evaluation = evaluateMergeGroup(orders, lineItems);
-  if (!evaluation.ok) return skip(evaluation.reason);
-  const { primary, secondaries } = evaluation;
-  const primaryCountBefore = lineItems.get(primary.id)!.length;
+    // 2 ── Load and evaluate fresh state ─────────────────────────────────────
+    let orders: OrderState[];
+    let lineItems: Map<string, MergeLineItem[]>;
+    try {
+      orders = await fetchOrderStates(admin, orderIds);
+      lineItems = await fetchLineItemsById(admin, orders);
+    } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
+      return fail(err?.message ?? "Could not load orders.");
+    }
 
-  let location: LocationDecision;
-  try {
-    location = await resolveMergeLocation(admin, orders, lineItems);
-  } catch (err: any) {
-    return fail(err?.message ?? "Could not verify fulfillment locations.");
-  }
-  if (!location.ok) return skip(location.reason);
-  const locationId = location.locationId;
+    // 2b ── Keep only the orders that can combine with the new order ─────────
+    // One unsuitable candidate is excluded (and left untouched) rather than
+    // blocking an otherwise safe combine of the others.
+    const selection = selectCompatibleOrders(orderIds[0], orders, lineItems);
+    if (!selection.ok) return skip(selection.reason);
+    for (const e of selection.excluded) console.log(`[merge] Excluded ${e.name}: ${e.reason}`);
+    try {
+      const byLocation = await excludeByLocation(admin, selection.orders, lineItems);
+      if (!byLocation.ok) return skip(byLocation.reason);
+      orders = byLocation.orders;
+    } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
+      return fail(err?.message ?? "Could not verify fulfillment locations.");
+    }
+    lineItems = new Map(orders.map((o) => [o.id, lineItems.get(o.id)!]));
+    const groupIds = orders.map((o) => o.id);
 
-  // 3 ── Build the order edit (uncommitted — abandoning it changes nothing) ──
-  let calcId: string;
-  let addedLineItemCount = 0;
-  try {
-    const begin = await gql(
-      admin,
-      `Begin edit of ${primary.name}`,
-      `#graphql
-        mutation MergeEditBegin($id: ID!) {
-          orderEditBegin(id: $id) {
-            calculatedOrder { id }
-            userErrors { field message }
-          }
-        }`,
-      { id: primary.id },
-      "orderEditBegin",
-    );
-    calcId = begin.calculatedOrder?.id;
-    if (!calcId) throw new ShopifyGraphqlError("orderEditBegin returned no calculated order.", false);
+    // Candidates narrowed away are released early so a merge touching only
+    // them can proceed.
+    const dropped = held.filter((id) => !groupIds.includes(id));
+    if (dropped.length) {
+      held = groupIds;
+      await deps.claims
+        .release(shop, dropped, token)
+        .catch((err: any) => console.warn(`[merge] Could not release excluded claims: ${err?.message}`));
+    }
 
-    for (const secondary of secondaries) {
-      for (const item of lineItems.get(secondary.id)!) {
-        if (item.currentQuantity <= 0) continue;
-        const added = await gql(
-          admin,
-          `Add "${item.name}" from ${secondary.name}`,
-          `#graphql
-            mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
-              orderEditAddVariant(
-                id: $id
-                variantId: $variantId
-                quantity: $quantity
-                locationId: $locationId
-                allowDuplicates: true
-              ) {
-                calculatedLineItem { id }
-                userErrors { field message }
-              }
-            }`,
-          // Anchor transferred items to the orders' shared location.
-          { id: calcId, variantId: item.variant!.id, quantity: item.currentQuantity, locationId },
-          "orderEditAddVariant",
-        );
-        const calcLineItemId = added.calculatedLineItem?.id;
-        if (!calcLineItemId) throw new ShopifyGraphqlError(`No line item returned for "${item.name}".`, false);
-        addedLineItemCount += 1;
+    const evaluation = evaluateMergeGroup(orders, lineItems);
+    if (!evaluation.ok) return skip(evaluation.reason);
+    const { primary, secondaries } = evaluation;
+    const primaryCountBefore = lineItems.get(primary.id)!.length;
 
-        await gql(
-          admin,
-          `Discount "${item.name}" from ${secondary.name}`,
-          `#graphql
-            mutation MergeEditDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
-              orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
-                calculatedLineItem { id }
-                userErrors { field message }
-              }
-            }`,
-          {
-            id: calcId,
-            lineItemId: calcLineItemId,
-            discount: { percentValue: 100, description: `Merged from ${secondary.name}, already paid` },
-          },
-          "orderEditAddLineItemDiscount",
+    let location: LocationDecision;
+    try {
+      location = await resolveMergeLocation(admin, orders, lineItems);
+    } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
+      return fail(err?.message ?? "Could not verify fulfillment locations.");
+    }
+    if (!location.ok) {
+      return skip(location.reason, "terminal", location.accessDenied ? "LOCATION_ACCESS" : undefined);
+    }
+    const locationId = location.locationId;
+
+    // 3 ── Build the order edit (uncommitted — abandoning it changes nothing) ──
+    let calcId: string;
+    let addedLineItemCount = 0;
+    try {
+      await fence();
+      const begin = await gql(
+        admin,
+        `Begin edit of ${primary.name}`,
+        `#graphql
+          mutation MergeEditBegin($id: ID!) {
+            orderEditBegin(id: $id) {
+              calculatedOrder { id }
+              userErrors { field message }
+            }
+          }`,
+        { id: primary.id },
+        "orderEditBegin",
+      );
+      calcId = begin.calculatedOrder?.id;
+      if (!calcId) throw new ShopifyGraphqlError("orderEditBegin returned no calculated order.", false);
+
+      for (const secondary of secondaries) {
+        for (const item of lineItems.get(secondary.id)!) {
+          if (item.currentQuantity <= 0) continue;
+          await fence();
+          const added = await gql(
+            admin,
+            `Add "${item.name}" from ${secondary.name}`,
+            `#graphql
+              mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
+                orderEditAddVariant(
+                  id: $id
+                  variantId: $variantId
+                  quantity: $quantity
+                  locationId: $locationId
+                  allowDuplicates: true
+                ) {
+                  calculatedLineItem { id }
+                  userErrors { field message }
+                }
+              }`,
+            // Anchor transferred items to the orders' shared location.
+            { id: calcId, variantId: item.variant!.id, quantity: item.currentQuantity, locationId },
+            "orderEditAddVariant",
+          );
+          const calcLineItemId = added.calculatedLineItem?.id;
+          if (!calcLineItemId) throw new ShopifyGraphqlError(`No line item returned for "${item.name}".`, false);
+          addedLineItemCount += 1;
+
+          await fence();
+          await gql(
+            admin,
+            `Discount "${item.name}" from ${secondary.name}`,
+            `#graphql
+              mutation MergeEditDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
+                orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
+                  calculatedLineItem { id }
+                  userErrors { field message }
+                }
+              }`,
+            {
+              id: calcId,
+              lineItemId: calcLineItemId,
+              discount: { percentValue: 100, description: `Merged from ${secondary.name}, already paid` },
+            },
+            "orderEditAddLineItemDiscount",
+          );
+        }
+      }
+    } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
+      return fail(err?.message ?? "Could not build the order edit.");
+    }
+
+    // 4 ── Re-verify immediately before committing ────────────────────────────
+    // Orders can be fulfilled, edited, refunded or cancelled while the edit
+    // was being built; commit only if nothing relevant changed. A changed
+    // group is transient: a retry re-evaluates fresh state (and turns
+    // terminal if the orders truly no longer qualify).
+    try {
+      const freshOrders = await fetchOrderStates(admin, groupIds);
+      const freshItems = await fetchLineItemsById(admin, freshOrders);
+      const recheck = evaluateMergeGroup(freshOrders, freshItems);
+      if (!recheck.ok) return skip(`Orders changed during the merge: ${recheck.reason}`, "transient");
+      if (fingerprint(freshItems) !== fingerprint(lineItems)) {
+        return skip("Order line items changed during the merge.", "transient");
+      }
+      const freshLocation = await resolveMergeLocation(admin, freshOrders, freshItems);
+      if (!freshLocation.ok) {
+        return skip(
+          `Orders changed during the merge: ${freshLocation.reason}`,
+          "transient",
+          freshLocation.accessDenied ? "LOCATION_ACCESS" : undefined,
         );
       }
+      if (freshLocation.locationId !== locationId) {
+        return skip("Fulfillment location changed during the merge.", "transient");
+      }
+    } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
+      return fail(err?.message ?? "Could not re-verify orders.");
     }
-  } catch (err: any) {
-    return fail(err?.message ?? "Could not build the order edit.");
-  }
 
-  // 4 ── Re-verify immediately before committing ──────────────────────────────
-  // Orders can be fulfilled, edited, refunded or cancelled while the edit was
-  // being built; commit only if nothing relevant changed.
-  try {
-    const freshOrders = await fetchOrderStates(admin, groupIds);
-    const freshItems = await fetchLineItemsById(admin, freshOrders);
-    const recheck = evaluateMergeGroup(freshOrders, freshItems);
-    if (!recheck.ok) return skip(`Orders changed during the merge: ${recheck.reason}`);
-    if (fingerprint(freshItems) !== fingerprint(lineItems)) {
-      return skip("Order line items changed during the merge.");
+    // 5 ── Journal the intent BEFORE committing ───────────────────────────────
+    try {
+      await fence();
+      op = await deps.journal.create(
+        {
+          shop,
+          status: "PENDING_COMMIT",
+          primaryOrderId: primary.id,
+          primaryOrderName: primary.name,
+          customerId: primary.customer?.id ?? null,
+          primaryLineItemCountBefore: primaryCountBefore,
+          addedLineItemCount,
+          secondaries: secondaries.map((s) => ({
+            id: s.id,
+            name: s.name,
+            items: lineItems.get(s.id)!.reduce((n, i) => n + Math.max(i.currentQuantity, 0), 0),
+            done: false,
+          })),
+          involvedOrderIds: [primary.id, ...secondaries.map((s) => s.id)],
+        },
+        token,
+        deps.leaseTtlMs,
+      );
+    } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
+      return fail(`Could not record the merge before committing: ${err?.message}`);
     }
-    const freshLocation = await resolveMergeLocation(admin, freshOrders, freshItems);
-    if (!freshLocation.ok) return skip(`Orders changed during the merge: ${freshLocation.reason}`);
-    if (freshLocation.locationId !== locationId) return skip("Fulfillment location changed during the merge.");
-  } catch (err: any) {
-    return fail(err?.message ?? "Could not re-verify orders.");
-  }
+    const operation = op;
 
-  // 5 ── Journal the intent BEFORE committing ─────────────────────────────────
-  let op: MergeOperationRecord;
-  try {
-    op = await deps.journal.create({
-      shop,
-      status: "PENDING_COMMIT",
-      primaryOrderId: primary.id,
-      primaryOrderName: primary.name,
-      customerId: primary.customer?.id ?? null,
-      primaryLineItemCountBefore: primaryCountBefore,
-      addedLineItemCount,
-      secondaries: secondaries.map((s) => ({
-        id: s.id,
-        name: s.name,
-        items: lineItems.get(s.id)!.reduce((n, i) => n + Math.max(i.currentQuantity, 0), 0),
-        done: false,
-      })),
-      involvedOrderIds: [primary.id, ...secondaries.map((s) => s.id)],
-    });
-  } catch (err: any) {
-    return fail(`Could not record the merge before committing: ${err?.message}`);
-  }
-
-  inFlight.add(op.id);
-  try {
     // 6 ── Commit ──────────────────────────────────────────────────────────────
     try {
+      await fence();
       await gql(
         admin,
         `Commit edit of ${primary.name}`,
@@ -889,30 +1014,40 @@ export async function executeMerge(
         { id: calcId, staffNote: `MergeShip: merged items from ${secondaries.map((s) => s.name).join(", ")}.` },
         "orderEditCommit",
       );
-      await deps.journal.update(op.id, { status: "COMMITTED" });
-      op.status = "COMMITTED";
+      await deps.journal.update(operation, { status: "COMMITTED" });
+      operation.status = "COMMITTED";
     } catch (err: any) {
+      if (err instanceof OwnershipLostError) throw err;
       if (err instanceof ShopifyGraphqlError && err.rejected) {
-        await deps.journal.update(op.id, { status: "ABANDONED", lastError: err.message });
+        await deps.journal.update(operation, { status: "ABANDONED", lastError: err.message });
         return fail(err.message);
       }
       // Unknown outcome: the edit may or may not have been applied. Leave the
       // op PENDING_COMMIT (orders stay blocked); resume reconciles it after
       // the grace period.
-      await deps.journal.update(op.id, { lastError: err?.message ?? String(err) });
-      return inProgress(op, `Commit outcome unknown: ${err?.message}`);
+      await deps.journal.update(operation, { lastError: err?.message ?? String(err) });
+      return inProgress(operation, `Commit outcome unknown: ${err?.message}`);
     }
 
     if (locationId) await logMergedLocation(admin, primary, locationId);
 
     // 7 ── Cancel secondaries and confirm ──────────────────────────────────────
     try {
-      return await completeCommittedOperation(admin, op, deps);
+      return await completeCommittedOperation(admin, operation, deps, fence);
     } catch (err: any) {
-      await deps.journal.update(op.id, { lastError: err?.message ?? String(err) });
-      return inProgress(op, err?.message ?? "Could not finish the merge.");
+      if (err instanceof OwnershipLostError) throw err;
+      await deps.journal.update(operation, { lastError: err?.message ?? String(err) });
+      return inProgress(operation, err?.message ?? "Could not finish the merge.");
     }
+  } catch (err: any) {
+    if (err instanceof OwnershipLostError) return ownershipLost(err);
+    throw err;
   } finally {
-    inFlight.delete(op.id);
+    // Release must never throw out of finally — the claims expire anyway.
+    try {
+      await deps.claims.release(shop, held, token);
+    } catch (err: any) {
+      console.warn(`[merge] Could not release claims for ${shop}: ${err?.message}`);
+    }
   }
 }

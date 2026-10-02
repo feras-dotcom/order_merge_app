@@ -58,4 +58,29 @@ describe("gql", () => {
     expect(err.rejected).toBe(false);
     expect(err.message).toContain("socket hang up");
   });
+
+  it("aborts a call that only resolves on abort", async () => {
+    let aborted = false;
+    const hanging = {
+      graphql: (_q: string, options?: { signal?: AbortSignal }) =>
+        new Promise<Response>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new Error("The operation was aborted."));
+          });
+        }),
+    };
+    const err = await capture(gql(hanging, "t", "q", {}, "orderUpdate", "userErrors", 20));
+    expect(err).toBeInstanceOf(ShopifyGraphqlError);
+    expect(err.rejected).toBe(false);
+    expect(aborted).toBe(true);
+  });
+
+  it("times out even if the client ignores the abort signal", async () => {
+    const hanging = { graphql: () => new Promise<Response>(() => {}) };
+    const err = await capture(gql(hanging, "t", "q", {}, "orderUpdate", "userErrors", 20));
+    expect(err).toBeInstanceOf(ShopifyGraphqlError);
+    expect(err.rejected).toBe(false);
+    expect(err.message).toContain("timed out");
+  });
 });

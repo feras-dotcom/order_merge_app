@@ -12,11 +12,10 @@ import { gql } from "../lib/graphql.server";
 import { getSettings } from "../lib/settings.server";
 import { isOnboardingComplete } from "../lib/onboarding";
 
-// ── In-memory lock: prevents two concurrent webhook deliveries from merging
-// the same address+shipping group simultaneously. Keyed on the normalized
-// group key so independent groups are never blocked by each other.
-// This is sufficient for a single-instance Railway deployment. If the app
-// ever runs multiple replicas, replace this with a database advisory lock.
+// ── In-memory fast path: prevents two concurrent webhook deliveries in this
+// process from evaluating the same address+shipping group simultaneously.
+// The real guard is the durable per-order claim (MergeClaim) taken inside
+// executeMerge — this only saves the extra work. Safe across replicas.
 const activeGroupMerges = new Set<string>();
 
 // ── ORDERS_CREATE webhook handler ─────────────────────────────────────────────

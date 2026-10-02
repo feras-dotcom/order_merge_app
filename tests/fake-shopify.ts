@@ -12,8 +12,11 @@ import type {
   MergeHistoryEntry,
   MergeJournal,
   MergeOperationRecord,
+  NewMergeOperation,
 } from "../app/lib/merge-journal.server";
 import type { MergeDeps } from "../app/lib/merge.server";
+import type { ClaimStore } from "../app/lib/claims.server";
+import { OwnershipLostError } from "../app/lib/ownership.server";
 
 export interface FakeOrder extends OrderState {
   lineItems: MergeLineItem[];
@@ -49,8 +52,10 @@ export function makeFulfillmentOrder(
 }
 
 type Handler = (vars: any) => any;
-/** Returning undefined falls through to the default behaviour. */
-export type Interceptor = (vars: any, call: number) => any | undefined;
+/** Returning undefined falls through to the default behaviour. May be async —
+ *  a returned Promise is awaited, so a test can pause one worker mid-call
+ *  while a second worker runs. */
+export type Interceptor = (vars: any, call: number) => any | Promise<any> | undefined;
 
 let lineItemSeq = 1000;
 
@@ -292,13 +297,74 @@ export class FakeShopify {
       const count = (this.callCounts.get(name) ?? 0) + 1;
       this.callCounts.set(name, count);
       const vars = options?.variables ?? {};
-      const intercepted = this.interceptors.get(name)?.(vars, count);
+      const intercepted = await this.interceptors.get(name)?.(vars, count);
       if (intercepted !== undefined) return new Response(JSON.stringify(intercepted));
       const handler = this.handlers[name];
       if (!handler) throw new Error(`FakeShopify: unhandled operation ${name}`);
       return new Response(JSON.stringify(handler(vars)));
     },
   };
+}
+
+/** In-memory claims with the same token+expiry semantics as the Postgres
+ *  store. Share `clock` between workers so their leases race on one timeline. */
+export class MemoryClaimStore implements ClaimStore {
+  claims = new Map<string, { token: string; leasedUntil: number }>();
+  clock: () => Date = () => new Date();
+
+  private key(shop: string, orderId: string) {
+    return `${shop} ${orderId}`;
+  }
+
+  async acquire(shop: string, orderIds: string[], token: string, ttlMs: number) {
+    const ids = [...new Set(orderIds)].sort();
+    const now = this.clock().getTime();
+    // All-or-nothing, like the transactional insert.
+    if (
+      ids.some((id) => {
+        const claim = this.claims.get(this.key(shop, id));
+        return claim && claim.leasedUntil >= now;
+      })
+    ) {
+      return false;
+    }
+    for (const id of ids) {
+      this.claims.set(this.key(shop, id), { token, leasedUntil: now + ttlMs });
+    }
+    return true;
+  }
+
+  async renew(shop: string, orderIds: string[], token: string, ttlMs: number) {
+    const now = this.clock().getTime();
+    const ids = [...new Set(orderIds)];
+    const matched = ids.filter((id) => {
+      const claim = this.claims.get(this.key(shop, id));
+      return claim && claim.token === token && claim.leasedUntil >= now;
+    });
+    if (matched.length !== ids.length) {
+      throw new OwnershipLostError(`Merge claim lost for ${shop}.`);
+    }
+    for (const id of ids) this.claims.get(this.key(shop, id))!.leasedUntil = now + ttlMs;
+  }
+
+  async release(shop: string, orderIds: string[], token: string) {
+    for (const id of new Set(orderIds)) {
+      const key = this.key(shop, id);
+      if (this.claims.get(key)?.token === token) this.claims.delete(key);
+    }
+  }
+
+  async reapExpired() {
+    const now = this.clock().getTime();
+    let reaped = 0;
+    for (const [key, claim] of this.claims) {
+      if (claim.leasedUntil < now) {
+        this.claims.delete(key);
+        reaped += 1;
+      }
+    }
+    return reaped;
+  }
 }
 
 export class MemoryJournal implements MergeJournal {
@@ -308,21 +374,47 @@ export class MemoryJournal implements MergeJournal {
   private seq = 1;
   clock: () => Date = () => new Date();
 
-  async create(op: Omit<MergeOperationRecord, "id" | "attempts" | "lastError" | "updatedAt">) {
+  private owned(op: Pick<MergeOperationRecord, "id" | "leaseToken">): MergeOperationRecord {
+    const row = this.ops.get(op.id);
+    const now = this.clock().getTime();
+    if (!row || row.leaseToken !== op.leaseToken || !row.leasedUntil || row.leasedUntil.getTime() < now) {
+      throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+    }
+    return row;
+  }
+
+  async create(op: NewMergeOperation, token: string, ttlMs: number) {
     if (this.failCreate) throw new Error("database unavailable");
+    const now = this.clock();
     const record: MergeOperationRecord = {
       ...structuredClone(op),
       id: `op-${this.seq++}`,
       attempts: 0,
       lastError: null,
-      updatedAt: this.clock(),
+      leaseToken: token,
+      leasedUntil: new Date(now.getTime() + ttlMs),
+      updatedAt: now,
     };
     this.ops.set(record.id, record);
     return structuredClone(record);
   }
-  async update(id: string, patch: Partial<MergeOperationRecord>) {
-    const op = this.ops.get(id)!;
-    Object.assign(op, structuredClone(patch), { updatedAt: this.clock() });
+  async update(op: Pick<MergeOperationRecord, "id" | "leaseToken">, patch: Partial<MergeOperationRecord>) {
+    Object.assign(this.owned(op), structuredClone(patch), { updatedAt: this.clock() });
+  }
+  async renew(op: Pick<MergeOperationRecord, "id" | "leaseToken">, ttlMs: number) {
+    const row = this.owned(op);
+    row.leasedUntil = new Date(this.clock().getTime() + ttlMs);
+    row.updatedAt = this.clock();
+  }
+  async acquireLease(opId: string, token: string, ttlMs: number) {
+    const row = this.ops.get(opId);
+    const now = this.clock().getTime();
+    if (!row || !["PENDING_COMMIT", "COMMITTED"].includes(row.status)) return null;
+    if (row.leasedUntil && row.leasedUntil.getTime() >= now) return null;
+    row.leaseToken = token;
+    row.leasedUntil = new Date(now + ttlMs);
+    row.updatedAt = this.clock();
+    return structuredClone(row);
   }
   async findUnfinished(shop: string) {
     return [...this.ops.values()]
@@ -335,6 +427,23 @@ export class MemoryJournal implements MergeJournal {
         .filter((o) => o.shop === shop && ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(o.status))
         .flatMap((o) => o.involvedOrderIds),
     );
+  }
+  async findBlockingOrderStatuses(shop: string) {
+    const map = new Map<string, MergeOperationRecord["status"]>();
+    for (const o of this.ops.values()) {
+      if (o.shop !== shop || !["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(o.status)) continue;
+      for (const orderId of o.involvedOrderIds) map.set(orderId, o.status);
+    }
+    return map;
+  }
+  async findShopsWithUnfinished() {
+    return [
+      ...new Set(
+        [...this.ops.values()]
+          .filter((o) => ["PENDING_COMMIT", "COMMITTED"].includes(o.status))
+          .map((o) => o.shop),
+      ),
+    ];
   }
   async recordHistory(entry: MergeHistoryEntry) {
     if (!this.history.some((h) => h.shop === entry.shop && h.mergedOrderId === entry.mergedOrderId)) {
@@ -351,8 +460,12 @@ export class MemoryJournal implements MergeJournal {
 export function testDeps(journal: MemoryJournal, overrides: Partial<MergeDeps> = {}): MergeDeps {
   let now = new Date("2026-10-01T12:00:00Z").getTime();
   journal.clock = () => new Date(now);
+  const claims = new MemoryClaimStore();
+  claims.clock = () => new Date(now);
   return {
     journal,
+    claims,
+    leaseTtlMs: 90_000,
     sleep: async (ms) => {
       now += ms;
     },

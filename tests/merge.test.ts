@@ -70,6 +70,7 @@ describe("executeMerge — conservative eligibility (nothing changes)", () => {
     const { shopify, journal, deps } = setup(orders as any);
     const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
     expect(result.outcome).toBe("skipped");
+    expect(result.disposition).toBe("terminal");
     expect(shopify.mutationCalls("MergeEditBegin")).toBe(0);
     expect(noWrites(shopify)).toBe(true);
     expect(journal.ops.size).toBe(0);
@@ -98,7 +99,7 @@ describe("executeMerge — conservative eligibility (nothing changes)", () => {
       return undefined;
     });
     const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("skipped");
+    expect(result).toMatchObject({ outcome: "skipped", disposition: "transient" });
     expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
     expect(shopify.order(1).lineItems).toHaveLength(1);
     expect(journal.ops.size).toBe(0);
@@ -141,7 +142,7 @@ describe("executeMerge — commit outcomes", () => {
     const { shopify, journal, deps } = setup();
     shopify.on("MergeEditCommit", () => userError("orderEditCommit"));
     const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("failed");
+    expect(result).toMatchObject({ outcome: "failed", disposition: "transient" });
     expect(journal.only().status).toBe("ABANDONED");
     expect(shopify.order(2).cancelCount).toBe(0);
     expect((await journal.findBlockingOrderIds(SHOP)).size).toBe(0);
@@ -232,6 +233,8 @@ describe("executeMerge — after commit (secondary work)", () => {
     expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("skipped");
 
     // The lost request might have been accepted, so it is not re-issued yet.
+    // (2min > lease TTL: the finished worker's op lease has expired.)
+    advance(deps, 2 * 60 * 1000);
     expect((await resumeIncompleteMerges(shopify.admin, SHOP, deps))[0].outcome).toBe("in_progress");
     expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(1);
 
@@ -247,6 +250,7 @@ describe("executeMerge — after commit (secondary work)", () => {
     const { shopify, journal, deps } = setup([makeOrder(1), makeOrder(2, { cancelDelayReads: 5 })]);
     expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("in_progress");
     expect(journal.only().status).toBe("COMMITTED");
+    advance(deps, 2 * 60 * 1000); // past the op lease TTL, within the cancel grace
     const [resumed] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
     expect(resumed.outcome).toBe("merged");
     expect(shopify.order(2).cancelCount).toBe(1); // never cancelled twice
@@ -256,6 +260,7 @@ describe("executeMerge — after commit (secondary work)", () => {
     const { shopify, journal, deps } = setup();
     shopify.on("MergeCancelSecondary", () => userError("orderCancel", "orderCancelUserErrors", "Cannot cancel"));
     expect((await executeMerge(shopify.admin, SHOP, IDS, deps)).outcome).toBe("in_progress");
+    advance(deps, 2 * 60 * 1000); // past the op lease TTL so resume can take it
     const [second] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
     expect(second.outcome).toBe("needs_review");
     expect(journal.only().status).toBe("NEEDS_REVIEW");
@@ -304,6 +309,7 @@ describe("executeMerge — three orders", () => {
     expect(first.outcome).toBe("in_progress");
     expect(journal.history.map((h) => h.mergedOrderName)).toEqual(["#2"]);
 
+    advance(deps, 2 * 60 * 1000); // past the op lease TTL so resume can take it
     const [resumed] = await resumeIncompleteMerges(shopify.admin, SHOP, deps);
     expect(resumed.outcome).toBe("merged");
     expect(shopify.order(2).cancelCount).toBe(1);
@@ -348,8 +354,8 @@ describe("executeMerge — fulfillment location rule", () => {
   it("multi-location shop without the optional scope: skipped, nothing changed", async () => {
     const { shopify, journal, deps } = multiLocation(undefined, false);
     const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    expect(result.outcome).toBe("skipped");
-    expect(result.reason).toContain("Settings");
+    expect(result).toMatchObject({ outcome: "skipped", disposition: "terminal", code: "LOCATION_ACCESS" });
+    expect(result.reason).toContain("allow location access");
     expect(noWrites(shopify)).toBe(true);
     expect(journal.ops.size).toBe(0);
   });
