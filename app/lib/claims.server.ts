@@ -5,7 +5,7 @@
 
 import type { PrismaClient } from "@prisma/client";
 import defaultDb from "../db.server";
-import { DB_NOW, dbNowPlus, OwnershipLostError } from "./ownership.server";
+import { ClaimContentionError, DB_WALL, dbWallPlus, OwnershipLostError } from "./ownership.server";
 
 export interface ClaimStore {
   /** All-or-nothing. true if every order is now claimed with `token`; false if
@@ -20,8 +20,7 @@ export interface ClaimStore {
   reapExpired(): Promise<number>;
 }
 
-/** Marker for the "fewer rows than ids" rollback inside acquire's transaction. */
-class ClaimContentionError extends Error {}
+
 
 const isContention = (err: unknown): boolean => {
   if (err instanceof ClaimContentionError) return true;
@@ -48,12 +47,12 @@ export function prismaClaimStore(db: PrismaClient = defaultDb): ClaimStore {
           // mean fewer returned than requested — roll everything back.
           const rows = await tx.$queryRaw<{ orderId: string }[]>`
             INSERT INTO "MergeClaim" ("id", "shop", "orderId", "leaseToken", "leasedUntil", "createdAt")
-            SELECT r.id, ${shop}, r."orderId", ${token}, ${dbNowPlus(ttlMs)}, ${DB_NOW}
+            SELECT r.id, ${shop}, r."orderId", ${token}, ${dbWallPlus(ttlMs)}, ${DB_WALL}
             FROM unnest(${rowIds}::text[], ${ids}::text[]) WITH ORDINALITY AS r(id, "orderId", ord)
             ORDER BY r.ord
             ON CONFLICT ("shop", "orderId") DO UPDATE
               SET "leaseToken" = EXCLUDED."leaseToken", "leasedUntil" = EXCLUDED."leasedUntil"
-              WHERE "MergeClaim"."leasedUntil" < ${DB_NOW}
+              WHERE "MergeClaim"."leasedUntil" < ${DB_WALL}
             RETURNING "orderId"`;
           if (rows.length < ids.length) throw new ClaimContentionError();
         });
@@ -67,9 +66,9 @@ export function prismaClaimStore(db: PrismaClient = defaultDb): ClaimStore {
       const ids = [...new Set(orderIds)];
       if (!ids.length) return;
       const updated = await db.$executeRaw`
-        UPDATE "MergeClaim" SET "leasedUntil" = ${dbNowPlus(ttlMs)}
+        UPDATE "MergeClaim" SET "leasedUntil" = ${dbWallPlus(ttlMs)}
         WHERE "shop" = ${shop} AND "orderId" = ANY(${ids})
-          AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_NOW}`;
+          AND "leaseToken" = ${token} AND "leasedUntil" > ${DB_WALL}`;
       if (updated !== ids.length) {
         throw new OwnershipLostError(`Merge claim lost for ${shop} (${ids.length} orders).`);
       }
@@ -82,7 +81,7 @@ export function prismaClaimStore(db: PrismaClient = defaultDb): ClaimStore {
         WHERE "shop" = ${shop} AND "orderId" = ANY(${ids}) AND "leaseToken" = ${token}`;
     },
     async reapExpired() {
-      return db.$executeRaw`DELETE FROM "MergeClaim" WHERE "leasedUntil" < ${DB_NOW}`;
+      return db.$executeRaw`DELETE FROM "MergeClaim" WHERE "leasedUntil" < ${DB_WALL}`;
     },
   };
 }

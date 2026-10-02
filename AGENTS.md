@@ -13,7 +13,7 @@ Use the [Shopify AI Toolkit](https://shopify.dev/docs/apps/build/ai-toolkit) for
 - Live end-to-end merge against a dev store (creates and cancels real test orders; overrides only the single-location check):
   `MERGESHIP_LIVE_STORE=<store>.myshopify.com MERGESHIP_LIVE_VARIANT=<variant gid> MERGESHIP_LIVE_CUSTOMER=<customer gid> npx vitest run tests/live-e2e.test.ts`
 - Real-Postgres store tests (claims, work items, operation leases; they run with the database session timezone set to Asia/Tokyo to prove the UTC clock discipline): `MERGESHIP_TEST_DATABASE_URL=postgresql://... npx vitest run tests/postgres-stores.test.ts`. The URL must point at a disposable database; the test runs `prisma migrate deploy` against it.
-- Validate any new GraphQL against the served API version with `npx shopify app execute --store <store> --version 2025-10 --query-file <file>`. The app requests 2025-01, which is no longer supported, so Shopify serves the oldest supported version (2025-10 at the time of writing).
+- Validate any new GraphQL against the pinned API version 2026-04 with `npx shopify app execute --store <store> --version 2026-04 --query-file <file>`. The app pins `ApiVersion.April26` in `app/shopify.server.ts`.
 
 ## Merge engine invariants
 

@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import defaultDb from "../db.server";
-import { DB_NOW, dbNowPlus, OwnershipLostError } from "./ownership.server";
+import { DB_WALL, dbWallPlus, OwnershipLostError } from "./ownership.server";
 
 // ── Merge journal ─────────────────────────────────────────────────────────────
 // Persistence for MergeOperation (see prisma/schema.prisma). Behind an
@@ -108,7 +108,7 @@ const toRecord = (row: any): MergeOperationRecord => ({
 });
 
 const leasedCondition = (op: Pick<MergeOperationRecord, "id" | "leaseToken">) =>
-  Prisma.sql`"id" = ${op.id} AND "leaseToken" = ${op.leaseToken} AND "leasedUntil" >= ${DB_NOW}`;
+  Prisma.sql`"id" = ${op.id} AND "leaseToken" = ${op.leaseToken} AND "leasedUntil" >= ${DB_WALL}`;
 
 export function makeMergeJournal(db: PrismaClient): MergeJournal {
   return {
@@ -122,7 +122,7 @@ export function makeMergeJournal(db: PrismaClient): MergeJournal {
         ${crypto.randomUUID()}, ${op.shop}, ${op.status}, ${op.primaryOrderId},
         ${op.primaryOrderName}, ${op.customerId}, ${op.primaryLineItemCountBefore},
         ${op.addedLineItemCount}, ${JSON.stringify(op.secondaries)}::jsonb,
-        ${op.involvedOrderIds}, 0, ${token}, ${dbNowPlus(ttlMs)}, ${DB_NOW}, ${DB_NOW}
+        ${op.involvedOrderIds}, 0, ${token}, ${dbWallPlus(ttlMs)}, ${DB_WALL}, ${DB_WALL}
       )
       RETURNING *`;
       return toRecord(rows[0]);
@@ -136,22 +136,22 @@ export function makeMergeJournal(db: PrismaClient): MergeJournal {
       if ("lastError" in patch) sets.push(Prisma.sql`"lastError" = ${patch.lastError}`);
       if (!sets.length) return;
       const updated = await db.$executeRaw`
-      UPDATE "MergeOperation" SET ${Prisma.join(sets)}, "updatedAt" = ${DB_NOW}
+      UPDATE "MergeOperation" SET ${Prisma.join(sets)}, "updatedAt" = ${DB_WALL}
       WHERE ${leasedCondition(op)}`;
       if (updated === 0) throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
     },
     async renew(op, ttlMs) {
       const updated = await db.$executeRaw`
-      UPDATE "MergeOperation" SET "leasedUntil" = ${dbNowPlus(ttlMs)}, "updatedAt" = ${DB_NOW}
+      UPDATE "MergeOperation" SET "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
       WHERE ${leasedCondition(op)}`;
       if (updated === 0) throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
     },
     async acquireLease(opId, token, ttlMs) {
       const rows = await db.$queryRaw<any[]>`
       UPDATE "MergeOperation"
-      SET "leaseToken" = ${token}, "leasedUntil" = ${dbNowPlus(ttlMs)}, "updatedAt" = ${DB_NOW}
+      SET "leaseToken" = ${token}, "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
       WHERE "id" = ${opId} AND "status" IN ('PENDING_COMMIT', 'COMMITTED')
-        AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_NOW})
+        AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_WALL})
       RETURNING *`;
       return rows.length ? toRecord(rows[0]) : null;
     },
@@ -196,10 +196,17 @@ export function makeMergeJournal(db: PrismaClient): MergeJournal {
 
 export const prismaMergeJournal: MergeJournal = makeMergeJournal(defaultDb);
 
-/** Operations the merchant must look at (shown on the dashboard). */
+/** Operations the merchant must look at (shown on the dashboard): v1 ops
+ *  flagged NEEDS_REVIEW plus v2 ops parked in REVIEW_REQUIRED. */
 export async function listOperationsNeedingReview(shop: string) {
   return defaultDb.mergeOperation.findMany({
-    where: { shop, status: "NEEDS_REVIEW" },
+    where: {
+      shop,
+      OR: [
+        { protocolVersion: 1, status: "NEEDS_REVIEW" },
+        { protocolVersion: 2, phase: "REVIEW_REQUIRED" },
+      ],
+    },
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
@@ -208,6 +215,9 @@ export async function listOperationsNeedingReview(shop: string) {
       secondaries: true,
       lastError: true,
       createdAt: true,
+      protocolVersion: true,
+      phase: true,
+      reviewReason: true,
     },
   });
 }

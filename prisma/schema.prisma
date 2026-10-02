@@ -48,6 +48,9 @@ model ProcessedWebhook {
   lastReason  String?
   deadlineAt  DateTime?
   doneAt      DateTime?
+  // v2: why a REVIEW row needs a human, and the operation this item spawned.
+  reviewReason String?
+  operationId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @default(now()) @updatedAt
 
@@ -83,6 +86,8 @@ model MergeRecord {
   mergedOrderName  String
   customerId       String?
   itemsCombined    Int
+  // v2: the MergeOperation this record was written from.
+  operationId      String?
   createdAt        DateTime @default(now())
 
   @@unique([shop, mergedOrderId])
@@ -116,7 +121,89 @@ model MergeOperation {
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt
 
+  // ── Protocol v2 (phase-machine fields; v1 rows keep protocolVersion 1) ──
+  protocolVersion            Int      @default(1)
+  // READY | COMMIT_IN_DOUBT | COMMIT_REJECTED | APPLIED | COMPLETED |
+  // ABANDONED | REVIEW_REQUIRED — null on v1 rows.
+  phase                      String?
+  // 8-char Crockford base32 evidence token written into the discount
+  // description; unique across ops so evidence is operation-specific.
+  opToken                    String?  @unique
+  calculatedOrderId          String?
+  // [{ secondaryId, secondaryIndex, lines: [{ sourceLineItemId, variantId,
+  // quantity, description }] }] — the exact multiset the commit must produce.
+  expectedTransfer           Json?
+  expectedLocationId         String?
+  primaryLineItemIdsBefore   String[] @default([])
+  // { agreementId, happenedAt, lines: [{ secondaryId, lineItemId, variantId,
+  // quantity }] } — evidence that proved the commit applied.
+  appliedEvidence            Json?
+  firstDispatchAt            DateTime?
+  nextCheckAt                DateTime?
+  reviewReason               String?
+  reviewRequiredAt           DateTime?
+  workItemId                 String?
+  sideEffectsDone            Boolean  @default(false)
+
   @@index([shop, status])
+  @@index([protocolVersion, phase, nextCheckAt])
+  @@index([workItemId])
+}
+
+// Durable per-order lock. Never expires; created in the same transaction as
+// the operation and deleted only by the terminal transition of that operation.
+model MergeOrderLock {
+  id          String   @id @default(cuid())
+  shop        String
+  orderId     String
+  operationId String
+  createdAt   DateTime @default(now())
+
+  @@unique([shop, orderId])
+  @@index([operationId])
+}
+
+// Write-ahead dispatch record (§0): the row exists before the Shopify request
+// is sent; a response-lost mutation is reconciled as UNKNOWN, never retried
+// (except the bounded ORDER_CANCEL rejection retries).
+model MergeMutationAttempt {
+  id              String    @id @default(cuid())
+  operationId     String
+  // EDIT_COMMIT | ORDER_CANCEL | REVIEW_TAG | ANNOTATE | CLOSE
+  kind            String
+  targetOrderId   String
+  attemptNo       Int
+  // DISPATCHING | SUCCEEDED | REJECTED | UNKNOWN
+  state           String
+  // Only the dispatcher holding this token may record the outcome.
+  dispatchToken   String
+  dispatchedAt    DateTime
+  respondedAt     DateTime?
+  responseSummary String?
+  jobId           String?
+
+  @@unique([operationId, kind, targetOrderId, attemptNo])
+  @@index([operationId, kind])
+}
+
+// Kill switches (singleton row id 'control', seeded disabled by migration).
+// The dispatch gate enforces these inside its UPDATE ... WHERE EXISTS.
+model AppControl {
+  id                String   @id
+  newMergesEnabled  Boolean  @default(false)
+  completionEnabled Boolean  @default(false)
+  allowShops        String[] @default([]) // empty = all shops
+  note              String?
+  updatedAt         DateTime @updatedAt
+}
+
+// Sweeper liveness: one row per worker instance, heartbeated every 30s.
+model WorkerInstance {
+  instanceId          String   @id
+  railwayDeploymentId String?
+  startedAt           DateTime
+  heartbeatAt         DateTime
+  version             String?
 }
 
 model Session {

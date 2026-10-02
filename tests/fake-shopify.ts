@@ -22,6 +22,7 @@ import type { MergeSettings } from "../app/lib/settings.server";
 import { runSweepOnce, type SweepContext } from "../app/lib/background-worker.server";
 import { processOrderWork } from "../app/lib/order-work-processor.server";
 import {
+  MAX_ATTEMPTS,
   WORK_DEADLINE_MS,
   type WorkItem,
   type WorkOutcome,
@@ -571,6 +572,8 @@ export class MemoryWorkStore implements WorkStore {
       deadlineAt: new Date(now.getTime() + deadlineMs),
       createdAt: now,
       doneAt: null,
+      reviewReason: null,
+      operationId: null,
     };
     this.items.set(item.id, item);
     this.byOrder.set(key, item.id);
@@ -595,6 +598,79 @@ export class MemoryWorkStore implements WorkStore {
       item.attempts += 1;
       return structuredClone(item);
     });
+  }
+
+  async exhaustDue() {
+    const now = this.clock().getTime();
+    let exhausted = 0;
+    for (const item of this.items.values()) {
+      if (
+        item.status === "PENDING" &&
+        (!item.leasedUntil || item.leasedUntil.getTime() < now) &&
+        (item.attempts >= MAX_ATTEMPTS || (item.deadlineAt && item.deadlineAt.getTime() < now))
+      ) {
+        item.status = "REVIEW";
+        item.outcome = "EXHAUSTED";
+        item.reviewReason = item.lastReason ?? "retry limit reached";
+        item.leaseToken = null;
+        item.leasedUntil = null;
+        item.retryAfter = null;
+        exhausted += 1;
+      }
+    }
+    return exhausted;
+  }
+
+  async linkOperation(id: string, token: string, operationId: string) {
+    const item = this.owned(id, token);
+    if (!item) return false;
+    item.status = "DONE";
+    item.outcome = "OPERATION_CREATED";
+    item.operationId = operationId;
+    item.doneAt = this.clock();
+    item.retryAfter = null;
+    item.leaseToken = null;
+    item.leasedUntil = null;
+    return true;
+  }
+
+  async requeueFromOperation(workItemId: string, operationId: string, reason: string) {
+    const item = this.items.get(workItemId);
+    if (
+      !item ||
+      item.status !== "DONE" ||
+      item.outcome !== "OPERATION_CREATED" ||
+      item.operationId !== operationId
+    ) {
+      return false;
+    }
+    item.status = "PENDING";
+    item.retryAfter = this.clock();
+    item.outcome = null;
+    item.lastReason = reason;
+    item.leaseToken = null;
+    item.leasedUntil = null;
+    return true;
+  }
+
+  async settleFromOperation(
+    workItemId: string,
+    operationId: string,
+    outcome: "MERGED" | "OPERATION_REVIEW",
+  ) {
+    const item = this.items.get(workItemId);
+    if (
+      !item ||
+      item.status !== "DONE" ||
+      item.outcome !== "OPERATION_CREATED" ||
+      item.operationId !== operationId
+    ) {
+      return false;
+    }
+    item.status = "DONE";
+    item.outcome = outcome;
+    item.doneAt = this.clock();
+    return true;
   }
 
   async renew(id: string, token: string, ttlMs: number) {

@@ -12,15 +12,22 @@
 
 import type { PrismaClient } from "@prisma/client";
 import defaultDb from "../db.server";
-import { DB_NOW, dbNowPlus, OwnershipLostError } from "./ownership.server";
+import { DB_WALL, dbWallPlus, OwnershipLostError } from "./ownership.server";
 
 export type WorkOutcome =
   /** The merge reached COMPLETED / NEEDS_REVIEW. */
   | "MERGED" | "REVIEW"
+  /** v2: a MergeOperation now owns the item (row is DONE). */
+  | "OPERATION_CREATED"
+  /** v2: the operation ended in REVIEW_REQUIRED (row is DONE, not REVIEW —
+   *  the operation itself carries the review state). */
+  | "OPERATION_REVIEW"
   /** Order deleted/cancelled/closed (incl. already merged away). */
   | "ANCHOR_GONE"
   /** A rule failed on fresh state (anchor or no compatible partner). */
   | "INELIGIBLE"
+  /** Siblings existed but none were compatible. */
+  | "NO_PARTNER"
   /** No matching sibling after the search-index grace period. */
   | "NO_SIBLINGS"
   /** Merchant has not granted location access on a multi-location shop. */
@@ -31,7 +38,7 @@ export interface WorkItem {
   id: string;
   shop: string;
   orderId: string;
-  status: "PENDING" | "DONE";
+  status: "PENDING" | "DONE" | "REVIEW";
   attempts: number;
   retryAfter: Date | null;
   leaseToken: string | null;
@@ -41,6 +48,8 @@ export interface WorkItem {
   deadlineAt: Date | null;
   createdAt: Date;
   doneAt: Date | null;
+  reviewReason: string | null;
+  operationId: string | null;
 }
 
 export interface WorkStore {
@@ -50,8 +59,29 @@ export interface WorkStore {
   insertLeased(shop: string, orderId: string, token: string, ttlMs: number, deadlineMs: number): Promise<WorkItem | null>;
   /** Leases up to `limit` due items (PENDING, retryAfter <= now, lease null or
    *  expired), each with its own fresh token, attempts += 1. Returns the
-   *  leased items with their tokens. */
+   *  leased items with their tokens. The sweeper claims one at a time. */
   claimDue(limit: number, ttlMs: number): Promise<WorkItem[]>;
+  /** Converts expired/unowned PENDING items past their limit to status REVIEW
+   *  + outcome EXHAUSTED (v2: the sweeper owns exhaustion; the row's stale
+   *  owner then fails every subsequent conditional write). Returns count. */
+  exhaustDue(): Promise<number>;
+  /** Terminal hand-off to an operation: status DONE, outcome
+   *  OPERATION_CREATED, operationId set. Conditional on the work lease
+   *  (token + unexpired + status PENDING); returns false if ownership lost.
+   *  The same statement runs inside createOperation's transaction. */
+  linkOperation(id: string, token: string, operationId: string): Promise<boolean>;
+  /** State-CAS (NOT lease-based — the operation owns the item now): an item
+   *  the operation abandoned goes back to PENDING, lease cleared, due now.
+   *  Only fires on status DONE + outcome OPERATION_CREATED + matching
+   *  operationId, so it can never resurrect an item settled another way. */
+  requeueFromOperation(workItemId: string, operationId: string, reason: string): Promise<boolean>;
+  /** State-CAS counterpart of requeueFromOperation: marks the operation-owned
+   *  item DONE with the final outcome (MERGED or OPERATION_REVIEW). */
+  settleFromOperation(
+    workItemId: string,
+    operationId: string,
+    outcome: "MERGED" | "OPERATION_REVIEW",
+  ): Promise<boolean>;
   /** Extends the lease. Conditional on token+unexpired; throws OwnershipLostError. */
   renew(id: string, token: string, ttlMs: number): Promise<void>;
   /** status=DONE, outcome, lastReason, doneAt=now, lease cleared. Conditional
@@ -102,26 +132,26 @@ export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
           ("id", "shop", "orderId", "status", "attempts", "retryAfter",
            "leaseToken", "leasedUntil", "deadlineAt", "createdAt", "updatedAt")
         VALUES (
-          ${crypto.randomUUID()}, ${shop}, ${orderId}, 'PENDING', 1, ${DB_NOW},
-          ${token}, ${dbNowPlus(ttlMs)}, ${dbNowPlus(deadlineMs)}, ${DB_NOW}, ${DB_NOW}
+          ${crypto.randomUUID()}, ${shop}, ${orderId}, 'PENDING', 1, ${DB_WALL},
+          ${token}, ${dbWallPlus(ttlMs)}, ${dbWallPlus(deadlineMs)}, ${DB_WALL}, ${DB_WALL}
         )
         ON CONFLICT ("shop", "orderId") DO NOTHING
         RETURNING *`;
       return rows.length ? toWorkItem(rows[0]) : null;
     },
-    async claimDue(limit, ttlMs) {
+    async claimDue(limit = 1, ttlMs) {
       // One statement: SKIP LOCKED picks due rows that no live worker holds;
       // each leased row gets its own token, returned to the caller.
       const rows = await db.$queryRaw<any[]>`
         UPDATE "ProcessedWebhook" w
         SET "leaseToken" = md5(random()::text || clock_timestamp()::text || w.id),
-            "leasedUntil" = ${dbNowPlus(ttlMs)},
+            "leasedUntil" = ${dbWallPlus(ttlMs)},
             "attempts" = w."attempts" + 1,
-            "updatedAt" = ${DB_NOW}
+            "updatedAt" = ${DB_WALL}
         FROM (
           SELECT id FROM "ProcessedWebhook"
-          WHERE "status" = 'PENDING' AND "retryAfter" <= ${DB_NOW}
-            AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_NOW})
+          WHERE "status" = 'PENDING' AND "retryAfter" <= ${DB_WALL}
+            AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_WALL})
           ORDER BY "retryAfter"
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
@@ -130,28 +160,72 @@ export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
         RETURNING w.*`;
       return rows.map(toWorkItem);
     },
+    async exhaustDue() {
+      // Not lease-gated: it only converts items nobody live-holds, and a stale
+      // owner's later writes all fail on status <> 'PENDING' anyway.
+      return db.$executeRaw`
+        UPDATE "ProcessedWebhook"
+        SET "status" = 'REVIEW', "outcome" = 'EXHAUSTED',
+            "reviewReason" = COALESCE("lastReason", 'retry limit reached'),
+            "leaseToken" = NULL, "leasedUntil" = NULL, "retryAfter" = NULL,
+            "updatedAt" = ${DB_WALL}
+        WHERE "status" = 'PENDING'
+          AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_WALL})
+          AND ("attempts" >= ${MAX_ATTEMPTS}
+            OR ("deadlineAt" IS NOT NULL AND "deadlineAt" < ${DB_WALL}))`;
+    },
+    async linkOperation(id, token, operationId) {
+      const updated = await db.$executeRaw`
+        UPDATE "ProcessedWebhook"
+        SET "status" = 'DONE', "outcome" = 'OPERATION_CREATED',
+            "operationId" = ${operationId}, "doneAt" = ${DB_WALL},
+            "leaseToken" = NULL, "leasedUntil" = NULL, "retryAfter" = NULL,
+            "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${id} AND "leaseToken" = ${token}
+          AND "leasedUntil" > ${DB_WALL} AND "status" = 'PENDING'`;
+      return updated === 1;
+    },
+    async requeueFromOperation(workItemId, operationId, reason) {
+      const updated = await db.$executeRaw`
+        UPDATE "ProcessedWebhook"
+        SET "status" = 'PENDING', "retryAfter" = ${DB_WALL}, "outcome" = NULL,
+            "lastReason" = ${reason}, "leaseToken" = NULL, "leasedUntil" = NULL,
+            "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${workItemId} AND "status" = 'DONE'
+          AND "outcome" = 'OPERATION_CREATED' AND "operationId" = ${operationId}`;
+      return updated === 1;
+    },
+    async settleFromOperation(workItemId, operationId, outcome) {
+      const updated = await db.$executeRaw`
+        UPDATE "ProcessedWebhook"
+        SET "status" = 'DONE', "outcome" = ${outcome}, "doneAt" = ${DB_WALL},
+            "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${workItemId} AND "status" = 'DONE'
+          AND "outcome" = 'OPERATION_CREATED' AND "operationId" = ${operationId}`;
+      return updated === 1;
+    },
     async renew(id, token, ttlMs) {
       const updated = await db.$executeRaw`
-        UPDATE "ProcessedWebhook" SET "leasedUntil" = ${dbNowPlus(ttlMs)}, "updatedAt" = ${DB_NOW}
-        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_NOW}`;
+        UPDATE "ProcessedWebhook" SET "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}`;
       if (updated === 0) throw new OwnershipLostError(`Work item ${id} is owned by another worker.`);
     },
     async markDone(id, token, outcome, reason) {
       const updated = await db.$executeRaw`
         UPDATE "ProcessedWebhook"
         SET "status" = 'DONE', "outcome" = ${outcome}, "lastReason" = ${reason},
-            "doneAt" = ${DB_NOW}, "leaseToken" = NULL, "leasedUntil" = NULL,
-            "retryAfter" = NULL, "updatedAt" = ${DB_NOW}
-        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_NOW}
+            "doneAt" = ${DB_WALL}, "leaseToken" = NULL, "leasedUntil" = NULL,
+            "retryAfter" = NULL, "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}
           AND "status" = 'PENDING'`;
       return updated === 1;
     },
     async scheduleRetry(id, token, delayMs, reason) {
       const updated = await db.$executeRaw`
         UPDATE "ProcessedWebhook"
-        SET "retryAfter" = ${dbNowPlus(delayMs)}, "lastReason" = ${reason},
-            "leaseToken" = NULL, "leasedUntil" = NULL, "updatedAt" = ${DB_NOW}
-        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_NOW}
+        SET "retryAfter" = ${dbWallPlus(delayMs)}, "lastReason" = ${reason},
+            "leaseToken" = NULL, "leasedUntil" = NULL, "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}
           AND "status" = 'PENDING'`;
       return updated === 1;
     },
@@ -159,7 +233,7 @@ export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
       // COALESCE covers overlap-era DONE rows whose doneAt was never set.
       return db.$executeRaw`
         DELETE FROM "ProcessedWebhook"
-        WHERE "status" = 'DONE' AND COALESCE("doneAt", "createdAt") < ${dbNowPlus(-olderThanMs)}`;
+        WHERE "status" = 'DONE' AND COALESCE("doneAt", "createdAt") < ${dbWallPlus(-olderThanMs)}`;
     },
     async find(shop, orderId) {
       const row = await db.processedWebhook.findUnique({ where: { shop_orderId: { shop, orderId } } });
