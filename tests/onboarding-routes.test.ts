@@ -12,7 +12,8 @@ const env = vi.hoisted(() => ({
   location: { activeLocationCount: 1 as number | null, granted: false },
   subscribed: true,
   executeMerge: vi.fn(),
-  processed: vi.fn(),
+  processed: vi.fn(async () => ({ id: "work-1" })),
+  processOrderWork: vi.fn(async () => {}),
 }));
 
 vi.mock("../app/shopify.server", () => {
@@ -77,6 +78,20 @@ vi.mock("../app/lib/merge.server", () => ({
   resumeIncompleteMerges: async () => [],
 }));
 
+vi.mock("../app/lib/order-work.server", async (importOriginal) => {
+  const actual: any = await importOriginal();
+  // The webhook route inserts the durable work item through this store;
+  // env.processed records the call and hands back a leased item.
+  return {
+    ...actual,
+    prismaWorkStore: () => ({ insertLeased: env.processed }),
+  };
+});
+
+vi.mock("../app/lib/order-work-processor.server", () => ({
+  processOrderWork: env.processOrderWork,
+}));
+
 const appRoute = await import("../app/routes/app");
 const onboardingRoute = await import("../app/routes/app.onboarding");
 const settingsRoute = await import("../app/routes/app.settings");
@@ -112,7 +127,8 @@ beforeEach(() => {
   env.location = { activeLocationCount: 1, granted: false };
   env.subscribed = true;
   env.executeMerge.mockReset();
-  env.processed.mockReset();
+  env.processed.mockReset().mockImplementation(async () => ({ id: "work-1" }));
+  env.processOrderWork.mockReset();
 });
 
 describe("setup gate (app.tsx loader)", () => {
@@ -274,7 +290,7 @@ describe("orders/create webhook", () => {
     env.settings = { ...newShop(), autoMergeEnabled: true };
     await deliver();
     expect(env.processed).not.toHaveBeenCalled();
-    expect(env.executeMerge).not.toHaveBeenCalled();
+    expect(env.processOrderWork).not.toHaveBeenCalled();
   });
 
   it("does not process orders when an established merchant has paused", async () => {
@@ -283,10 +299,11 @@ describe("orders/create webhook", () => {
     expect(env.processed).not.toHaveBeenCalled();
   });
 
-  it("processes orders once setup is complete and automation is on", async () => {
+  it("queues and processes a work item once setup is complete and automation is on", async () => {
     env.settings = completedShop();
     await deliver();
-    expect(env.processed).toHaveBeenCalledTimes(1);
+    expect(env.processed).toHaveBeenCalledTimes(1); // durable insertLeased
+    expect(env.processOrderWork).toHaveBeenCalledTimes(1);
   });
 });
 

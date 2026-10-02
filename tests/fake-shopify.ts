@@ -17,6 +17,16 @@ import type {
 import type { MergeDeps } from "../app/lib/merge.server";
 import type { ClaimStore } from "../app/lib/claims.server";
 import { OwnershipLostError } from "../app/lib/ownership.server";
+import { isOnboardingComplete } from "../app/lib/onboarding";
+import type { MergeSettings } from "../app/lib/settings.server";
+import { runSweepOnce, type SweepContext } from "../app/lib/background-worker.server";
+import { processOrderWork } from "../app/lib/order-work-processor.server";
+import {
+  WORK_DEADLINE_MS,
+  type WorkItem,
+  type WorkOutcome,
+  type WorkStore,
+} from "../app/lib/order-work.server";
 
 export interface FakeOrder extends OrderState {
   lineItems: MergeLineItem[];
@@ -149,6 +159,9 @@ export class FakeShopify {
   locationsScope = false;
   /** locationId passed to each orderEditAddVariant call. */
   addVariantLocations: (string | null | undefined)[] = [];
+  /** Index-lag knob: ids listed here are invisible to the candidate search
+   *  (MergeCandidateOrders) only — direct order loads still see them. */
+  hiddenFromSearch = new Set<string>();
   calls: string[] = [];
   interceptors = new Map<string, Interceptor>();
   private callCounts = new Map<string, number>();
@@ -193,6 +206,34 @@ export class FakeShopify {
 
   private handlers: Record<string, Handler> = {
     MergeLocationCount: () => ({ data: { locationsCount: { count: this.activeLocations } } }),
+    // The customer's recent orders, matching the route's search filter
+    // (open, unfulfilled, paid) — minus the index-lag knob.
+    MergeCandidateOrders: ({ customerId }) => ({
+      data: {
+        customer: {
+          orders: {
+            nodes: [...this.orders.values()]
+              .filter(
+                (o) =>
+                  o.customer?.id === customerId &&
+                  !o.cancelledAt &&
+                  !o.closed &&
+                  o.displayFinancialStatus === "PAID" &&
+                  o.displayFulfillmentStatus === "UNFULFILLED" &&
+                  !this.hiddenFromSearch.has(o.id),
+              )
+              .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+              .map((o) => ({
+                id: o.id,
+                name: o.name,
+                createdAt: o.createdAt,
+                shippingAddress: structuredClone(o.shippingAddress),
+                shippingLines: structuredClone(o.shippingLines),
+              })),
+          },
+        },
+      },
+    }),
     MergeOrderState: ({ ids }) => ({
       data: { nodes: ids.map((id: string) => (this.orders.has(id) ? this.snapshot(this.orders.get(id)!) : null)) },
     }),
@@ -487,3 +528,216 @@ export const topLevelError = (message = "Throttled") => ({ errors: [{ message }]
 export const userError = (root: string, key = "userErrors", message = "Rejected") => ({
   data: { [root]: { [key]: [{ field: null, message }] } },
 });
+
+/** In-memory work items with the same conditional semantics as the Postgres
+ *  store: token+unexpired(+PENDING) guards on every ownership write, a fresh
+ *  token per claimDue row, and "not already leased" standing in for
+ *  FOR UPDATE SKIP LOCKED. Share `clock` with the other stores. */
+export class MemoryWorkStore implements WorkStore {
+  items = new Map<string, WorkItem>();
+  private byOrder = new Map<string, string>();
+  private seq = 1;
+  clock: () => Date = () => new Date();
+
+  private owned(id: string, token: string): WorkItem | null {
+    const item = this.items.get(id);
+    if (
+      !item ||
+      item.status !== "PENDING" ||
+      item.leaseToken !== token ||
+      !item.leasedUntil ||
+      item.leasedUntil.getTime() < this.clock().getTime()
+    ) {
+      return null;
+    }
+    return item;
+  }
+
+  async insertLeased(shop: string, orderId: string, token: string, ttlMs: number, deadlineMs: number) {
+    const key = `${shop} ${orderId}`;
+    if (this.byOrder.has(key)) return null;
+    const now = this.clock();
+    const item: WorkItem = {
+      id: `work-${this.seq++}`,
+      shop,
+      orderId,
+      status: "PENDING",
+      attempts: 1,
+      retryAfter: now,
+      leaseToken: token,
+      leasedUntil: new Date(now.getTime() + ttlMs),
+      outcome: null,
+      lastReason: null,
+      deadlineAt: new Date(now.getTime() + deadlineMs),
+      createdAt: now,
+      doneAt: null,
+    };
+    this.items.set(item.id, item);
+    this.byOrder.set(key, item.id);
+    return structuredClone(item);
+  }
+
+  async claimDue(limit: number, ttlMs: number) {
+    const now = this.clock().getTime();
+    const due = [...this.items.values()]
+      .filter(
+        (i) =>
+          i.status === "PENDING" &&
+          i.retryAfter !== null &&
+          i.retryAfter.getTime() <= now &&
+          (!i.leasedUntil || i.leasedUntil.getTime() < now),
+      )
+      .sort((a, b) => a.retryAfter!.getTime() - b.retryAfter!.getTime())
+      .slice(0, limit);
+    return due.map((item) => {
+      item.leaseToken = `lease-${crypto.randomUUID()}`;
+      item.leasedUntil = new Date(now + ttlMs);
+      item.attempts += 1;
+      return structuredClone(item);
+    });
+  }
+
+  async renew(id: string, token: string, ttlMs: number) {
+    const item = this.items.get(id);
+    const now = this.clock().getTime();
+    if (!item || item.leaseToken !== token || !item.leasedUntil || item.leasedUntil.getTime() < now) {
+      throw new OwnershipLostError(`Work item ${id} is owned by another worker.`);
+    }
+    item.leasedUntil = new Date(now + ttlMs);
+  }
+
+  async markDone(id: string, token: string, outcome: WorkOutcome, reason: string) {
+    const item = this.owned(id, token);
+    if (!item) return false;
+    item.status = "DONE";
+    item.outcome = outcome;
+    item.lastReason = reason;
+    item.doneAt = this.clock();
+    item.retryAfter = null;
+    item.leaseToken = null;
+    item.leasedUntil = null;
+    return true;
+  }
+
+  async scheduleRetry(id: string, token: string, delayMs: number, reason: string) {
+    const item = this.owned(id, token);
+    if (!item) return false;
+    item.retryAfter = new Date(this.clock().getTime() + delayMs);
+    item.lastReason = reason;
+    item.leaseToken = null;
+    item.leasedUntil = null;
+    return true;
+  }
+
+  async purgeDone(olderThanMs: number) {
+    const cutoff = this.clock().getTime() - olderThanMs;
+    let purged = 0;
+    for (const [id, item] of this.items) {
+      if (item.status === "DONE" && item.doneAt && item.doneAt.getTime() < cutoff) {
+        this.items.delete(id);
+        this.byOrder.delete(`${item.shop} ${item.orderId}`);
+        purged += 1;
+      }
+    }
+    return purged;
+  }
+
+  async find(shop: string, orderId: string) {
+    const id = this.byOrder.get(`${shop} ${orderId}`);
+    const item = id ? this.items.get(id) : undefined;
+    return item ? structuredClone(item) : null;
+  }
+}
+
+/** One shop, one fake clock shared by the journal/claims/work stores, the
+ *  merge deps and the sweeper. `webhook` mirrors the orders/create route
+ *  (settings gate, durable insert, background processing) and `sweep` runs
+ *  one sweeper pass with the same stores. */
+export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<MergeSettings> } = {}) {
+  const SHOP = "test.myshopify.com";
+  let now = new Date("2026-10-01T12:00:00Z").getTime();
+  const clock = () => new Date(now);
+  const shopify = new FakeShopify(orders);
+  const journal = new MemoryJournal();
+  journal.clock = clock;
+  const claims = new MemoryClaimStore();
+  claims.clock = clock;
+  const work = new MemoryWorkStore();
+  work.clock = clock;
+  const deps: MergeDeps = {
+    journal,
+    claims,
+    leaseTtlMs: 90_000,
+    sleep: async (ms) => {
+      now += ms;
+    },
+    now: clock,
+    cancelPollAttempts: 3,
+    cancelPollIntervalMs: 1000,
+    maxCancelAttempts: 2,
+    pendingCommitGraceMs: 5 * 60 * 1000,
+    cancelRequestGraceMs: 10 * 60 * 1000,
+  };
+  const settings: MergeSettings = {
+    autoMergeEnabled: true,
+    mergeWindowHours: 24,
+    shippingCostSavings: 8.5,
+    shopifyShopGid: "gid://shopify/Shop/1",
+    autoMergeAcknowledgedAt: new Date(now),
+    onboardingStartedAt: new Date(now),
+    onboardingCompletedAt: new Date(now),
+    ...opts.settings,
+  };
+  const getSettings = async () => settings;
+  const adminFactory = async () => shopify.admin;
+  const stats = { processCalls: 0 };
+  const webhook = async (orderId: string, process = true) => {
+    if (!settings.autoMergeEnabled || !isOnboardingComplete(settings)) return null;
+    const token = `wh-${crypto.randomUUID()}`;
+    const item = await work.insertLeased(SHOP, orderId, token, deps.leaseTtlMs, WORK_DEADLINE_MS);
+    if (!item) return null;
+    if (process) {
+      stats.processCalls += 1;
+      await processOrderWork({
+        item,
+        token,
+        shop: SHOP,
+        admin: shopify.admin,
+        deps,
+        work,
+        settings: getSettings,
+        now: clock,
+        random: () => 0.5,
+      });
+    }
+    return item;
+  };
+  const sweep = (overrides: Partial<SweepContext> = {}) =>
+    runSweepOnce({
+      claims,
+      journal,
+      work,
+      deps,
+      adminFactory,
+      settings: getSettings,
+      now: clock,
+      random: () => 0.5,
+      ...overrides,
+    });
+  return {
+    shopify,
+    journal,
+    claims,
+    work,
+    deps,
+    clock,
+    settings,
+    getSettings,
+    adminFactory,
+    webhook,
+    sweep,
+    stats,
+    advance: (ms: number) => (now += ms),
+    SHOP,
+  };
+}

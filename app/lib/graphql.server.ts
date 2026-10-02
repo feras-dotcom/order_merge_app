@@ -65,13 +65,19 @@ export async function gql<T = any>(
       reject(new ShopifyGraphqlError(`${label} timed out after ${timeoutMs}ms.`, false));
     }, timeoutMs);
   });
+  // The timer can fire after the race already settled (e.g. while res.json()
+  // is still pending); without a handler that rejection would be unhandled.
+  timeout.catch(() => {});
   try {
     const res = await Promise.race([
       admin.graphql(query, { variables, signal: controller.signal }),
       timeout,
     ]);
-    body = await res.json();
+    // The body read is under the same cap: a stalled response stream must
+    // not hold the call (or the lease window) open past timeoutMs.
+    body = await Promise.race([res.json(), timeout]);
   } catch (err: any) {
+    if (err instanceof ShopifyGraphqlError) throw err;
     // The client throws on HTTP failures and (depending on version) on
     // GraphQL errors; surface whatever detail it carries.
     const detail = err?.body?.errors ?? err?.response?.errors ?? err?.message ?? err;

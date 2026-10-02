@@ -1,45 +1,29 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
-import db from "../db.server";
-import {
-  buildAddressKey,
-  buildGroupKey,
-  defaultMergeDeps,
-  executeMerge,
-  resumeIncompleteMerges,
-} from "../lib/merge.server";
-import { gql } from "../lib/graphql.server";
 import { getSettings } from "../lib/settings.server";
 import { isOnboardingComplete } from "../lib/onboarding";
-
-// ── In-memory fast path: prevents two concurrent webhook deliveries in this
-// process from evaluating the same address+shipping group simultaneously.
-// The real guard is the durable per-order claim (MergeClaim) taken inside
-// executeMerge — this only saves the extra work. Safe across replicas.
-const activeGroupMerges = new Set<string>();
+import { LEASE_TTL_MS, newLeaseToken } from "../lib/ownership.server";
+import { prismaWorkStore, WORK_DEADLINE_MS } from "../lib/order-work.server";
+import { processOrderWork } from "../lib/order-work-processor.server";
+import { defaultMergeDeps } from "../lib/merge.server";
 
 // ── ORDERS_CREATE webhook handler ─────────────────────────────────────────────
 //
 // When a new order arrives this handler:
-//   1. Resumes any unfinished merge for the shop (see merge.server.ts), even
-//      if auto-merge has since been turned off — a committed merge must still
-//      have its secondaries cancelled.
-//   2. Does nothing further unless the merchant has opted in to auto-merge.
-//   3. Enforces idempotency so duplicate deliveries are no-ops.
-//   4. Cheaply pre-filters the incoming order (cancelled, unpaid, fulfilled,
-//      no customer, no usable address / single shipping method).
-//   5. Finds other open, unfulfilled, paid orders for the same customer with
-//      the same recipient, address and shipping method inside the merchant's
-//      window, excluding orders involved in unfinished or flagged merges.
-//   6. Calls executeMerge(), which re-checks every rule on fresh state.
+//   1. Does nothing unless the merchant has opted in and finished setup — a
+//      disabled store never records a work item, so future deliveries are
+//      still processed once enabled.
+//   2. Inserts a durable PENDING work item (ProcessedWebhook) leased to this
+//      process. The (shop, orderId) unique key makes redeliveries no-ops; a
+//      non-duplicate insert error is answered 500 so Shopify retries.
+//   3. Processes the item in the background and acknowledges immediately — a
+//      merge can take longer than Shopify's webhook timeout, and repeated
+//      timeouts cause redeliveries and eventually subscription removal.
 //
-// The webhook is acknowledged immediately and processed in the background:
-// a merge (including confirming asynchronous cancellations) can take longer
-// than Shopify's webhook timeout, and repeated timeouts cause redeliveries and
-// eventually subscription removal. Losing the process before the commit
-// changes nothing; after the commit, the MergeOperation journal resumes it.
-
-type WebhookAdmin = NonNullable<Awaited<ReturnType<typeof authenticate.webhook>>["admin"]>;
+// The work item survives a crash: once its lease expires the sweeper
+// (background-worker.server.ts) re-leases it and drives it to a terminal
+// outcome. The payload itself is not trusted for eligibility — the processor
+// loads the order fresh; only admin_graphql_api_id is read here.
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { topic, shop, payload, admin } = await authenticate.webhook(request);
@@ -53,170 +37,45 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response();
   }
 
-  void handleOrderCreated(admin, shop, payload as Record<string, any>).catch((err) =>
-    console.error(`[orders/create] Processing failed for ${shop}: ${err?.message ?? err}`),
-  );
-  return new Response();
-};
-
-async function handleOrderCreated(admin: WebhookAdmin, shop: string, order: Record<string, any>) {
-  const deps = defaultMergeDeps();
-  try {
-    await resumeIncompleteMerges(admin, shop, deps);
-  } catch (err: any) {
-    console.error(`[orders/create] Resuming unfinished merges failed: ${err?.message}`);
-  }
-
-  const orderId = order.admin_graphql_api_id as string;
-
-  // ── Opt-in: checked before idempotency so a disabled store never records an
-  // ── entry, allowing future deliveries to be processed once enabled.
   const settings = await getSettings(shop);
   // Merging only runs after setup is complete (which is also where it is
   // first turned on) and while the merchant has it on.
   if (!settings.autoMergeEnabled || !isOnboardingComplete(settings)) {
     console.log(`[orders/create] Auto-merge is not enabled for ${shop} — skipping.`);
-    return;
+    return new Response();
   }
-  const mergeWindowMs = settings.mergeWindowHours * 60 * 60 * 1000;
 
-  // ── Idempotency ─────────────────────────────────────────────────────────────
+  const orderId = (payload as Record<string, any>)?.admin_graphql_api_id as string | undefined;
+  if (!orderId) {
+    console.error(`[orders/create] Webhook for ${shop} carried no order id — skipping.`);
+    return new Response();
+  }
+
+  const work = prismaWorkStore();
+  const token = newLeaseToken();
+  let item;
   try {
-    await db.processedWebhook.create({ data: { shop, orderId } });
-  } catch (e: any) {
-    if (e.code === "P2002") {
-      console.log(`[orders/create] Already processed ${orderId} — skipping.`);
-      return;
-    }
-    throw e;
-  }
-
-  // ── Cheap pre-filters (executeMerge re-checks all of these authoritatively)
-  if (order.cancelled_at) return skip(orderId, "already cancelled");
-  if (order.financial_status !== "paid") return skip(orderId, `not paid (${order.financial_status})`);
-  const fulfillmentStatus = order.fulfillment_status as string | null;
-  if (fulfillmentStatus !== null && fulfillmentStatus !== "unfulfilled") {
-    return skip(orderId, `fulfillment status "${fulfillmentStatus}"`);
-  }
-  const customerId = order.customer?.admin_graphql_api_id as string | undefined;
-  if (!customerId) return skip(orderId, "no customer");
-
-  // REST webhook fields use snake_case and province_code / country_code.
-  const rawAddress = order.shipping_address as Record<string, string> | null;
-  const newOrderAddress = rawAddress && {
-    firstName: rawAddress.first_name,
-    lastName: rawAddress.last_name,
-    company: rawAddress.company,
-    address1: rawAddress.address1,
-    address2: rawAddress.address2,
-    city: rawAddress.city,
-    provinceCode: rawAddress.province_code,
-    zip: rawAddress.zip,
-    countryCodeV2: rawAddress.country_code,
-  };
-  const shippingTitles = ((order.shipping_lines as any[]) ?? []).map((l) => l?.title);
-  // Candidate discovery only groups by shipping title; executeMerge compares
-  // the full shipping identity (code, source, custom rate price) on fresh data.
-  const newOrderGroupKey = buildGroupKey(customerId, newOrderAddress, shippingTitles);
-  if (!newOrderGroupKey) {
-    const why = !buildAddressKey(customerId, newOrderAddress)
-      ? "no usable shipping address"
-      : shippingTitles.length !== 1
-        ? `${shippingTitles.length} shipping lines in the webhook payload (exactly one required)`
-        : "shipping line has no title";
-    return skip(orderId, why);
-  }
-
-  const newOrderTime = new Date(order.created_at as string).getTime();
-  if (isNaN(newOrderTime)) return skip(orderId, `unparseable created_at ${order.created_at}`);
-
-  // ── Candidate siblings for this customer ──────────────────────────────────
-  // Shopify's search index may not yet include the brand-new order, so it is
-  // always added to the candidate list from the webhook payload directly.
-  let siblings: any[];
-  try {
-    const customer = await gql(
-      admin,
-      "Load customer orders",
-      `#graphql
-        query MergeCandidateOrders($customerId: ID!) {
-          customer(id: $customerId) {
-            orders(
-              first: 50
-              sortKey: CREATED_AT
-              reverse: true
-              query: "fulfillment_status:unfulfilled status:open financial_status:paid"
-            ) {
-              nodes {
-                id
-                name
-                createdAt
-                shippingAddress {
-                  firstName
-                  lastName
-                  company
-                  address1
-                  address2
-                  city
-                  provinceCode
-                  zip
-                  countryCodeV2
-                }
-                shippingLines(first: 5) { nodes { title } }
-              }
-            }
-          }
-        }`,
-      { customerId },
-      "customer",
-      null,
-    );
-    siblings = customer.orders?.nodes ?? [];
+    item = await work.insertLeased(shop, orderId, token, LEASE_TTL_MS, WORK_DEADLINE_MS);
   } catch (err: any) {
-    console.error(`[orders/create] Could not load candidate orders: ${err?.message}`);
-    return;
+    // Not a duplicate — the write itself failed. Answer 500 so Shopify
+    // redelivers instead of silently dropping the order.
+    console.error(`[orders/create] Could not record work for ${orderId}: ${err?.message}`);
+    return new Response(null, { status: 500 });
+  }
+  if (!item) {
+    console.log(`[orders/create] Duplicate delivery for ${orderId} — skipping.`);
+    return new Response();
   }
 
-  const blocked = await deps.journal.findBlockingOrderIds(shop);
-  if (blocked.has(orderId)) return skip(orderId, "part of an unfinished or flagged merge");
-
-  const eligibleSiblings = siblings.filter((sibling) => {
-    if (sibling.id === orderId || blocked.has(sibling.id)) return false;
-    const key = buildGroupKey(
-      customerId,
-      sibling.shippingAddress,
-      (sibling.shippingLines?.nodes ?? []).map((l: any) => l?.title),
-    );
-    const t = new Date(sibling.createdAt).getTime();
-    return key === newOrderGroupKey && !isNaN(t) && Math.abs(newOrderTime - t) <= mergeWindowMs;
-  });
-
-  if (eligibleSiblings.length === 0) {
-    return skip(orderId, `no matching sibling within ${settings.mergeWindowHours}h`);
-  }
-
-  if (activeGroupMerges.has(newOrderGroupKey)) {
-    return skip(orderId, "merge already in progress for this group");
-  }
-
-  const orderIds = [orderId, ...eligibleSiblings.map((s) => s.id as string)];
-  console.log(`[orders/create] Auto-merging orders: ${orderIds.join(", ")}`);
-
-  activeGroupMerges.add(newOrderGroupKey);
-  try {
-    const result = await executeMerge(admin, shop, orderIds, deps);
-    console.log(
-      `[orders/create] Merge outcome ${result.outcome}` +
-        (result.primaryName ? ` (primary ${result.primaryName})` : "") +
-        (result.reason ? `: ${result.reason}` : ""),
-    );
-  } catch (err: any) {
-    console.error(`[orders/create] Merge threw: ${err?.message}`);
-  } finally {
-    activeGroupMerges.delete(newOrderGroupKey);
-  }
-}
-
-function skip(orderId: string, reason: string) {
-  console.log(`[orders/create] ${orderId} skipped: ${reason}.`);
-}
+  void processOrderWork({
+    item,
+    token,
+    shop,
+    admin,
+    deps: defaultMergeDeps(),
+    work,
+    settings: getSettings,
+    now: () => new Date(),
+  }).catch((err) => console.error(`[orders/create] Processing failed for ${orderId}: ${err?.message ?? err}`));
+  return new Response();
+};

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { gql, ShopifyGraphqlError } from "../app/lib/graphql.server";
 
 const client = (body: unknown) => ({
@@ -82,5 +82,25 @@ describe("gql", () => {
     expect(err).toBeInstanceOf(ShopifyGraphqlError);
     expect(err.rejected).toBe(false);
     expect(err.message).toContain("timed out");
+  });
+
+  it("caps a stalled response body read without an unhandled rejection", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const stalled = {
+        // The request resolves; the body read never does. The timeout firing
+        // inside res.json() must reject gql and must not go unhandled.
+        graphql: async () => ({ json: () => new Promise<unknown>(() => {}) }) as Response,
+      };
+      const err = await capture(gql(stalled, "t", "q", {}, "orderUpdate", "userErrors", 20));
+      expect(err).toBeInstanceOf(ShopifyGraphqlError);
+      expect(err.rejected).toBe(false);
+      expect(err.message).toContain("timed out");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 });

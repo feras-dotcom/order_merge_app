@@ -7,6 +7,11 @@ import {
 } from "@remix-run/node";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
+import { startBackgroundWorker } from "./lib/background-worker.server";
+
+// Starts the sweep loop once per process (self-guarded: no-op in tests and
+// when DISABLE_BACKGROUND_WORKER=true).
+startBackgroundWorker();
 
 export const streamTimeout = 5000;
 
