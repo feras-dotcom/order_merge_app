@@ -7,7 +7,7 @@
 // MERGESHIP_MUTATIONS=enabled is ALSO required for any dispatch — these
 // switches alone do not enable mutations.
 
-import "dotenv/config";
+import "./require-database-url";
 import { prismaOperationStore } from "../app/lib/operation-store.server";
 
 const usage = () => {

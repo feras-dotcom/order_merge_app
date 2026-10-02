@@ -5,7 +5,6 @@
 // Env: DATABASE_URL, FAKE_SHOPIFY_URL, SHOP, ANCHOR_ORDER_ID,
 //      MERGESHIP_MUTATIONS=enabled
 
-import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { prismaClaimStore } from "../../app/lib/claims.server";
 import type { AdminClient } from "../../app/lib/graphql.server";

@@ -2,7 +2,7 @@
 //
 //   npx vite-node scripts/worker-instances.ts
 
-import "dotenv/config";
+import "./require-database-url";
 import { prismaOperationStore } from "../app/lib/operation-store.server";
 
 const rows = await prismaOperationStore.listRecentInstances();

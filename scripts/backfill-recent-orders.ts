@@ -6,7 +6,7 @@
 //   npx vite-node scripts/backfill-recent-orders.ts --since 2026-10-01T00:00:00Z
 //   npx vite-node scripts/backfill-recent-orders.ts --since 2026-10-01T00:00:00Z --apply
 
-import "dotenv/config";
+import "./require-database-url";
 import db from "../app/db.server";
 import { isOnboardingComplete } from "../app/lib/onboarding";
 import { DB_WALL, dbWallPlus } from "../app/lib/ownership.server";

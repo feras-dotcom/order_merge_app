@@ -22,6 +22,7 @@ import type {
   MutationAttempt,
   NewOperationV2,
   OperationPatch,
+  OperationPhase,
   OperationRecord,
   OperationStore,
 } from "../app/lib/operation-store.server";
@@ -1386,6 +1387,17 @@ export class MemoryOperationStore implements OperationStore {
   async findLockedOrderIds(shop: string, ids: string[]) {
     const found = new Set<string>();
     for (const id of ids) if (this.locks.has(this.key(shop, id))) found.add(id);
+    return found;
+  }
+
+  async findLocks(shop: string, ids: string[]) {
+    const found = new Map<string, { operationId: string; phase: OperationPhase | null }>();
+    for (const oid of ids) {
+      const operationId = this.locks.get(this.key(shop, oid));
+      if (operationId) {
+        found.set(oid, { operationId, phase: this.ops.get(operationId)?.phase ?? null });
+      }
+    }
     return found;
   }
 

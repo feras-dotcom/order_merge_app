@@ -216,6 +216,48 @@ describe("order work items (spec §9)", () => {
     expect(h.shopify.order(2).cancelledAt).not.toBeNull();
   });
 
+  it("#8b sibling locked by a REVIEW_REQUIRED op is dropped — DONE NO_PARTNER after the lag grace", async () => {
+    const h = makeHarness([makeOrder(1), makeOrder(2)]);
+    // Order 1 is parked: a v2 op in REVIEW_REQUIRED retains its durable lock.
+    await h.claims.acquire(h.SHOP, [id(1)], "holder", h.deps.leaseTtlMs);
+    const holder = await h.ops.createOperation({
+      shop: h.SHOP,
+      claimToken: "holder",
+      opToken: "HOLDERTK",
+      involvedOrderIds: [id(1)],
+      primaryOrderId: id(1),
+      primaryOrderName: "#1",
+      customerId: null,
+      primaryLineItemCountBefore: 1,
+      addedLineItemCount: 1,
+      secondaries: [],
+      calculatedOrderId: null,
+      expectedTransfer: [],
+      expectedLocationId: null,
+      primaryLineItemIdsBefore: [],
+      leaseToken: "holder-op",
+      ttlMs: 60_000,
+    });
+    await h.ops.transition(
+      { id: holder.id, leaseToken: "holder-op", workItemId: null },
+      { expectedPhase: "READY", phase: "REVIEW_REQUIRED", reviewReason: "test parked" },
+    );
+    await h.claims.release(h.SHOP, [id(1)], "holder");
+    expect(h.ops.locks.size).toBe(1); // review keeps its lock
+
+    // Anchor 2's only compatible sibling is parked: the item waits out the
+    // index-lag grace once, then terminates instead of churning on the lock.
+    await h.webhook(id(2));
+    let wi = await h.work.find(h.SHOP, id(2));
+    expect(wi?.status).toBe("PENDING"); // inside the 2-minute index-lag grace
+    h.advance(130_000);
+    await h.sweep();
+    wi = await h.work.find(h.SHOP, id(2));
+    expect(wi).toMatchObject({ status: "DONE", outcome: "NO_PARTNER" });
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0); // never touched
+    expect([...h.ops.ops.values()]).toHaveLength(1); // no merge op for order 2
+  });
+
   it("#9 death after orderEditCommit: the sweep reconciles the in-doubt op from evidence, cancels the secondary", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     const g = gate();

@@ -594,6 +594,20 @@ export async function driveOperation(
     }
   }
 
+  /** A cancellation is ours when its staff note carries `MS-<opToken>`. Ops
+   *  converted from v1 by scripts/legacy-reconcile.ts are marked by
+   *  calculatedOrderId IS NULL (a v2-created op always has a calc) and their
+   *  cancels carried the v1 note "... merged into #P by MergeShip." — accept
+   *  that form for legacy ops only, so a v2 op can never adopt somebody
+   *  else's cancellation as proof. */
+  function isOurCancellation(staffNote: string | null | undefined): boolean {
+    return (
+      (staffNote ?? "").includes(`MS-${current.opToken}`) ||
+      (current.calculatedOrderId == null &&
+        (staffNote ?? "").includes(`merged into ${current.primaryOrderName} by MergeShip`))
+    );
+  }
+
   /** Reads the secondary: "verified" = cancelled by us + history written;
    *  "again" = a review transition was taken; "pending" = still uncancelled. */
   async function verifyCancel(
@@ -602,7 +616,7 @@ export async function driveOperation(
   ): Promise<"verified" | "again" | "pending"> {
     const st = await fetchOrderStateOrNull(fenced, s.id);
     if (!st?.cancelledAt) return "pending";
-    if (!(st.cancellation?.staffNote ?? "").includes(`MS-${current.opToken}`)) {
+    if (!isOurCancellation(st.cancellation?.staffNote)) {
       s.cancelPhase = "CANCEL_REVIEW";
       await move({
         phase: "REVIEW_REQUIRED",
@@ -631,7 +645,7 @@ export async function driveOperation(
     const st = await fetchOrderStateOrNull(fenced, s.id);
     if (!st) return `${s.name} could no longer be loaded.`;
     if (st.cancelledAt) {
-      if ((st.cancellation?.staffNote ?? "").includes(`MS-${current.opToken}`)) {
+      if (isOurCancellation(st.cancellation?.staffNote)) {
         await deps.hooks?.beforeHistoryTx?.();
         await deps.ops.recordHistoryAndVerifyCancel(
           { ...current, secondaries },

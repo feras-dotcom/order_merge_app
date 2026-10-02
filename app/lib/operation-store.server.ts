@@ -238,6 +238,12 @@ export interface OperationStore {
   ): Promise<void>;
   /** Order ids (of `ids`) currently held by a MergeOrderLock. */
   findLockedOrderIds(shop: string, ids: string[]): Promise<Set<string>>;
+  /** Lock owners for `ids`: orderId -> { operationId, phase } (phase is null
+   *  for a lock held by a row the join cannot classify). */
+  findLocks(
+    shop: string,
+    ids: string[],
+  ): Promise<Map<string, { operationId: string; phase: OperationPhase | null }>>;
   /** Order ids (of `ids`) involved in a v1 op in a blocking status. */
   findBlockingV1(shop: string, ids: string[]): Promise<Set<string>>;
   /** Plain read of an operation row (no lease). */
@@ -609,6 +615,19 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
         SELECT "orderId" FROM "MergeOrderLock"
         WHERE "shop" = ${shop} AND "orderId" = ANY(${ids})`;
       return new Set(rows.map((r) => r.orderId));
+    },
+
+    async findLocks(shop, ids) {
+      if (!ids.length) return new Map();
+      const rows = await db.$queryRaw<
+        { orderId: string; operationId: string; phase: OperationPhase | null }[]
+      >`
+        SELECT l."orderId", l."operationId", o."phase"
+        FROM "MergeOrderLock" l JOIN "MergeOperation" o ON o.id = l."operationId"
+        WHERE l."shop" = ${shop} AND l."orderId" = ANY(${ids})`;
+      return new Map(
+        rows.map((r) => [r.orderId, { operationId: r.operationId, phase: r.phase }]),
+      );
     },
 
     async findBlockingV1(shop, ids) {

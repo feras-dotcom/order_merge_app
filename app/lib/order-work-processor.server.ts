@@ -212,17 +212,22 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
       return key === groupKey && !isNaN(t) && Math.abs(anchorTime - t) <= mergeWindowMs;
     });
     const siblingIds = matching.map((s) => s.id as string);
-    const [lockedSiblingIds, heldSiblingIds] = await Promise.all([
-      deps.ops.findLockedOrderIds(shop, siblingIds),
+    const [lockOwners, heldSiblingIds] = await Promise.all([
+      deps.ops.findLocks(shop, siblingIds),
       deps.claims.findHeld(shop, siblingIds),
     ]);
-    // MergeOrderLock = a v2 op owns it; a live MergeClaim = a planMerge is
-    // mid-flight on it; the v1 journal covers pre-v2 operations. All three
-    // mean "busy, retry later" — never a reason to pick different siblings.
+    // A sibling parked in review (v2 REVIEW_REQUIRED lock or v1 NEEDS_REVIEW)
+    // is dropped from `matching` entirely: a human owns it now, and retrying
+    // the anchor on it would only churn the item to exhaustion. Locks held by
+    // non-review phases, live claims and v1 PENDING_COMMIT/COMMITTED stay
+    // "busy, retry later" — never a reason to pick different siblings.
+    const parked = (s: { id: string }) =>
+      lockOwners.get(s.id)?.phase === "REVIEW_REQUIRED" || statuses.get(s.id) === "NEEDS_REVIEW";
+    const candidates = matching.filter((s) => !parked(s));
     const busy = (s: { id: string }) =>
-      lockedSiblingIds.has(s.id) || heldSiblingIds.has(s.id) || statuses.has(s.id);
-    const lockedOrBlocked = matching.filter(busy);
-    const free = matching.filter((s) => !busy(s));
+      lockOwners.has(s.id) || heldSiblingIds.has(s.id) || ACTIVE_STATUSES.includes(statuses.get(s.id) ?? "");
+    const lockedOrBlocked = candidates.filter(busy);
+    const free = candidates.filter((s) => !busy(s));
 
     if (free.length) {
       const result = await executeMerge(
@@ -294,7 +299,14 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
     if (indexLagMs > 0) {
       return retry("transient", "no siblings yet; waiting for the search index", Math.max(indexLagMs, 5_000));
     }
-    return done("NO_SIBLINGS", `no matching sibling within ${settings.mergeWindowHours}h`);
+    // Reaching here with matching non-empty means every same-group sibling
+    // was parked in review and dropped above.
+    return done(
+      matching.length ? "NO_PARTNER" : "NO_SIBLINGS",
+      matching.length
+        ? "every matching sibling is part of a merge flagged for review"
+        : `no matching sibling within ${settings.mergeWindowHours}h`,
+    );
   } catch (err: any) {
     // A lost work-item lease (raised by the merge's outer fence or a renew)
     // means another worker owns the item now — write nothing.

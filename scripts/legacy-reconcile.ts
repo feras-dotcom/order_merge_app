@@ -18,11 +18,13 @@
 //     Then each secondary's live state gives its cancel sub-phase:
 //       cancelled with a "merged into #<primary>" staff note → CANCEL_VERIFIED
 //       (and a MergeRecord is written); cancelled otherwise → CANCEL_REVIEW;
-//       open with cancelRequestedAt → CANCEL_IN_DOUBT (+ synthetic UNKNOWN
-//       ORDER_CANCEL attempt); open and never requested → CANCEL_READY.
+//       open with the journal's cancelRequestedAt → CANCEL_IN_DOUBT
+//       (+ synthetic UNKNOWN ORDER_CANCEL attempt); open and never requested
+//       → CANCEL_READY. (Shopify's Order has no cancelRequestedAt field; the
+//       v1 journal JSON is the only source.)
 //     Anything else → REVIEW_REQUIRED.
 
-import "dotenv/config";
+import "./require-database-url";
 import db from "../app/db.server";
 import { newOpToken, DB_WALL } from "../app/lib/ownership.server";
 
@@ -33,7 +35,6 @@ const EVIDENCE_QUERY = `#graphql
   query LegacyEvidence($id: ID!) {
     order(id: $id) {
       cancelledAt
-      cancelRequestedAt
       displayFulfillmentStatus
       cancellation { staffNote }
       lineItems(first: 100) {
@@ -74,7 +75,7 @@ const APP_QUERY = `#graphql
   query { currentAppInstallation { app { id } } }`;
 
 type Line = { id: string; quantity: number; currentQuantity: number; variantId: string | null; description: string | null };
-type Secondary = { id: string; name: string; items?: number };
+type Secondary = { id: string; name: string; items?: number; cancelRequestedAt?: string | null };
 
 const multisetKey = (l: { variantId: string | null; quantity: number }) => `${l.variantId}:${l.quantity}`;
 const multisetEqual = (a: { variantId: string | null; quantity: number }[], b: { variantId: string | null; quantity: number }[]) => {
@@ -131,6 +132,12 @@ async function main() {
       `${op.id}  ${op.status}  →  ${verdict.phase}  ${verdict.reason ?? ""}` +
         (apply ? "" : "  (dry run)"),
     );
+    for (const s of verdict.secondaries ?? []) {
+      console.log(`    ${s.name}  →  ${s.cancelPhase ?? "-"}`);
+    }
+    for (const r of verdict.records ?? []) {
+      console.log(`    + MergeRecord  ${r.name} → ${op.primaryOrderName}`);
+    }
     if (!apply) continue;
 
     // Lock every involved order. On a conflict with another v1 op, flag both.
@@ -155,11 +162,15 @@ async function main() {
       }
     }
 
+    // v2 shield: converted ops are non-terminal, so status reads NEEDS_REVIEW
+    // to v1 consumers regardless of the phase we computed.
     const secondaries = verdict.secondaries.map((s: any) => ({ ...s }));
     await db.$executeRaw`
       UPDATE "MergeOperation"
       SET "protocolVersion" = 2, "phase" = ${verdict.phase},
+          "status" = 'NEEDS_REVIEW',
           "opToken" = ${newOpToken()}, "expectedTransfer" = ${JSON.stringify(verdict.expectedTransfer ?? [])}::jsonb,
+          "appliedEvidence" = ${verdict.appliedEvidence ? JSON.stringify(verdict.appliedEvidence) : null}::jsonb,
           "firstDispatchAt" = "createdAt", "nextCheckAt" = ${DB_WALL},
           "secondaries" = ${JSON.stringify(secondaries)}::jsonb,
           "reviewReason" = ${verdict.reason ?? null},
@@ -232,6 +243,8 @@ async function classify(op: any, appIdCache: Map<string, string>, unauthenticate
   const records: Secondary[] = [];
   const syntheticAttempts: string[] = [];
   const expectedTransfer: any[] = [];
+  const appliedLines: { secondaryId: string; lineItemId: string; variantId: string | null; quantity: number }[] = [];
+  let evidenceAgreement: { id: string; happenedAt: string } | null = null;
   let index = 0;
   for (const s of (op.secondaries as Secondary[]) ?? []) {
     index += 1;
@@ -249,20 +262,32 @@ async function classify(op: any, appIdCache: Map<string, string>, unauthenticate
     // Evidence: token lines on the primary for this secondary, matching the
     // secondary's multiset and inside one MergeShip agreement.
     const tokenLines = primaryLines.filter((l) => descriptionFor(l, s.name));
+    const matchedAgreement = agreements.find((a: any) =>
+      tokenLines.every((l) =>
+        (a.sales?.nodes ?? []).some((n: any) => n.__typename === "ProductSale" && n.lineItem?.id === l.id),
+      ),
+    );
     const applied =
       tokenLines.length > 0 &&
       multisetEqual(
         tokenLines.map((l) => ({ variantId: l.variantId, quantity: l.currentQuantity })),
         sLines,
       ) &&
-      agreements.some((a: any) =>
-        tokenLines.every((l) =>
-          (a.sales?.nodes ?? []).some((n: any) => n.__typename === "ProductSale" && n.lineItem?.id === l.id),
-        ),
-      );
+      matchedAgreement != null;
     if (!applied) {
       return { phase: "REVIEW_REQUIRED", reason: `no evidence the transfer to ${op.primaryOrderName} applied for ${s.name}`, secondaries, records, expectedTransfer };
     }
+    // The protocol's cancel precondition needs appliedEvidence.lines — record
+    // exactly which primary lines this secondary's transfer landed on.
+    appliedLines.push(
+      ...tokenLines.map((l) => ({
+        secondaryId: s.id,
+        lineItemId: l.id,
+        variantId: l.variantId,
+        quantity: l.currentQuantity,
+      })),
+    );
+    evidenceAgreement = evidenceAgreement ?? { id: matchedAgreement.id, happenedAt: matchedAgreement.happenedAt };
 
     // Cancel sub-phase from live state.
     const staffNote = secondary.cancellation?.staffNote ?? "";
@@ -271,14 +296,24 @@ async function classify(op: any, appIdCache: Map<string, string>, unauthenticate
       records.push(s);
     } else if (secondary.cancelledAt) {
       secondaries.push({ ...s, cancelPhase: "CANCEL_REVIEW", cancelledAt: secondary.cancelledAt });
-    } else if (secondary.cancelRequestedAt) {
+    } else if (s.cancelRequestedAt) {
       secondaries.push({ ...s, cancelPhase: "CANCEL_IN_DOUBT" });
       syntheticAttempts.push(s.id);
     } else {
       secondaries.push({ ...s, cancelPhase: "CANCEL_READY" });
     }
   }
-  return { phase: "APPLIED", reason: null, secondaries, records, syntheticAttempts, expectedTransfer };
+  return {
+    phase: "APPLIED",
+    reason: null,
+    secondaries,
+    records,
+    syntheticAttempts,
+    expectedTransfer,
+    appliedEvidence: evidenceAgreement
+      ? { agreementId: evidenceAgreement.id, happenedAt: evidenceAgreement.happenedAt, lines: appliedLines }
+      : null,
+  };
 }
 
 await main();

@@ -632,3 +632,63 @@ it("17. fence-before-send ownership loss: attempt REJECTED not dispatched, zero 
   expect(requeued.status).toBe("PENDING");
   expect(requeued.operationId).toBe(result.operation!.id);
 });
+
+// ── 18. Legacy-converted ops accept the v1 cancel note ──────────────────────
+
+const LEGACY_CANCEL_NOTE =
+  "Repeat order merged into #1 by MergeShip. Items transferred, inventory restocked, not refunded.";
+
+it("18. legacy op (calculatedOrderId null): 'merged into #1 by MergeShip' note verifies the cancel", async () => {
+  const ctx = setup();
+  const { shopify, deps, ops } = ctx;
+  await deps.claims.acquire(SHOP, [id(1), id(2)], "claim", deps.leaseTtlMs);
+  // legacy-reconcile marks converted ops with calculatedOrderId IS NULL.
+  const op = await ops.createOperation(
+    opInput(ctx, { calculatedOrderId: null, leaseToken: "legacy-lease" }),
+  );
+  await ops.transition(
+    { id: op.id, leaseToken: "legacy-lease", workItemId: null },
+    {
+      expectedPhase: "READY",
+      phase: "APPLIED",
+      secondaries: [{ id: id(2), name: "#2", items: 1, cancelPhase: "CANCEL_READY" }],
+      nextCheckAt: "now",
+    },
+  );
+  // The secondary was cancelled during the v1 era — the note has no MS- token.
+  shopify.order(2).cancelledAt = deps.now().toISOString();
+  shopify.order(2).cancellation = { staffNote: LEGACY_CANCEL_NOTE };
+
+  const final = await driveToIdle(ctx, op.id);
+  expect(final?.phase).toBe("COMPLETED");
+  expect(ops.records).toHaveLength(1);
+  expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0); // verified, never re-issued
+});
+
+it("19. v2 op (calculatedOrderId set): a legacy-style note is NOT ours — REVIEW_REQUIRED", async () => {
+  const ctx = setup();
+  const { shopify, deps, ops } = ctx;
+  await deps.claims.acquire(SHOP, [id(1), id(2)], "claim", deps.leaseTtlMs);
+  const op = await ops.createOperation(
+    opInput(ctx, {
+      calculatedOrderId: "gid://shopify/CalculatedOrder/1",
+      leaseToken: "v2-lease",
+    }),
+  );
+  await ops.transition(
+    { id: op.id, leaseToken: "v2-lease", workItemId: null },
+    {
+      expectedPhase: "READY",
+      phase: "APPLIED",
+      secondaries: [{ id: id(2), name: "#2", items: 1, cancelPhase: "CANCEL_READY" }],
+      nextCheckAt: "now",
+    },
+  );
+  shopify.order(2).cancelledAt = deps.now().toISOString();
+  shopify.order(2).cancellation = { staffNote: LEGACY_CANCEL_NOTE };
+
+  const final = await driveToIdle(ctx, op.id);
+  expect(final?.phase).toBe("REVIEW_REQUIRED");
+  expect(final?.reviewReason).toContain("outside MergeShip");
+  expect(ops.records).toHaveLength(0); // a foreign cancel is never adopted
+});
