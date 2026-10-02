@@ -407,4 +407,19 @@ describe("MemoryWorkStore stale-token guards", () => {
       OwnershipLostError,
     );
   });
+
+  it("purgeDone removes overlap-era DONE rows (doneAt null) by their createdAt", async () => {
+    let t = 0;
+    const work = new MemoryWorkStore();
+    work.clock = () => new Date(t);
+    const old = (await work.insertLeased("s", "o1", "tok", 60_000, 600_000))!;
+    await work.markDone(old.id, "tok", "MERGED", "x");
+    work.items.get(old.id)!.doneAt = null; // overlap-era row: doneAt was never set
+    t = 40 * 24 * 60 * 60 * 1000;
+    const recent = (await work.insertLeased("s", "o2", "tok", 60_000, 600_000))!;
+    await work.markDone(recent.id, "tok", "MERGED", "x");
+    expect(await work.purgeDone(30 * 24 * 60 * 60 * 1000)).toBe(1);
+    expect(await work.find("s", "o1")).toBeNull();
+    expect(await work.find("s", "o2")).toMatchObject({ status: "DONE" });
+  });
 });

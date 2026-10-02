@@ -60,7 +60,8 @@ export interface WorkStore {
   /** retryAfter = now + delayMs, lastReason, lease cleared. Conditional as
    *  above; returns false if ownership lost. */
   scheduleRetry(id: string, token: string, delayMs: number, reason: string): Promise<boolean>;
-  /** Deletes DONE rows with doneAt older than olderThanMs. */
+  /** Deletes DONE rows whose finish time (doneAt, falling back to createdAt
+   *  for overlap-era rows that predate the column) is older than olderThanMs. */
   purgeDone(olderThanMs: number): Promise<number>;
   /** Find by (shop, orderId) — tests/observability. */
   find(shop: string, orderId: string): Promise<WorkItem | null>;
@@ -155,9 +156,10 @@ export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
       return updated === 1;
     },
     async purgeDone(olderThanMs) {
+      // COALESCE covers overlap-era DONE rows whose doneAt was never set.
       return db.$executeRaw`
         DELETE FROM "ProcessedWebhook"
-        WHERE "status" = 'DONE' AND "doneAt" IS NOT NULL AND "doneAt" < ${dbNowPlus(-olderThanMs)}`;
+        WHERE "status" = 'DONE' AND COALESCE("doneAt", "createdAt") < ${dbNowPlus(-olderThanMs)}`;
     },
     async find(shop, orderId) {
       const row = await db.processedWebhook.findUnique({ where: { shop_orderId: { shop, orderId } } });

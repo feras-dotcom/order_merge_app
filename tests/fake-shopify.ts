@@ -633,7 +633,9 @@ export class MemoryWorkStore implements WorkStore {
     const cutoff = this.clock().getTime() - olderThanMs;
     let purged = 0;
     for (const [id, item] of this.items) {
-      if (item.status === "DONE" && item.doneAt && item.doneAt.getTime() < cutoff) {
+      // COALESCE(doneAt, createdAt): overlap-era DONE rows never got a doneAt.
+      const finishedAt = item.doneAt ?? item.createdAt;
+      if (item.status === "DONE" && finishedAt.getTime() < cutoff) {
         this.items.delete(id);
         this.byOrder.delete(`${item.shop} ${item.orderId}`);
         purged += 1;

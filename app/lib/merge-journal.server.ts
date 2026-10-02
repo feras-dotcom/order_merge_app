@@ -1,5 +1,5 @@
-import { Prisma } from "@prisma/client";
-import db from "../db.server";
+import { Prisma, type PrismaClient } from "@prisma/client";
+import defaultDb from "../db.server";
 import { DB_NOW, dbNowPlus, OwnershipLostError } from "./ownership.server";
 
 // ── Merge journal ─────────────────────────────────────────────────────────────
@@ -110,9 +110,10 @@ const toRecord = (row: any): MergeOperationRecord => ({
 const leasedCondition = (op: Pick<MergeOperationRecord, "id" | "leaseToken">) =>
   Prisma.sql`"id" = ${op.id} AND "leaseToken" = ${op.leaseToken} AND "leasedUntil" >= ${DB_NOW}`;
 
-export const prismaMergeJournal: MergeJournal = {
-  async create(op, token, ttlMs) {
-    const rows = await db.$queryRaw<any[]>`
+export function makeMergeJournal(db: PrismaClient): MergeJournal {
+  return {
+    async create(op, token, ttlMs) {
+      const rows = await db.$queryRaw<any[]>`
       INSERT INTO "MergeOperation" (
         "id", "shop", "status", "primaryOrderId", "primaryOrderName", "customerId",
         "primaryLineItemCountBefore", "addedLineItemCount", "secondaries",
@@ -124,77 +125,80 @@ export const prismaMergeJournal: MergeJournal = {
         ${op.involvedOrderIds}, 0, ${token}, ${dbNowPlus(ttlMs)}, ${DB_NOW}, ${DB_NOW}
       )
       RETURNING *`;
-    return toRecord(rows[0]);
-  },
-  async update(op, patch) {
-    const sets: Prisma.Sql[] = [];
-    if (patch.status !== undefined) sets.push(Prisma.sql`"status" = ${patch.status}`);
-    if (patch.secondaries !== undefined)
-      sets.push(Prisma.sql`"secondaries" = ${JSON.stringify(patch.secondaries)}::jsonb`);
-    if (patch.attempts !== undefined) sets.push(Prisma.sql`"attempts" = ${patch.attempts}`);
-    if ("lastError" in patch) sets.push(Prisma.sql`"lastError" = ${patch.lastError}`);
-    if (!sets.length) return;
-    const updated = await db.$executeRaw`
+      return toRecord(rows[0]);
+    },
+    async update(op, patch) {
+      const sets: Prisma.Sql[] = [];
+      if (patch.status !== undefined) sets.push(Prisma.sql`"status" = ${patch.status}`);
+      if (patch.secondaries !== undefined)
+        sets.push(Prisma.sql`"secondaries" = ${JSON.stringify(patch.secondaries)}::jsonb`);
+      if (patch.attempts !== undefined) sets.push(Prisma.sql`"attempts" = ${patch.attempts}`);
+      if ("lastError" in patch) sets.push(Prisma.sql`"lastError" = ${patch.lastError}`);
+      if (!sets.length) return;
+      const updated = await db.$executeRaw`
       UPDATE "MergeOperation" SET ${Prisma.join(sets)}, "updatedAt" = ${DB_NOW}
       WHERE ${leasedCondition(op)}`;
-    if (updated === 0) throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
-  },
-  async renew(op, ttlMs) {
-    const updated = await db.$executeRaw`
+      if (updated === 0) throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+    },
+    async renew(op, ttlMs) {
+      const updated = await db.$executeRaw`
       UPDATE "MergeOperation" SET "leasedUntil" = ${dbNowPlus(ttlMs)}, "updatedAt" = ${DB_NOW}
       WHERE ${leasedCondition(op)}`;
-    if (updated === 0) throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
-  },
-  async acquireLease(opId, token, ttlMs) {
-    const rows = await db.$queryRaw<any[]>`
+      if (updated === 0) throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+    },
+    async acquireLease(opId, token, ttlMs) {
+      const rows = await db.$queryRaw<any[]>`
       UPDATE "MergeOperation"
       SET "leaseToken" = ${token}, "leasedUntil" = ${dbNowPlus(ttlMs)}, "updatedAt" = ${DB_NOW}
       WHERE "id" = ${opId} AND "status" IN ('PENDING_COMMIT', 'COMMITTED')
         AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_NOW})
       RETURNING *`;
-    return rows.length ? toRecord(rows[0]) : null;
-  },
-  async findUnfinished(shop) {
-    const rows = await db.mergeOperation.findMany({
-      where: { shop, status: { in: UNFINISHED_STATUSES } },
-      orderBy: { createdAt: "asc" },
-    });
-    return rows.map(toRecord);
-  },
-  async findBlockingOrderIds(shop) {
-    const rows = await db.mergeOperation.findMany({
-      where: { shop, status: { in: BLOCKING_STATUSES } },
-      select: { involvedOrderIds: true },
-    });
-    return new Set(rows.flatMap((r) => r.involvedOrderIds));
-  },
-  async findBlockingOrderStatuses(shop) {
-    const rows = await db.mergeOperation.findMany({
-      where: { shop, status: { in: BLOCKING_STATUSES } },
-      select: { status: true, involvedOrderIds: true },
-    });
-    const map = new Map<string, MergeOperationStatus>();
-    for (const row of rows) {
-      for (const orderId of row.involvedOrderIds) map.set(orderId, row.status as MergeOperationStatus);
-    }
-    return map;
-  },
-  async findShopsWithUnfinished() {
-    const rows = await db.mergeOperation.findMany({
-      where: { status: { in: UNFINISHED_STATUSES } },
-      select: { shop: true },
-      distinct: ["shop"],
-    });
-    return rows.map((r) => r.shop);
-  },
-  async recordHistory(entry) {
-    await db.mergeRecord.createMany({ data: [entry], skipDuplicates: true });
-  },
-};
+      return rows.length ? toRecord(rows[0]) : null;
+    },
+    async findUnfinished(shop) {
+      const rows = await db.mergeOperation.findMany({
+        where: { shop, status: { in: UNFINISHED_STATUSES } },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map(toRecord);
+    },
+    async findBlockingOrderIds(shop) {
+      const rows = await db.mergeOperation.findMany({
+        where: { shop, status: { in: BLOCKING_STATUSES } },
+        select: { involvedOrderIds: true },
+      });
+      return new Set(rows.flatMap((r) => r.involvedOrderIds));
+    },
+    async findBlockingOrderStatuses(shop) {
+      const rows = await db.mergeOperation.findMany({
+        where: { shop, status: { in: BLOCKING_STATUSES } },
+        select: { status: true, involvedOrderIds: true },
+      });
+      const map = new Map<string, MergeOperationStatus>();
+      for (const row of rows) {
+        for (const orderId of row.involvedOrderIds) map.set(orderId, row.status as MergeOperationStatus);
+      }
+      return map;
+    },
+    async findShopsWithUnfinished() {
+      const rows = await db.mergeOperation.findMany({
+        where: { status: { in: UNFINISHED_STATUSES } },
+        select: { shop: true },
+        distinct: ["shop"],
+      });
+      return rows.map((r) => r.shop);
+    },
+    async recordHistory(entry) {
+      await db.mergeRecord.createMany({ data: [entry], skipDuplicates: true });
+    },
+  };
+}
+
+export const prismaMergeJournal: MergeJournal = makeMergeJournal(defaultDb);
 
 /** Operations the merchant must look at (shown on the dashboard). */
 export async function listOperationsNeedingReview(shop: string) {
-  return db.mergeOperation.findMany({
+  return defaultDb.mergeOperation.findMany({
     where: { shop, status: "NEEDS_REVIEW" },
     orderBy: { createdAt: "desc" },
     select: {
