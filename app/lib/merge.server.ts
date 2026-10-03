@@ -17,7 +17,7 @@
 // (gql() caps a call at 45s, the TTL is 120s). Durable locks + the operation
 // row + evidence are the safety mechanism.
 
-import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
+import { gql, gqlNullable, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
 import { prismaClaimStore, type ClaimStore } from "./claims.server";
 import {
   newLeaseToken,
@@ -550,13 +550,12 @@ export async function verifyCalculatedOrder(
   expectedTransfer: unknown,
 ): Promise<string | null> {
   if (!calcId) return "No calculated order was recorded for this operation.";
-  const node: any = await gql(
+  const node: any = await gqlNullable(
     admin,
     "Verify calculated order",
     CALCULATED_ORDER_QUERY,
     { id: calcId },
     "node",
-    null,
   );
   if (!node) return "The calculated order is no longer available (committed or expired).";
   const have = (node.addedLineItems?.nodes ?? []).flatMap((n: any) => {
@@ -823,7 +822,11 @@ export async function executeMerge(
       });
     } catch (err: any) {
       if (err instanceof ClaimContentionError) {
-        return skip(err.message, "contention", "LOCKED");
+        return skip(
+          err.message,
+          "contention",
+          err.message.startsWith("New merges are disabled") ? "MERGES_DISABLED" : "LOCKED",
+        );
       }
       if (err instanceof OwnershipLostError) return ownershipLost(err);
       throw err;

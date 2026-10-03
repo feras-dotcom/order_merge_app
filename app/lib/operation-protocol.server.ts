@@ -14,7 +14,9 @@ import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
 import { newLeaseToken, OwnershipLostError } from "./ownership.server";
 import {
   evaluateMergeGroup,
+  orderStateIneligibility,
   REVIEW_TAG,
+  type MergeLineItem,
   type OrderState,
 } from "./eligibility";
 import {
@@ -29,6 +31,7 @@ import {
 import { resolveAppId, verifyTransferEvidence, type AppliedEvidence } from "./evidence.server";
 import type {
   AttemptKind,
+  ExpectedTransferEntry,
   MutationAttempt,
   OperationPatch,
   OperationRecord,
@@ -70,7 +73,7 @@ const CANCEL_MUTATION = `#graphql
       staffNote: $staffNote
     ) {
       job { id }
-      orderCancelUserErrors { field message }
+      orderCancelUserErrors { field message code }
     }
   }`;
 
@@ -118,9 +121,16 @@ interface SendResult {
 }
 
 /** Sends a Shopify mutation through the fenced client and classifies the
- *  outcome for the write-ahead attempt row. `ambiguous` maps a userErrors
- *  message to UNKNOWN when the wording does not prove rejection (e.g.
- *  "already been saved").
+ *  outcome for the write-ahead attempt row. userErrors rejection is per kind:
+ *    EDIT_COMMIT — REJECTED only for the observed-loser message "The
+ *      calculated order does not exist." (this op dispatches at most one
+ *      commit, so its calc cannot have been consumed by us); everything
+ *      else, "already been saved" included, is UNKNOWN — evidence decides.
+ *    ORDER_CANCEL — every userError is UNKNOWN: a cancel is never retried
+ *      off an error string; the in-doubt poll + ladder reconciles. The
+ *      OrderCancelUserError `code` is recorded in the summary.
+ *    REVIEW_TAG / ANNOTATE / CLOSE — cosmetic and idempotent, so a userError
+ *      is a definitive REJECTED (the gate's 3-attempt cap bounds it).
  *
  *  OwnershipLostError can only come from the fence, which runs BEFORE
  *  `admin.graphql` — the request provably never left the process, so the
@@ -133,7 +143,7 @@ async function sendAttempt(
   dispatchToken: string,
   sentSoFar: () => number,
   fn: () => Promise<{ jobId?: string | null } | void>,
-  ambiguous: (message: string) => boolean,
+  kind: AttemptKind,
 ): Promise<SendResult> {
   const sentBefore = sentSoFar();
   try {
@@ -155,7 +165,19 @@ async function sendAttempt(
     }
     const summary = reasonFromUnknown(err);
     if (err instanceof ShopifyGraphqlError && err.rejected) {
-      return { state: ambiguous(summary) ? "UNKNOWN" : "REJECTED", summary };
+      if (kind === "EDIT_COMMIT") {
+        const definite =
+          err.userErrors.length > 0 &&
+          err.userErrors.every((e) => /^The calculated order does not exist\.?$/i.test(e.message));
+        return { state: definite ? "REJECTED" : "UNKNOWN", summary };
+      }
+      if (kind === "ORDER_CANCEL") {
+        const coded = err.userErrors.length
+          ? err.userErrors.map((e) => `${e.message}${e.code ? ` [${e.code}]` : ""}`).join("; ")
+          : summary;
+        return { state: "UNKNOWN", summary: coded };
+      }
+      return { state: "REJECTED", summary };
     }
     return { state: "UNKNOWN", summary };
   }
@@ -182,6 +204,62 @@ const isWaiting = (op: OperationRecord, now: Date): boolean =>
   (op.phase === "COMPLETED" && op.sideEffectsDone) ||
   op.nextCheckAt === null ||
   (op.nextCheckAt instanceof Date && op.nextCheckAt.getTime() > now.getTime());
+
+// ── Frozen-transfer binding (B1) ─────────────────────────────────────────────
+
+/**
+ * Is the secondary still holding exactly the merchandise the recorded
+ * transfer froze at plan time? Returns a reason when anything changed — the
+ * commit and the cancel must only ever move what was recorded. A secondary
+ * that gained, lost, resized or refitted merchandise (or shows any order
+ * state change) cannot be committed or cancelled automatically.
+ */
+export function sourceManifestMismatch(
+  entry: ExpectedTransferEntry,
+  state: OrderState,
+  items: MergeLineItem[],
+): string | null {
+  const stateReason = orderStateIneligibility(state);
+  if (stateReason) return stateReason;
+
+  if (entry.lines.every((l) => l.sourceLineItemId != null)) {
+    const expectedIds = new Set(entry.lines.map((l) => l.sourceLineItemId));
+    for (const line of entry.lines) {
+      const item = items.find((i) => i.id === line.sourceLineItemId);
+      if (!item) {
+        return `${state.name}: recorded line ${line.sourceLineItemId} no longer exists.`;
+      }
+      if ((item.variant?.id ?? null) !== line.variantId) {
+        return `${state.name}: recorded line ${line.sourceLineItemId}'s variant changed.`;
+      }
+      if (item.currentQuantity !== line.quantity || item.unfulfilledQuantity !== line.quantity) {
+        return `${state.name}: recorded line ${line.sourceLineItemId}'s quantity changed.`;
+      }
+    }
+    // Added lines — including a previously-removed line going 0→N — are not
+    // part of the frozen transfer.
+    const extra = items.find((i) => i.currentQuantity > 0 && !expectedIds.has(i.id ?? null));
+    if (extra) return `${state.name} has new merchandise since the transfer was frozen.`;
+    return null;
+  }
+
+  // Legacy-converted ops carry no source ids: compare variant/quantity
+  // multisets over the remaining merchandise instead.
+  const counts = new Map<string, number>();
+  for (const l of entry.lines) {
+    const key = `${l.variantId}×${l.quantity}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (const item of items) {
+    if (item.currentQuantity <= 0) continue;
+    const key = `${item.variant?.id ?? null}×${item.currentQuantity}`;
+    counts.set(key, (counts.get(key) ?? 0) - 1);
+  }
+  if ([...counts.values()].some((n) => n !== 0)) {
+    return `${state.name}'s merchandise no longer matches the recorded transfer.`;
+  }
+  return null;
+}
 
 // ── the driver ───────────────────────────────────────────────────────────────
 
@@ -242,6 +320,45 @@ export async function driveOperation(
     }
   };
 
+  /** When Shopify reads have failed for this long, the op parks visibly
+   *  instead of retrying forever: READY → ABANDONED (nothing can have been
+   *  dispatched), anything else → REVIEW_REQUIRED. The base is the durable
+   *  timestamp anchoring the phase — for COMMIT_REJECTED it is derived from
+   *  the last rejection + quiet period rather than nextCheckAt, which each
+   *  read-retry reschedule moves. */
+  async function readFailureHorizon(
+    op: OperationRecord,
+  ): Promise<{ horizon: number; base: number } | null> {
+    const HOUR = 60 * 60_000;
+    let base: number | null | undefined;
+    let span = HOUR;
+    switch (op.phase) {
+      case "READY":
+        base = op.createdAt?.getTime();
+        break;
+      case "COMMIT_IN_DOUBT":
+        base = op.firstDispatchAt?.getTime();
+        break;
+      case "COMMIT_REJECTED": {
+        const last = (await deps.ops.listAttempts(op.id, "EDIT_COMMIT"))
+          .filter((a) => a.state === "REJECTED")
+          .map((a) => a.respondedAt?.getTime() ?? 0);
+        base = last.length ? Math.max(...last) + QUIET_PERIOD_MS : op.nextCheckAt?.getTime();
+        break;
+      }
+      case "APPLIED": {
+        const happenedAt = (op.appliedEvidence as AppliedEvidence | null)?.happenedAt;
+        base = happenedAt ? new Date(happenedAt).getTime() : op.updatedAt?.getTime();
+        span = 2 * HOUR;
+        break;
+      }
+      default:
+        return null; // COMPLETED / REVIEW_REQUIRED keep the plain retry
+    }
+    if (base == null || isNaN(base)) return null;
+    return { horizon: base + span, base };
+  }
+
   for (let i = 0; i < 40; i++) {
     try {
       switch (current.phase) {
@@ -269,7 +386,28 @@ export async function driveOperation(
     } catch (err) {
       if (err instanceof OwnershipLostError) return null;
       if (err instanceof ShopifyGraphqlError && !err.rejected) {
-        // Transient Shopify read failure: retry shortly, keep the phase.
+        // Transient Shopify read failure: retry shortly — but not forever.
+        // Past the per-phase horizon the op parks visibly (REVIEW_REQUIRED,
+        // or ABANDONED while still READY so no attempt can exist).
+        const horizon = await readFailureHorizon(current);
+        if (horizon && deps.now().getTime() > horizon.horizon) {
+          try {
+            if (current.phase === "READY") {
+              await move({ phase: "ABANDONED", lastError: err.message, nextCheckAt: null });
+            } else {
+              const minutes = Math.max(1, Math.round((deps.now().getTime() - horizon.base) / 60_000));
+              await move({
+                phase: "REVIEW_REQUIRED",
+                reviewReason: `Shopify could not be read for ${minutes} minutes; last error: ${err.message}`,
+                nextCheckAt: "now",
+              });
+            }
+          } catch (inner) {
+            if (inner instanceof OwnershipLostError) return null;
+            throw inner;
+          }
+          return current;
+        }
         try {
           await move({ nextCheckAt: READ_RETRY_MS, lastError: err.message });
         } catch (inner) {
@@ -322,7 +460,7 @@ export async function driveOperation(
           { id: current.calculatedOrderId, staffNote },
           "orderEditCommit",
         ).then(() => undefined),
-      (message) => /already been saved/i.test(message),
+      "EDIT_COMMIT",
     );
     await deps.hooks?.afterSend?.();
     await deps.hooks?.beforeAttemptRecord?.();
@@ -356,6 +494,16 @@ export async function driveOperation(
     if (!evaluated.ok) return evaluated.reason;
     if (evaluated.primary.id !== current.primaryOrderId) {
       return "A different order would be the primary now; the recorded transfer no longer applies.";
+    }
+    // Every secondary must still hold exactly the frozen transfer — a
+    // merchant edit between planning and commit changes what the calc
+    // describes, so this merge must never dispatch.
+    for (const entry of (current.expectedTransfer ?? []) as ExpectedTransferEntry[]) {
+      const state = orders.find((o) => o.id === entry.secondaryId);
+      const mismatch = state
+        ? sourceManifestMismatch(entry, state, items.get(entry.secondaryId) ?? [])
+        : `A secondary order could no longer be loaded.`;
+      if (mismatch) return mismatch;
     }
     const primaryItems = items.get(current.primaryOrderId) ?? [];
     const before = new Set(current.primaryLineItemIdsBefore);
@@ -555,7 +703,7 @@ export async function driveOperation(
           "orderCancelUserErrors",
         );
         return { jobId: res.job?.id ?? null };
-      }, () => false);
+      }, "ORDER_CANCEL");
       await deps.hooks?.afterSend?.();
       await deps.hooks?.beforeAttemptRecord?.();
       await deps.ops.recordAttempt(attempt.id, dispatchToken, result.state, result.summary, result.jobId);
@@ -664,18 +812,48 @@ export async function driveOperation(
     if ((st.fulfillments?.length ?? 0) > 0) {
       return `${s.name} has fulfillment objects; a human must decide.`;
     }
-    const evidence = (current.appliedEvidence ?? null) as AppliedEvidence | null;
-    const evLines = (evidence?.lines ?? []).filter((l) => l.secondaryId === s.id);
-    if (!evLines.length) {
+
+    // (a) The secondary's merchandise must still be exactly the frozen
+    //     transfer — "put the items back" is only safe when nothing moved.
+    const entry = (current.expectedTransfer as ExpectedTransferEntry[] | null)?.find(
+      (e) => e.secondaryId === s.id,
+    );
+    if (!entry) {
+      return `No recorded transfer exists for ${s.name}; its merchandise cannot be verified.`;
+    }
+    const sItems = await fetchAllLineItems(fenced, s.id);
+    const mismatch = sourceManifestMismatch(entry, st, sItems);
+    if (mismatch) return mismatch;
+
+    // (b) The recorded applied evidence must still be readable on the
+    //     primary: a fresh verification, not just stored line ids — the
+    //     agreement id and every (lineItemId, variantId, quantity) for this
+    //     secondary must match what APPLIED recorded.
+    const stored = (current.appliedEvidence ?? null) as AppliedEvidence | null;
+    const storedLines = new Set(
+      (stored?.lines ?? [])
+        .filter((l) => l.secondaryId === s.id)
+        .map((l) => `${l.lineItemId} ${l.variantId} ${l.quantity}`),
+    );
+    if (!storedLines.size) {
       return `No applied evidence was recorded for ${s.name}; its transferred lines cannot be verified.`;
     }
-    const items = await fetchAllLineItems(fenced, current.primaryOrderId);
-    for (const line of evLines) {
-      const item = items.find((i) => i.id === line.lineItemId);
-      const qty = item ? (item.currentQuantity ?? item.quantity) : null;
-      if (!item || qty !== line.quantity) {
-        return `A transferred line item for ${s.name} was edited on the primary; the transfer is not intact.`;
-      }
+    const fresh = await verifyTransferEvidence(fenced, current, await appId());
+    if (fresh.kind === "NONE") {
+      return `Transfer evidence for ${s.name} is no longer present on the primary.`;
+    }
+    if (fresh.kind === "ANOMALY") return fresh.reason;
+    const freshLines = new Set(
+      fresh.evidence.lines
+        .filter((l) => l.secondaryId === s.id)
+        .map((l) => `${l.lineItemId} ${l.variantId} ${l.quantity}`),
+    );
+    if (
+      fresh.evidence.agreementId !== stored!.agreementId ||
+      storedLines.size !== freshLines.size ||
+      [...storedLines].some((k) => !freshLines.has(k))
+    ) {
+      return `The applied evidence for ${s.name} no longer matches the recorded transfer.`;
     }
     return null;
   }
@@ -732,7 +910,7 @@ export async function driveOperation(
       });
       if (!attempt) return false;
       await deps.hooks?.afterDispatchGate?.();
-      const result = await sendAttempt(deps.ops, attempt.id, dispatchToken, sentSoFar, send, () => false);
+      const result = await sendAttempt(deps.ops, attempt.id, dispatchToken, sentSoFar, send, kind);
       await deps.hooks?.afterSend?.();
       await deps.ops.recordAttempt(attempt.id, dispatchToken, result.state, result.summary);
       return result.state === "SUCCEEDED";
@@ -847,7 +1025,7 @@ export async function driveOperation(
         if (note) {
           await gql(fenced, `Note ${name}`, NOTE_MUTATION, { input: { id: targetId, note } }, "orderUpdate");
         }
-      }, () => false);
+      }, "REVIEW_TAG");
       await deps.hooks?.afterSend?.();
       await deps.ops.recordAttempt(attempt.id, dispatchToken, result.state, result.summary);
     }

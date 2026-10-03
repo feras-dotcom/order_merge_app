@@ -187,13 +187,17 @@ export class FakeShopify {
   /** Index-lag knob: ids listed here are invisible to the candidate search
    *  (MergeCandidateOrders) only — direct order loads still see them. */
   hiddenFromSearch = new Set<string>();
+  /** Page size for the MergeOrderEvidence connections (0 = unlimited). */
+  evidencePageSize = 0;
   /** v2: commit behaviour per calc id (or '*'):
    *  apply — applies immediately and returns success;
    *  lose-apply-later — the response is lost; the commit applies when
    *    deliverPendingCommit(calcId) is called;
    *  lose-never — the response is lost and the commit never applies;
-   *  reject — a definitive userError. */
-  commitMode = new Map<string, "apply" | "lose-apply-later" | "lose-never" | "reject">();
+   *  reject — the definitive userError "The calculated order does not exist.";
+   *  reject-internal — an ambiguous "Internal error" userError; the commit
+   *    may still apply via deliverPendingCommit. */
+  commitMode = new Map<string, "apply" | "lose-apply-later" | "lose-never" | "reject" | "reject-internal">();
   /** v2: orderCancel behaviour per order id (or '*'):
    *  apply — cancels and returns the job;
    *  delay — accepts the job; cancelledAt becomes visible after reads;
@@ -418,7 +422,22 @@ export class FakeShopify {
           data: {
             orderEditCommit: {
               order: null,
-              userErrors: [{ field: null, message: "Calculated order can't be committed" }],
+              // The wording Shopify uses for an already-consumed calculated
+              // order — the only userError that definitively means "not us".
+              userErrors: [{ field: null, message: "The calculated order does not exist." }],
+            },
+          },
+        };
+      }
+      if (mode === "reject-internal") {
+        // An ambiguous rejection: the response says error, but the commit
+        // may still apply — parked until deliverPendingCommit.
+        this.pendingCommits.set(id, edit);
+        return {
+          data: {
+            orderEditCommit: {
+              order: null,
+              userErrors: [{ field: null, message: "Internal error" }],
             },
           },
         };
@@ -441,7 +460,9 @@ export class FakeShopify {
             orderCancel: {
               job: null,
               order: { id: o.id },
-              orderCancelUserErrors: [{ field: null, message: "Order is already canceled" }],
+              orderCancelUserErrors: [
+                { field: null, message: "Cannot cancel an order that has already been canceled", code: "INVALID" },
+              ],
             },
           },
         };
@@ -453,7 +474,9 @@ export class FakeShopify {
             orderCancel: {
               job: null,
               order: { id: o.id },
-              orderCancelUserErrors: [{ field: null, message: "The order cannot be canceled" }],
+              orderCancelUserErrors: [
+                { field: null, message: "The order cannot be canceled", code: "INTERNAL_ERROR" },
+              ],
             },
           },
         };
@@ -477,17 +500,30 @@ export class FakeShopify {
     },
     MergeJob: ({ id }) => ({ data: { job: { done: this.jobs.get(id)?.done ?? false } } }),
     MergeCurrentApp: () => ({ data: { currentAppInstallation: { app: { id: APP_ID } } } }),
-    // The §6 evidence read: line items with discount allocations + agreements.
-    MergeOrderEvidence: ({ id }) => {
+    // The §6 evidence read: line items with discount allocations + agreements,
+    // both paginated when evidencePageSize is set (cursors are opaque "cursor-N").
+    MergeOrderEvidence: ({ id, after, agreementsAfter }) => {
       const o = this.orders.get(id);
+      const paginate = (all: any[], cursor: string | null | undefined) => {
+        if (!this.evidencePageSize) {
+          return { nodes: structuredClone(all), pageInfo: { hasNextPage: false, endCursor: null } };
+        }
+        const start = cursor ? Number(cursor.replace("cursor-", "")) + 1 : 0;
+        const nodes = all.slice(start, start + this.evidencePageSize);
+        const end = start + nodes.length - 1;
+        return {
+          nodes: structuredClone(nodes),
+          pageInfo: {
+            hasNextPage: end < all.length - 1,
+            endCursor: nodes.length ? `cursor-${end}` : null,
+          },
+        };
+      };
       return {
         data: {
           order: o && {
-            lineItems: {
-              nodes: structuredClone(o.lineItems),
-              pageInfo: { hasNextPage: false, endCursor: null },
-            },
-            agreements: { nodes: structuredClone(o.agreements ?? []) },
+            lineItems: paginate(o.lineItems, after),
+            agreements: paginate(o.agreements ?? [], agreementsAfter),
           },
         },
       };
@@ -534,17 +570,17 @@ export class FakeShopify {
     const order = this.orders.get(edit.orderId)!;
     const sales: any[] = [];
     for (const added of edit.added) {
-      const price = (10 * added.quantity).toFixed(2);
       const item: any = makeLineItem({
         variant: { id: added.variantId },
         quantity: added.quantity,
         currentQuantity: added.quantity,
         unfulfilledQuantity: added.quantity,
       });
-      item.originalUnitPriceSet = { shopMoney: { amount: price } };
+      // originalUnitPriceSet is the UNIT price; the allocation covers it fully.
+      item.originalUnitPriceSet = { shopMoney: { amount: "10.00" } };
       item.discountAllocations = [
         {
-          allocatedAmountSet: { shopMoney: { amount: price } },
+          allocatedAmountSet: { shopMoney: { amount: (10 * added.quantity).toFixed(2) } },
           discountApplication: {
             __typename: "ManualDiscountApplication",
             title: added.description,
@@ -553,14 +589,19 @@ export class FakeShopify {
         },
       ];
       order.lineItems.push(item);
-      sales.push({ __typename: "ProductSale", quantity: added.quantity, lineItem: { id: item.id } });
+      sales.push({
+        __typename: "ProductSale",
+        quantity: added.quantity,
+        actionType: "ORDER",
+        lineItem: { id: item.id },
+      });
     }
     (order.agreements ??= []).push({
       __typename: "OrderEditAgreement",
       id: `gid://shopify/OrderEditAgreement/${this.agreementSeq++}`,
       happenedAt: this.clock().toISOString(),
       app: { id: APP_ID },
-      sales: { nodes: sales },
+      sales: { nodes: sales, pageInfo: { hasNextPage: false } },
     });
     this.edits.delete(calcId);
     this.pendingCommits.delete(calcId);
@@ -569,6 +610,26 @@ export class FakeShopify {
   /** Applies a commit whose response was lost (lose-apply-later mode). */
   deliverPendingCommit(calcId: string) {
     this.applyCommit(calcId);
+  }
+
+  /** Stages the edit buildOrderEdit would have made — the applyCommit
+   *  target — without the begin/addVariant/discount GraphQL ceremony. */
+  stageEdit(
+    orderId: string,
+    added: { variantId: string; quantity: number; description?: string }[],
+  ) {
+    const calcId = `gid://shopify/CalculatedOrder/${this.editSeq++}`;
+    this.edits.set(calcId, {
+      orderId,
+      added: added.map((a) => ({
+        calculatedLineItemId: `calc-li-${lineItemSeq++}`,
+        variantId: a.variantId,
+        quantity: a.quantity,
+        description: a.description ?? "",
+      })),
+      saved: false,
+    });
+    return calcId;
   }
 
   /** An order edit made outside MergeShip: a line without the token and an
@@ -581,7 +642,7 @@ export class FakeShopify {
       currentQuantity: quantity,
       unfulfilledQuantity: quantity,
     });
-    item.originalUnitPriceSet = { shopMoney: { amount: (10 * quantity).toFixed(2) } };
+    item.originalUnitPriceSet = { shopMoney: { amount: "10.00" } };
     item.discountAllocations = [];
     o.lineItems.push(item);
     (o.agreements ??= []).push({
@@ -589,9 +650,82 @@ export class FakeShopify {
       id: `gid://shopify/OrderEditAgreement/${this.agreementSeq++}`,
       happenedAt: this.clock().toISOString(),
       app: { id: OTHER_APP_ID },
-      sales: { nodes: [{ __typename: "ProductSale", quantity, lineItem: { id: item.id } }] },
+      sales: {
+        nodes: [{ __typename: "ProductSale", quantity, actionType: "ORDER", lineItem: { id: item.id } }],
+        pageInfo: { hasNextPage: false },
+      },
     });
     return item;
+  }
+
+  /** Deletes the calculated order — Shopify stops returning it once the
+   *  edit is committed or expired. */
+  deleteCalculatedOrder(calcId: string) {
+    this.edits.delete(calcId);
+    this.pendingCommits.delete(calcId);
+  }
+
+  /** Changes a line's quantity fields together (a post-merge order edit). */
+  setLineQuantity(orderId: string, lineItemId: string, qty: number) {
+    const item = this.orders.get(orderId)!.lineItems.find((i) => i.id === lineItemId)!;
+    item.quantity = qty;
+    item.currentQuantity = qty;
+    item.unfulfilledQuantity = qty;
+  }
+
+  /** A plain new line on the order — no agreement, no token. */
+  addSourceLine(orderId: string, variantId = "gid://shopify/ProductVariant/9", quantity = 1) {
+    const o = this.orders.get(orderId)!;
+    const item = makeLineItem({
+      variant: { id: variantId },
+      quantity,
+      currentQuantity: quantity,
+      unfulfilledQuantity: quantity,
+    });
+    o.lineItems.push(item);
+    return item;
+  }
+
+  removeLine(orderId: string, lineItemId: string) {
+    const o = this.orders.get(orderId)!;
+    o.lineItems = o.lineItems.filter((i) => i.id !== lineItemId);
+  }
+
+  setLineVariant(orderId: string, lineItemId: string, variantId: string) {
+    const item = this.orders.get(orderId)!.lineItems.find((i) => i.id === lineItemId)!;
+    item.variant = { id: variantId };
+  }
+
+  /** Marks the line fulfilled: no unfulfilled units, a fulfillment object and
+   *  a PARTIALLY_FULFILLED display status. */
+  fulfillLine(orderId: string, lineItemId: string) {
+    const o = this.orders.get(orderId)!;
+    const item = o.lineItems.find((i) => i.id === lineItemId)!;
+    item.unfulfilledQuantity = 0;
+    o.displayFulfillmentStatus = "PARTIALLY_FULFILLED";
+    o.fulfillments = [
+      ...(o.fulfillments ?? []),
+      { id: `gid://shopify/Fulfillment/${(o.fulfillments?.length ?? 0) + 1}` },
+    ];
+  }
+
+  stripDiscount(orderId: string, lineItemId: string) {
+    const item: any = this.orders.get(orderId)!.lineItems.find((i) => i.id === lineItemId)!;
+    item.discountAllocations = [];
+  }
+
+  rewriteDiscountDescription(orderId: string, lineItemId: string, text: string) {
+    const item: any = this.orders.get(orderId)!.lineItems.find((i) => i.id === lineItemId)!;
+    for (const alloc of item.discountAllocations ?? []) {
+      if (alloc.discountApplication) alloc.discountApplication.description = text;
+    }
+  }
+
+  setSaleQuantity(orderId: string, agreementId: string, lineItemId: string, qty: number) {
+    const o = this.orders.get(orderId)!;
+    const agreement = (o.agreements ?? []).find((a) => a.id === agreementId);
+    const sale = (agreement?.sales?.nodes ?? []).find((s: any) => s.lineItem?.id === lineItemId);
+    if (sale) sale.quantity = qty;
   }
 
   lastCalcId() {

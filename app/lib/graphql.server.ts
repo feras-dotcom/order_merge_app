@@ -22,11 +22,19 @@ export class ShopifyGraphqlError extends Error {
    *  it is known NOT to have been applied. false for transport / top-level
    *  errors, where the outcome of a mutation is unknown. */
   readonly rejected: boolean;
+  /** The userErrors payload when `rejected` (empty otherwise). `code` exists
+   *  only on OrderCancelUserError — plain UserError has field+message only. */
+  readonly userErrors: { field?: string[] | null; message: string; code?: string | null }[];
 
-  constructor(message: string, rejected: boolean) {
+  constructor(
+    message: string,
+    rejected: boolean,
+    userErrors: { field?: string[] | null; message: string; code?: string | null }[] = [],
+  ) {
     super(message);
     this.name = "ShopifyGraphqlError";
     this.rejected = rejected;
+    this.userErrors = userErrors;
   }
 }
 
@@ -39,24 +47,17 @@ function describeErrors(errors: unknown): string {
   return typeof errors === "string" ? errors : JSON.stringify(errors);
 }
 
-/**
- * Runs a GraphQL operation and returns `data[root]`.
- *
- * @param root        Top-level field whose payload must be present.
- * @param userErrorsKey  Field on the payload holding user errors
- *                    ("userErrors" by default; orderCancel uses
- *                    "orderCancelUserErrors"). Pass null for queries.
- * @param timeoutMs   Abort the call after this long (default GQL_TIMEOUT_MS).
- */
-export async function gql<T = any>(
+/** Transport shared by gql and gqlNullable: the timeout race, top-level
+ *  GraphQL errors and the OwnershipLostError pass-through. Returns
+ *  `data[root]` or null when the root itself is null/missing. */
+async function run<T = any>(
   admin: AdminClient,
   label: string,
   query: string,
   variables: Record<string, unknown>,
   root: string,
-  userErrorsKey: string | null = "userErrors",
-  timeoutMs: number = GQL_TIMEOUT_MS,
-): Promise<T> {
+  timeoutMs: number,
+): Promise<T | null> {
   let body: any;
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
@@ -95,17 +96,55 @@ export async function gql<T = any>(
     throw new ShopifyGraphqlError(`${label} failed: ${describeErrors(body.errors)}`, false);
   }
 
-  const payload = body?.data?.[root];
-  if (payload === undefined || payload === null) {
+  return (body?.data?.[root] ?? null) as T | null;
+}
+
+/**
+ * Runs a GraphQL operation and returns `data[root]`.
+ *
+ * @param root        Top-level field whose payload must be present.
+ * @param userErrorsKey  Field on the payload holding user errors
+ *                    ("userErrors" by default; orderCancel uses
+ *                    "orderCancelUserErrors"). Pass null for queries.
+ * @param timeoutMs   Abort the call after this long (default GQL_TIMEOUT_MS).
+ */
+export async function gql<T = any>(
+  admin: AdminClient,
+  label: string,
+  query: string,
+  variables: Record<string, unknown>,
+  root: string,
+  userErrorsKey: string | null = "userErrors",
+  timeoutMs: number = GQL_TIMEOUT_MS,
+): Promise<T> {
+  const payload = await run<T>(admin, label, query, variables, root, timeoutMs);
+  if (payload === null) {
     throw new ShopifyGraphqlError(`${label} returned no ${root} payload.`, false);
   }
 
   if (userErrorsKey) {
-    const userErrors = payload[userErrorsKey] ?? [];
+    const userErrors = (payload as any)[userErrorsKey] ?? [];
     if (userErrors.length) {
-      throw new ShopifyGraphqlError(`${label} rejected: ${describeErrors(userErrors)}`, true);
+      throw new ShopifyGraphqlError(`${label} rejected: ${describeErrors(userErrors)}`, true, userErrors);
     }
   }
 
-  return payload as T;
+  return payload;
+}
+
+/**
+ * Like gql but for queries where a null root is a meaningful answer (a
+ * deleted order, an expired calculated order): returns null instead of
+ * throwing "no payload". Transport/top-level errors still throw. Queries
+ * only — no userErrors checking.
+ */
+export async function gqlNullable<T = any>(
+  admin: AdminClient,
+  label: string,
+  query: string,
+  variables: Record<string, unknown>,
+  root: string,
+  timeoutMs: number = GQL_TIMEOUT_MS,
+): Promise<T | null> {
+  return run<T>(admin, label, query, variables, root, timeoutMs);
 }

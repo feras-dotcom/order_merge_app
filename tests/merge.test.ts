@@ -318,14 +318,19 @@ describe("operation protocol — after commit (secondary work)", () => {
     expect(h.shopify.order(2).cancelCount).toBe(1);
   });
 
-  it("repeatedly rejected cancellation escalates to review and flags both orders", async () => {
+  it("a cancel userError is ambiguous — never retried, escalates to review and flags both orders", async () => {
     const h = setup();
     h.shopify.cancelMode.set(id(2), "reject");
     const { op } = await runMerge(h);
     expect(op?.phase).toBe("REVIEW_REQUIRED");
-    expect(op?.reviewReason).toMatch(/rejected/i);
+    expect(op?.reviewReason).toMatch(/never confirmed/i);
     expect(h.shopify.order(2).cancelledAt).toBeNull();
-    expect(h.ops.attempts.filter((a) => a.kind === "ORDER_CANCEL")).toHaveLength(3);
+    // A userError never proves a cancel was NOT applied, so it is recorded
+    // UNKNOWN and the orderCancel is never re-issued.
+    expect(h.ops.attempts.filter((a) => a.kind === "ORDER_CANCEL")).toEqual([
+      expect.objectContaining({ state: "UNKNOWN" }),
+    ]);
+    expect(h.shopify.mutationCalls("MergeCancelSecondary")).toBe(1);
     expect(h.shopify.order(1).tags).toContain(REVIEW_TAG);
     expect(h.shopify.order(2).tags).toContain(REVIEW_TAG);
     expect(h.ops.locks.size).toBe(2); // review holds the locks

@@ -9,6 +9,7 @@
 
 import "./require-database-url";
 import { prismaOperationStore } from "../app/lib/operation-store.server";
+import { isTransientDbError } from "../app/lib/ownership.server";
 
 const usage = () => {
   console.error(
@@ -52,7 +53,23 @@ if (flags.has("--allow")) {
 }
 
 if (Object.keys(patch).length) {
-  await prismaOperationStore.setControl(patch);
+  // setControl takes the control row FOR UPDATE with a 2s lock_timeout — an
+  // in-flight dispatch gate can hold its FOR SHARE that long. The emergency
+  // stop must never fail silently: retry briefly, then say so loudly.
+  for (let i = 0; ; i++) {
+    try {
+      await prismaOperationStore.setControl(patch);
+      break;
+    } catch (err) {
+      if (!isTransientDbError(err) || i >= 4) {
+        console.error(
+          `error: could not flip the switch — retry (${err instanceof Error ? err.message : err})`,
+        );
+        process.exit(1);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
   console.log("after:  ");
   show(await prismaOperationStore.getControl());
 } else if (argv.length) {

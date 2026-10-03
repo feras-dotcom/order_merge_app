@@ -6,11 +6,11 @@
 // no earlier than the dispatch. Anything else is ANOMALY; no token lines at
 // all is NONE (the commit may never have applied).
 
-import { gql, type AdminClient } from "./graphql.server";
+import { gql, gqlNullable, type AdminClient } from "./graphql.server";
 import type { ExpectedTransferEntry, OperationRecord } from "./operation-store.server";
 
 export const ORDER_EVIDENCE_QUERY = `#graphql
-  query MergeOrderEvidence($id: ID!, $after: String) {
+  query MergeOrderEvidence($id: ID!, $after: String, $agreementsAfter: String) {
     order(id: $id) {
       lineItems(first: 100, after: $after) {
         nodes {
@@ -29,7 +29,7 @@ export const ORDER_EVIDENCE_QUERY = `#graphql
         }
         pageInfo { hasNextPage endCursor }
       }
-      agreements(first: 50) {
+      agreements(first: 50, after: $agreementsAfter) {
         nodes {
           __typename
           id
@@ -40,11 +40,14 @@ export const ORDER_EVIDENCE_QUERY = `#graphql
               nodes {
                 __typename
                 quantity
+                actionType
                 ... on ProductSale { lineItem { id } }
               }
+              pageInfo { hasNextPage }
             }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }`;
@@ -62,7 +65,7 @@ const appIdCache = new Map<string, Promise<string>>();
 export function resolveAppId(admin: AdminClient, shop: string): Promise<string> {
   let cached = appIdCache.get(shop);
   if (!cached) {
-    cached = gql<{ app: { id: string } }>(
+    const pending = gql<{ app: { id: string } }>(
       admin,
       "Resolve app id",
       CURRENT_APP_QUERY,
@@ -70,6 +73,11 @@ export function resolveAppId(admin: AdminClient, shop: string): Promise<string> 
       "currentAppInstallation",
       null,
     ).then((r) => r.app.id);
+    // A rejected lookup must not poison the cache — the next caller retries.
+    pending.catch(() => {
+      if (appIdCache.get(shop) === pending) appIdCache.delete(shop);
+    });
+    cached = pending;
     appIdCache.set(shop, cached);
   }
   return cached;
@@ -112,25 +120,31 @@ export async function verifyTransferEvidence(
   const windowStart =
     op.firstDispatchAt == null ? null : op.firstDispatchAt.getTime() - AGREEMENT_GRACE_MS;
 
-  // All primary line items, paginated; agreements come back with the last page
-  // (the connection is order-level, so it is identical on every page).
-  const items: any[] = [];
-  let agreements: any[] = [];
-  let after: string | null = null;
+  // Both connections are paginated to completion: an agreement set cut off
+  // mid-page would make "no MergeShip agreement in window" unprovable.
+  const items = new Map<string, any>();
+  const agreementsById = new Map<string, any>();
+  let itemsAfter: string | null = null;
+  let agreementsAfter: string | null = null;
   do {
-    const order: any = await gql(
+    const order: any = await gqlNullable(
       admin,
       "Load merge evidence",
       ORDER_EVIDENCE_QUERY,
-      { id: op.primaryOrderId, after },
+      { id: op.primaryOrderId, after: itemsAfter, agreementsAfter },
       "order",
-      null,
     );
-    if (!order) throw new Error("Order evidence: the primary order was not found.");
-    items.push(...(order.lineItems?.nodes ?? []));
-    agreements = order.agreements?.nodes ?? [];
-    after = order.lineItems?.pageInfo?.hasNextPage ? order.lineItems.pageInfo.endCursor : null;
-  } while (after);
+    if (!order) {
+      return { kind: "ANOMALY", reason: "The primary order could not be loaded." };
+    }
+    for (const n of order.lineItems?.nodes ?? []) if (n?.id) items.set(n.id, n);
+    for (const n of order.agreements?.nodes ?? []) if (n?.id) agreementsById.set(n.id, n);
+    itemsAfter = order.lineItems?.pageInfo?.hasNextPage ? order.lineItems.pageInfo.endCursor : null;
+    agreementsAfter = order.agreements?.pageInfo?.hasNextPage
+      ? order.agreements.pageInfo.endCursor
+      : null;
+  } while (itemsAfter || agreementsAfter);
+  const agreements = [...agreementsById.values()];
 
   const mergeShipAgreements = agreements.filter(
     (a) =>
@@ -140,16 +154,30 @@ export async function verifyTransferEvidence(
   );
   const mergeShipAgreementInWindow = mergeShipAgreements.length > 0;
 
+  // A MergeShip agreement whose sales are truncated cannot prove attribution
+  // — fail closed rather than conclude from a partial picture.
+  for (const agreement of mergeShipAgreements) {
+    if (agreement.sales?.pageInfo?.hasNextPage) {
+      return { kind: "ANOMALY", reason: "evidence could not be inspected completely" };
+    }
+  }
+
   // Token lines: line items that did not exist at plan time AND carry the
   // op's token in a manual discount description.
   const tokenLines: { item: any; secondaryIndex: number }[] = [];
-  for (const item of items) {
+  for (const item of items.values()) {
     if (beforeIds.has(item.id)) continue;
     for (const alloc of item.discountAllocations ?? []) {
       const app_ = alloc.discountApplication;
       if (app_?.__typename !== "ManualDiscountApplication") continue;
       const idx = tokenIndex(app_.description, op.opToken ?? "");
       if (idx !== null) {
+        if (item.currentQuantity != null && item.currentQuantity !== item.quantity) {
+          return {
+            kind: "ANOMALY",
+            reason: `Token line ${item.id} was edited after the merge.`,
+          };
+        }
         tokenLines.push({ item, secondaryIndex: idx });
         break;
       }
@@ -203,24 +231,31 @@ export async function verifyTransferEvidence(
   }
 
   // Every token line must be sold by exactly ONE MergeShip agreement inside
-  // the dispatch window.
-  const lineToAgreements = new Map<string, any[]>();
+  // the dispatch window — an ORDER sale of exactly the line's quantity.
+  const lineToSales = new Map<string, { agreement: any; sale: any }[]>();
   for (const agreement of mergeShipAgreements) {
     for (const sale of agreement.sales?.nodes ?? []) {
       if (sale.__typename !== "ProductSale" || !sale.lineItem?.id) continue;
-      lineToAgreements.set(sale.lineItem.id, [...(lineToAgreements.get(sale.lineItem.id) ?? []), agreement]);
+      lineToSales.set(sale.lineItem.id, [...(lineToSales.get(sale.lineItem.id) ?? []), { agreement, sale }]);
     }
   }
   const agreementIds = new Set<string>();
   for (const { item } of tokenLines) {
-    const found = lineToAgreements.get(item.id) ?? [];
+    const found = lineToSales.get(item.id) ?? [];
     if (found.length !== 1) {
       return {
         kind: "ANOMALY",
         reason: `Token line ${item.id} is attributed to ${found.length} MergeShip edits (expected exactly one).`,
       };
     }
-    agreementIds.add(found[0].id);
+    const { agreement, sale } = found[0];
+    if (sale.actionType !== "ORDER" || sale.quantity !== item.quantity) {
+      return {
+        kind: "ANOMALY",
+        reason: `Token line ${item.id}'s sale record does not match the transferred quantity.`,
+      };
+    }
+    agreementIds.add(agreement.id);
   }
   if (agreementIds.size !== 1) {
     return {

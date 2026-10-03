@@ -388,7 +388,9 @@ describe("order work items (spec §9)", () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     let rejects = true;
     h.shopify.on("MergeEditCommit", () =>
-      rejects ? userError("orderEditCommit") : undefined,
+      // The only wording that proves a commit never applied (spec §7):
+      // the calculated order is gone, so the dispatch provably did nothing.
+      rejects ? userError("orderEditCommit", "userErrors", "The calculated order does not exist.") : undefined,
     );
     await h.webhook(id(2)); // op created + driven inline → COMMIT_REJECTED, work row settled
     const rejected = [...h.ops.ops.values()][0];
