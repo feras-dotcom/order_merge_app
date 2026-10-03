@@ -15,6 +15,7 @@ import type {
   NewMergeOperation,
 } from "../app/lib/merge-journal.server";
 import type { MergeDeps } from "../app/lib/merge.server";
+import { CANCEL_SNAPSHOT_LINE_PAGE } from "../app/lib/evidence.server";
 import type { ClaimStore } from "../app/lib/claims.server";
 import type {
   AttemptKind,
@@ -557,6 +558,36 @@ export class FakeShopify {
     MergeOrderEvidenceAgreements: ({ id, after }) => {
       const o = this.orders.get(id);
       return { data: { order: o && { agreements: this.evidencePage(o.agreements ?? [], after) } } };
+    },
+    // The one bounded read that authorizes a cancel: both orders' state, the
+    // secondary's first CANCEL_SNAPSHOT_LINE_PAGE lines, and every recorded
+    // transferred line by id. Interceptors run first, so a mutation inside
+    // one is visible in this response.
+    MergeCancelSnapshot: ({ primaryId, secondaryId, lineIds }) => {
+      const p = this.orders.get(primaryId as string);
+      const s = this.orders.get(secondaryId as string);
+      const transferred = ((lineIds ?? []) as string[]).map((lineId) => {
+        for (const order of this.orders.values()) {
+          const item = order.lineItems.find((i) => i.id === lineId);
+          if (item) return { __typename: "LineItem", ...structuredClone(item) };
+        }
+        return null;
+      });
+      return {
+        data: {
+          primary: p ? this.snapshot(p) : null,
+          secondary: s
+            ? {
+                ...this.snapshot(s),
+                lineItems: {
+                  nodes: structuredClone(s.lineItems.slice(0, CANCEL_SNAPSHOT_LINE_PAGE)),
+                  pageInfo: { hasNextPage: s.lineItems.length > CANCEL_SNAPSHOT_LINE_PAGE },
+                },
+              }
+            : null,
+          transferred,
+        },
+      };
     },
     // The post-scan recheck: fresh order state plus the token lines by id.
     MergeTransferRecheck: ({ primaryId, lineIds }) => {

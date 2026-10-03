@@ -11,6 +11,10 @@ import {
   matchesCancelStaffNote,
   sourceManifestMismatch,
 } from "../app/lib/operation-protocol.server";
+import {
+  CANCEL_SNAPSHOT_LINE_PAGE,
+  CANCEL_SNAPSHOT_MAX_TRANSFER_LINES,
+} from "../app/lib/evidence.server";
 import { ClaimContentionError, newLeaseToken, OwnershipLostError } from "../app/lib/ownership.server";
 import type {
   MutationAttempt,
@@ -657,7 +661,7 @@ it("17. fence-before-send ownership loss: attempt REJECTED not dispatched, zero 
 const LEGACY_CANCEL_NOTE =
   "Repeat order merged into #1 by MergeShip. Items transferred, inventory restocked, not refunded.";
 
-it("18. legacy op (calculatedOrderId null): 'merged into #1 by MergeShip' note verifies the cancel", async () => {
+it("18. legacy op (calculatedOrderId null): the cancel gate fails closed — REVIEW_REQUIRED", async () => {
   const ctx = setup();
   const { shopify, deps, ops } = ctx;
   await deps.claims.acquire(SHOP, [id(1), id(2)], "claim", deps.leaseTtlMs);
@@ -679,19 +683,38 @@ it("18. legacy op (calculatedOrderId null): 'merged into #1 by MergeShip' note v
   shopify.order(2).cancellation = { staffNote: LEGACY_CANCEL_NOTE };
 
   const final = await driveToIdle(ctx, op.id);
-  expect(final?.phase).toBe("COMPLETED");
-  expect(ops.records).toHaveLength(1);
-  expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0); // verified, never re-issued
+  // A converted op reaching the cancel gate is already anomalous — the gate
+  // fails closed instead of adopting or re-issuing anything.
+  expect(final?.phase).toBe("REVIEW_REQUIRED");
+  expect(final?.reviewReason).toContain("never dispatch a cancellation");
+  expect(ops.records).toHaveLength(0);
+  expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
 });
 
 it("19. v2 op (calculatedOrderId set): a legacy-style note is NOT ours — REVIEW_REQUIRED", async () => {
   const ctx = setup();
   const { shopify, deps, ops } = ctx;
   await deps.claims.acquire(SHOP, [id(1), id(2)], "claim", deps.leaseTtlMs);
+  const sourceLine = shopify.order(2).lineItems[0];
   const op = await ops.createOperation(
     opInput(ctx, {
       calculatedOrderId: "gid://shopify/CalculatedOrder/1",
       leaseToken: "v2-lease",
+      expectedTransfer: [
+        {
+          secondaryId: id(2),
+          secondaryIndex: 1,
+          lines: [
+            {
+              sourceLineItemId: sourceLine.id!,
+              variantId: sourceLine.variant!.id,
+              quantity: 1,
+              sourceQuantity: 1,
+              description: "Merged from #2, already paid",
+            },
+          ],
+        },
+      ],
     }),
   );
   await ops.transition(
@@ -700,6 +723,18 @@ it("19. v2 op (calculatedOrderId set): a legacy-style note is NOT ours — REVIE
       expectedPhase: "READY",
       phase: "APPLIED",
       secondaries: [{ id: id(2), name: "#2", items: 1, cancelPhase: "CANCEL_READY" }],
+      appliedEvidence: {
+        agreementId: "gid://shopify/OrderEditAgreement/1",
+        happenedAt: deps.now().toISOString(),
+        lines: [
+          {
+            secondaryId: id(2),
+            lineItemId: "gid://shopify/LineItem/9001",
+            variantId: sourceLine.variant!.id,
+            quantity: 1,
+          },
+        ],
+      },
       nextCheckAt: "now",
     },
   );
@@ -1210,53 +1245,73 @@ it("35. post-APPLIED line-predicate changes block the cancel (N2)", async () => 
   }
 });
 
-// ── 36. Mid-scan evidence mutation: the post-scan recheck catches it (N3) ──
+// ── 36. Token-line tampering caught by the snapshot's transferred proof ────
 
-it("36. a token line emptied mid-scan: the post-scan recheck blocks the cancel", async () => {
-  const ctx = setup([
-    makeOrder(1, {
-      lineItems: [makeLineItem(), makeLineItem(), makeLineItem(), makeLineItem()],
-    }),
-    makeOrder(2),
-  ]);
-  const { shopify, deps, ops } = ctx;
-  await ops.setControl({ completionEnabled: false }); // park at APPLIED
-  const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-  const op = await drive(ctx, result.operation!);
-  expect(op?.phase).toBe("APPLIED");
-  const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
+it("36. an emptied/stripped/rewritten/removed token line is caught by the snapshot's transferred-line proof", async () => {
+  const cases: [string, (s: FakeShopify, tokenLineId: string) => void][] = [
+    [
+      "emptied",
+      (s, li) => void (s.order(1).lineItems.find((i) => i.id === li)!.currentQuantity = 0),
+    ],
+    ["discount stripped", (s, li) => s.stripDiscount(id(1), li)],
+    ["description rewritten", (s, li) => s.rewriteDiscountDescription(id(1), li, "merchant note")],
+    ["removed", (s, li) => s.removeLine(id(1), li)],
+  ];
+  for (const [name, mutate] of cases) {
+    const ctx = setup();
+    const { shopify, deps, ops } = ctx;
+    await ops.setControl({ completionEnabled: false }); // park at APPLIED
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const op = await drive(ctx, result.operation!);
+    expect(op?.phase, name).toBe("APPLIED");
+    const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
+    const tokenLineId = shopify.order(1).lineItems.at(-1)!.id!;
 
-  // Move the token line to index 1 and page at 2. The parking drive made two
-  // unpaged evidence reads (COMMIT_IN_DOUBT's, then the first
-  // cancelPrecondition's), so the cancel-time scan pages on calls 3-5: the
-  // token line is read on call 3 (page 1), and the mutation lands on the
-  // page-2 request (call 4) — the scan's token snapshot stays clean and only
-  // the post-scan recheck can catch it.
-  const tokenLine = shopify.order(1).lineItems.at(-1)!;
-  const lines = shopify.order(1).lineItems;
-  shopify.order(1).lineItems = [lines[0], tokenLine, ...lines.slice(1, -1)];
-  shopify.evidencePageSize = 2;
-  shopify.on("MergeOrderEvidenceLines", (_v, call) => {
-    if (call === 4) tokenLine.currentQuantity = 0;
-    return undefined;
-  });
-  await ops.setControl({ completionEnabled: true });
-  advance(deps, 60_000);
-  const final = await driveToIdle(ctx, op!.id);
-  expect(final?.phase).toBe("REVIEW_REQUIRED");
-  const stored = await ops.getOperation(op!.id);
-  // The recheck — not the stale scan — is what refused the cancel.
-  expect(stored?.reviewReason).toContain("changed while evidence was being verified");
-  expect(stored?.secondaries[0]?.cancelPhase).toBe("CANCEL_REVIEW");
-  expect(stored?.appliedEvidence).toEqual(evidenceBefore);
-  expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
-  expect(shopify.order(2).cancelledAt).toBeNull();
-  expect(ops.locks.size).toBe(2);
+    // The mutation lands at the latest instant before the snapshot — inside
+    // the snapshot request itself — so it is visible in that response.
+    shopify.on("MergeCancelSnapshot", () => {
+      shopify.interceptors.delete("MergeCancelSnapshot");
+      mutate(shopify, tokenLineId);
+      return undefined;
+    });
+    await ops.setControl({ completionEnabled: true });
+    advance(deps, 60_000);
+    const final = await driveToIdle(ctx, op!.id);
+    expect(final?.phase, name).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.reviewReason, name).toContain(tokenLineId);
+    expect(stored?.secondaries[0]?.cancelPhase, name).toBe("CANCEL_REVIEW");
+    expect(stored?.appliedEvidence, name).toEqual(evidenceBefore);
+    expect(shopify.mutationCalls("MergeCancelSecondary"), name).toBe(0);
+    expect(shopify.order(2).cancelledAt, name).toBeNull();
+    expect(ops.locks.size, name).toBe(2);
+  }
 });
 
-// ── 37. Mid-scan secondary mutation: the final complete re-proof (R1) ────
+// ── 37. One bounded snapshot authorizes the cancel; earlier reads are stale ──
 
-it("37. a secondary mutation during the primary evidence scan blocks the cancel (R1)", async () => {
+it("37. a mutation before the cancellation snapshot is always seen (S1)", async () => {
+  // Calls whose documents must never appear in a cancellation drive — the
+  // composite read is gone; exactly one MergeCancelSnapshot authorizes.
+  const EVIDENCE_FAMILY = [
+    "MergeOrderLineItems",
+    "MergeOrderEvidenceLines",
+    "MergeOrderEvidenceAgreements",
+    "MergeTransferRecheck",
+  ];
+  // The cancellation drive = the reads from the last composite call before
+  // the first MergeCancelSnapshot through that snapshot — the window that
+  // authorizes the cancel. Later composite calls belong to the REVIEW step's
+  // resume check (stepReviewRequired re-runs the evidence scan by design).
+  const cancelCalls = (calls: string[], from: number) => {
+    const snapIdx = calls.indexOf("MergeCancelSnapshot", from);
+    const window = calls.slice(from, snapIdx === -1 ? calls.length : snapIdx + 1);
+    return {
+      snapIdx,
+      snapshots: window.filter((c) => c === "MergeCancelSnapshot").length,
+      composite: window.filter((c) => EVIDENCE_FAMILY.includes(c)).length,
+    };
+  };
   const mutations: [string, (s: FakeShopify) => void][] = [
     [
       "source quantity grew 1→3",
@@ -1271,15 +1326,80 @@ it("37. a secondary mutation during the primary evidence scan blocks the cancel 
       (s) => void (s.order(2).lineItems[0].customAttributes = [{ key: "gift", value: "yes" }]),
     ],
     [
-      "source line stops requiring shipping",
-      (s) => void (s.order(2).lineItems[0].requiresShipping = false),
-    ],
-    ["secondary address changed", (s) => void (s.order(2).shippingAddress!.address1 = "2 Other St")],
-    [
       "secondary customer changed",
       (s) => void (s.order(2).customer = { id: "gid://shopify/Customer/2" }),
     ],
+    ["secondary address changed", (s) => void (s.order(2).shippingAddress!.address1 = "2 Other St")],
+    [
+      "secondary recipient changed",
+      (s) => void (s.order(2).shippingAddress!.firstName = "Someone Else"),
+    ],
+    [
+      "primary cancelled",
+      (s) => {
+        const o = s.order(1);
+        o.cancelledAt = s.clock().toISOString();
+        o.cancellation = { staffNote: "merchant requested" };
+      },
+    ],
+    [
+      "primary partially refunded",
+      (s) => void (s.order(1).displayFinancialStatus = "PARTIALLY_REFUNDED"),
+    ],
+    [
+      "primary fulfillment in progress",
+      (s) => {
+        s.order(1).displayFulfillmentStatus = "IN_PROGRESS";
+        s.order(1).fulfillments = [{ id: "gid://shopify/Fulfillment/1" }];
+      },
+    ],
   ];
+
+  // (i) The mutation fires during an earlier read stage — the APPLIED-time
+  //     evidence scan of a single uninterrupted drive — yet the snapshot
+  //     still sees it, because the snapshot is the only authorizing read.
+  for (const [name, mutate] of mutations) {
+    const ctx = setup();
+    const { shopify, deps, ops, journal } = ctx;
+    let fired = false;
+    shopify.on("MergeOrderEvidenceLines", () => {
+      if (!fired) {
+        fired = true;
+        mutate(shopify);
+      }
+      return undefined;
+    });
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.code, name).toBe("OPERATION_CREATED");
+    const final = await driveToIdle(ctx, result.operation!);
+    expect(fired, name).toBe(true);
+
+    expect(final?.phase, name).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(result.operation!.id);
+    expect(stored?.secondaries[0]?.cancelPhase, name).toBe("CANCEL_REVIEW");
+    // The evidence row was written once at APPLIED and never rewritten.
+    expect((stored?.appliedEvidence as { lines?: unknown[] } | null)?.lines, name).toHaveLength(1);
+    expect(shopify.mutationCalls("MergeCancelSecondary"), name).toBe(0);
+    expect(shopify.order(2).cancelledAt, name).toBeNull();
+    expect(ops.locks.size, name).toBe(2);
+    expect(ops.records, name).toHaveLength(0);
+    expect(journal.history, name).toHaveLength(0);
+
+    // Structural proof: in the cancellation drive — the calls between the
+    // last composite read of the APPLIED evidence scan and the first
+    // MergeCancelSnapshot — there is exactly the snapshot and nothing from
+    // the old multi-request proof.
+    const firstSnap = shopify.calls.indexOf("MergeCancelSnapshot");
+    const from =
+      Math.max(-1, ...EVIDENCE_FAMILY.map((n) => shopify.calls.lastIndexOf(n, firstSnap - 1))) + 1;
+    const drive = cancelCalls(shopify.calls, from);
+    expect(drive.snapshots, name).toBe(1);
+    expect(drive.composite, name).toBe(0);
+  }
+
+  // (ii) Parked at APPLIED, the mutation fires inside the snapshot request
+  //      itself — the latest possible instant — and is visible in its
+  //      response.
   for (const [name, mutate] of mutations) {
     const ctx = setup();
     const { shopify, deps, ops, journal } = ctx;
@@ -1290,32 +1410,15 @@ it("37. a secondary mutation during the primary evidence scan blocks the cancel 
     expect(op?.phase, name).toBe("APPLIED");
     const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
 
-    // Fire once, on the first evidence-lines read of the cancel-time scan —
-    // after the secondary's merchandise was already read (step 2).
-    let armed = false;
-    let callsAtMutation = -1;
-    shopify.on("MergeOrderEvidenceLines", () => {
-      if (armed) {
-        armed = false;
-        callsAtMutation = shopify.calls.length - 1; // this call's index
-        mutate(shopify);
-      }
+    shopify.on("MergeCancelSnapshot", () => {
+      shopify.interceptors.delete("MergeCancelSnapshot");
+      mutate(shopify);
       return undefined;
     });
-
+    const before = shopify.calls.length;
     await ops.setControl({ completionEnabled: true });
     advance(deps, 60_000);
-    armed = true;
     const final = await driveToIdle(ctx, op!.id);
-
-    expect(armed, name).toBe(false); // the mutation really fired mid-scan
-    // The secondary's line read happened before the mutating call and again
-    // after it — the final complete re-proof is what refused the cancel.
-    const lineReads = shopify.calls
-      .map((c, i) => i)
-      .filter((i) => shopify.calls[i] === "MergeOrderLineItems");
-    expect(lineReads.some((i) => i < callsAtMutation), name).toBe(true);
-    expect(lineReads.some((i) => i > callsAtMutation), name).toBe(true);
 
     expect(final?.phase, name).toBe("REVIEW_REQUIRED");
     const stored = await ops.getOperation(op!.id);
@@ -1326,6 +1429,10 @@ it("37. a secondary mutation during the primary evidence scan blocks the cancel 
     expect(ops.locks.size, name).toBe(2);
     expect(ops.records, name).toHaveLength(0);
     expect(journal.history, name).toHaveLength(0);
+
+    const tail = cancelCalls(shopify.calls, before);
+    expect(tail.snapshots, name).toBe(1);
+    expect(tail.composite, name).toBe(0);
   }
 });
 
@@ -1493,5 +1600,66 @@ it("39. canonical note + durable attempt proves ours; a refund during doubt revi
     ).toBe(false);
     expect(matchesCancelStaffNote(note, "#1", "OTHERTOK")).toBe(false);
     expect(matchesCancelStaffNote(note, "#1", null)).toBe(false);
+  }
+});
+
+// ── 40. The snapshot is bounded; whatever does not fit parks in review ─────
+
+it("40. cancellation snapshot boundedness: oversized secondaries park in review (S1)", async () => {
+  // (a) 1 active line + CANCEL_SNAPSHOT_LINE_PAGE removed historical lines:
+  //     the snapshot's one page cannot prove completeness → REVIEW.
+  {
+    const removed = Array.from({ length: CANCEL_SNAPSHOT_LINE_PAGE }, () =>
+      makeLineItem({ quantity: 0, currentQuantity: 0, unfulfilledQuantity: 0 }),
+    );
+    const ctx = setup([makeOrder(1), makeOrder(2, { lineItems: [makeLineItem(), ...removed] })]);
+    const { shopify, deps, ops } = ctx;
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const op = await driveToIdle(ctx, result.operation!);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(op?.reviewReason).toContain("more line items than one bounded request");
+    expect(shopify.mutationCalls("MergeCancelSnapshot")).toBe(1);
+    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+    expect(ops.locks.size).toBe(2);
+  }
+  // (b) CANCEL_SNAPSHOT_MAX_TRANSFER_LINES + 1 transferred lines: the
+  //     recorded transfer cannot fit in one bounded request — REVIEW before
+  //     any snapshot call is even made.
+  {
+    const ctx = setup([
+      makeOrder(1),
+      makeOrder(2, {
+        lineItems: Array.from({ length: CANCEL_SNAPSHOT_MAX_TRANSFER_LINES + 1 }, () =>
+          makeLineItem(),
+        ),
+      }),
+    ]);
+    const { shopify, deps, ops } = ctx;
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const op = await driveToIdle(ctx, result.operation!);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(op?.reviewReason).toContain("more lines than one bounded request");
+    expect(shopify.mutationCalls("MergeCancelSnapshot")).toBe(0);
+    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+    expect(ops.locks.size).toBe(2);
+  }
+  // (c) A recorded transferred line reads back as a null node → REVIEW.
+  {
+    const ctx = setup();
+    const { shopify, deps, ops } = ctx;
+    await ops.setControl({ completionEnabled: false }); // park at APPLIED
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const op = await drive(ctx, result.operation!);
+    expect(op?.phase).toBe("APPLIED");
+    const tokenLineId = shopify.order(1).lineItems.at(-1)!.id!;
+    shopify.removeLine(id(1), tokenLineId);
+    await ops.setControl({ completionEnabled: true });
+    advance(deps, 60_000);
+    const final = await driveToIdle(ctx, op!.id);
+    expect(final?.phase).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.reviewReason).toContain(tokenLineId);
+    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+    expect(ops.locks.size).toBe(2);
   }
 });

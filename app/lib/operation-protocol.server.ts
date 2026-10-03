@@ -22,7 +22,6 @@ import {
   type OrderState,
 } from "./eligibility";
 import {
-  fetchAllLineItems,
   fetchOrderStates,
   fetchLineItemsById,
   ORDER_STATE_QUERY,
@@ -30,7 +29,14 @@ import {
   verifyCalculatedOrder,
   type MergeDeps,
 } from "./merge.server";
-import { resolveAppId, verifyTransferEvidence, type AppliedEvidence } from "./evidence.server";
+import {
+  CANCEL_SNAPSHOT_MAX_TRANSFER_LINES,
+  fetchCancelSnapshot,
+  resolveAppId,
+  transferredLinesMismatch,
+  verifyTransferEvidence,
+  type AppliedEvidence,
+} from "./evidence.server";
 import { LEGACY_STAFF_NOTE_RE } from "./legacy-reconcile.server";
 import type {
   AttemptKind,
@@ -841,16 +847,15 @@ export async function driveOperation(
 
   /** Null = safe to dispatch a cancel for `s`. "verified" = already cancelled
    *  by us and history written. A string = a reason for REVIEW_REQUIRED.
-   *  Re-reads both orders immediately before cancellation: the primary must
-   *  still be the order the plan assumed, the secondary's merchandise must
-   *  still be the frozen transfer, and the applied evidence must still read
-   *  back on the primary — anything else fails closed with locks retained. */
+   *  ONE bounded MergeCancelSnapshot request is the only read that can
+   *  authorize a cancel: both orders' state, the secondary's complete line
+   *  list and every recorded transferred line by id, all validated from the
+   *  single response — nothing can change between reads. Anything that does
+   *  not fit or does not pass parks REVIEW_REQUIRED with locks retained. */
   async function cancelPrecondition(
     s: OperationSecondary,
     secondaries: OperationSecondary[],
   ): Promise<string | "verified" | null> {
-    const legacy = current.calculatedOrderId == null;
-
     const recordVerified = async (cancelledAt: unknown) => {
       await deps.hooks?.beforeHistoryTx?.();
       await deps.ops.recordHistoryAndVerifyCancel(
@@ -861,106 +866,71 @@ export async function driveOperation(
       s.cancelPhase = "CANCEL_VERIFIED";
     };
 
-    // 1 — The secondary, live.
-    const st = await fetchOrderStateOrNull(fenced, s.id);
-    if (!st) return `${s.name} could no longer be loaded.`;
-    if (st.cancelledAt) {
-      const kind = await classifyCancellation(s, st);
-      if (kind !== "ours") return cancellationReason(s, kind, st);
-      await recordVerified(st.cancelledAt);
-      return "verified";
+    // Converted legacy ops never reach here — fail closed anyway.
+    if (current.calculatedOrderId == null) {
+      return `${s.name}: operations converted from the v1 journal never dispatch a cancellation.`;
     }
-    const stateReason = orderStateIneligibility(st);
-    if (stateReason) return stateReason;
-
-    // 2 — The secondary's merchandise is still exactly the frozen transfer.
     const entry = (current.expectedTransfer as ExpectedTransferEntry[] | null)?.find(
       (e) => e.secondaryId === s.id,
     );
     if (!entry) {
       return `No recorded transfer exists for ${s.name}; its merchandise cannot be verified.`;
     }
-    const sItems = await fetchAllLineItems(fenced, s.id);
-    const mismatch = sourceManifestMismatch(entry, st, sItems, legacy);
-    if (mismatch) return mismatch;
-
-    // 3 — The recorded applied evidence must still be readable on the
-    //     primary: a fresh verification, not just stored line ids — the
-    //     agreement id and every (lineItemId, variantId, quantity) for this
-    //     secondary must match what APPLIED recorded. The recheck's fresh
-    //     token lines and primary state ride along for the checks below.
-    const stored = (current.appliedEvidence ?? null) as AppliedEvidence | null;
-    const storedLines = new Set(
-      (stored?.lines ?? [])
-        .filter((l) => l.secondaryId === s.id)
-        .map((l) => `${l.lineItemId} ${l.variantId} ${l.quantity}`),
-    );
-    if (!storedLines.size) {
+    const stored = ((current.appliedEvidence as AppliedEvidence | null)?.lines ??
+      []) as AppliedEvidence["lines"];
+    if (!stored.some((l) => l.secondaryId === s.id)) {
       return `No applied evidence was recorded for ${s.name}; its transferred lines cannot be verified.`;
     }
-    const fresh = await verifyTransferEvidence(fenced, current, await appId());
-    if (fresh.kind === "NONE") {
-      return `Transfer evidence for ${s.name} is no longer present on the primary.`;
+    if (stored.length > CANCEL_SNAPSHOT_MAX_TRANSFER_LINES) {
+      return `${s.name}: the transfer has more lines than one bounded request can verify.`;
     }
-    if (fresh.kind === "ANOMALY") return fresh.reason;
-    const freshLines = new Set(
-      fresh.evidence.lines
-        .filter((l) => l.secondaryId === s.id)
-        .map((l) => `${l.lineItemId} ${l.variantId} ${l.quantity}`),
-    );
-    if (
-      fresh.evidence.agreementId !== stored!.agreementId ||
-      storedLines.size !== freshLines.size ||
-      [...storedLines].some((k) => !freshLines.has(k))
-    ) {
-      return `The applied evidence for ${s.name} no longer matches the recorded transfer.`;
-    }
-    // Every transferred line this secondary owns must still be completely
-    // unfulfilled on the primary — a line the merchant fulfilled cannot be
-    // "put back".
-    const sLineIds = new Set(
-      fresh.evidence.lines.filter((l) => l.secondaryId === s.id).map((l) => l.lineItemId),
-    );
-    for (const line of fresh.recheck.lines) {
-      if (sLineIds.has(line.id) && line.unfulfilledQuantity !== line.quantity) {
-        return `${s.name}: transferred line ${line.id} on the primary is no longer fully unfulfilled.`;
-      }
-    }
-    // The primary itself must still be the order the plan assumed — a
-    // cancelled, refunded or fulfilled primary cannot absorb the
-    // merchandise back.
-    const primaryReason = orderStateIneligibility(fresh.recheck.primary);
-    if (primaryReason) return primaryReason;
 
-    // 4 — A final complete re-proof of the secondary: state, then the full
-    //     manifest/eligibility check on merchandise re-read after the primary
-    //     scan, then the shared order-level group rules against the rechecked
-    //     primary — nothing the earlier read could not see may cancel.
-    const st2 = await fetchOrderStateOrNull(fenced, s.id);
-    if (!st2) return `${s.name} could no longer be loaded.`;
-    if (st2.cancelledAt) {
-      const kind = await classifyCancellation(s, st2);
-      if (kind !== "ours") return cancellationReason(s, kind, st2);
-      await recordVerified(st2.cancelledAt);
+    // The only read. Every check below runs on this one response.
+    const snap = await fetchCancelSnapshot(
+      fenced,
+      current.primaryOrderId,
+      s.id,
+      stored.map((l) => l.lineItemId),
+    );
+    if (!snap.secondary) return `${s.name} could no longer be loaded.`;
+    if (!snap.primary) return `${current.primaryOrderName} could no longer be loaded.`;
+    if (snap.secondary.cancelledAt) {
+      const kind = await classifyCancellation(s, snap.secondary);
+      if (kind !== "ours") return cancellationReason(s, kind, snap.secondary);
+      await recordVerified(snap.secondary.cancelledAt);
       return "verified";
     }
-    const st2Reason = orderStateIneligibility(st2);
-    if (st2Reason) return st2Reason;
-    // The complete secondary merchandise again, on the fresh read — the last
-    // proof before the gate covers what the earlier read could not see.
-    const sItems2 = await fetchAllLineItems(fenced, s.id);
-    const mismatch2 = sourceManifestMismatch(entry, st2, sItems2, legacy);
-    if (mismatch2) return mismatch2;
-    const groupReason = groupOrderIncompatibility([fresh.recheck.primary, st2]);
+    const conn = snap.secondary.lineItems;
+    if (!conn || !Array.isArray(conn.nodes) || conn.pageInfo?.hasNextPage !== false) {
+      return `${s.name} has more line items than one bounded request can verify.`;
+    }
+    const secondaryReason = orderStateIneligibility(snap.secondary);
+    if (secondaryReason) return secondaryReason;
+    const mismatch = sourceManifestMismatch(
+      entry,
+      snap.secondary,
+      conn.nodes as MergeLineItem[],
+      false,
+    );
+    if (mismatch) return mismatch;
+    const primaryReason = orderStateIneligibility(snap.primary);
+    if (primaryReason) return primaryReason;
+    const groupReason = groupOrderIncompatibility([snap.primary, snap.secondary]);
     if (groupReason) return groupReason;
     if (
       current.customerId != null &&
-      (fresh.recheck.primary.customer?.id !== current.customerId ||
-        st2.customer?.id !== current.customerId)
+      (snap.primary.customer?.id !== current.customerId ||
+        snap.secondary.customer?.id !== current.customerId)
     ) {
       return "The customer changed since the merge was planned.";
     }
-    return null;
+    return transferredLinesMismatch(
+      stored,
+      (current.expectedTransfer ?? []) as ExpectedTransferEntry[],
+      snap.transferred,
+      current.opToken,
+      s.id,
+    );
   }
 
   // ── COMPLETED: one-shot side effects (§7) ───────────────────────────────

@@ -4,7 +4,11 @@
 // rejected-promise eviction (B2).
 
 import { describe, expect, it } from "vitest";
-import { resolveAppId, verifyTransferEvidence } from "../app/lib/evidence.server";
+import {
+  resolveAppId,
+  transferredLinesMismatch,
+  verifyTransferEvidence,
+} from "../app/lib/evidence.server";
 import type { OperationRecord } from "../app/lib/operation-store.server";
 import {
   APP_ID,
@@ -332,5 +336,109 @@ describe("resolveAppId", () => {
     await expect(resolveAppId(shopify.admin, "retry-shop.myshopify.com")).resolves.toBe(APP_ID);
     await expect(resolveAppId(shopify.admin, "retry-shop.myshopify.com")).resolves.toBe(APP_ID);
     expect(shopify.mutationCalls("MergeCurrentApp")).toBe(2); // cached after the good call
+  });
+});
+
+describe("transferredLinesMismatch (the cancel snapshot's transferred-line proof)", () => {
+  const S2 = id(2);
+  const S3 = id(3);
+  const stored = [
+    { secondaryId: S2, lineItemId: "li-t1", variantId: VARIANT, quantity: 1 },
+    { secondaryId: S3, lineItemId: "li-t2", variantId: VARIANT, quantity: 2 },
+  ];
+  const expected = [
+    { secondaryId: S2, secondaryIndex: 1, lines: [] },
+    { secondaryId: S3, secondaryIndex: 2, lines: [] },
+  ];
+  const node = (overrides: Record<string, unknown> = {}): any => ({
+    __typename: "LineItem",
+    id: "li-t1",
+    quantity: 1,
+    currentQuantity: 1,
+    unfulfilledQuantity: 1,
+    variant: { id: VARIANT },
+    originalUnitPriceSet: { shopMoney: { amount: "10.00" } },
+    discountAllocations: [
+      {
+        allocatedAmountSet: { shopMoney: { amount: "10.00" } },
+        discountApplication: {
+          __typename: "ManualDiscountApplication",
+          title: "Merged from #2, already paid",
+          description: "Merged from #2, already paid · MS-TESTTEST-1",
+        },
+      },
+    ],
+    ...overrides,
+  });
+  const nodes = () => [
+    node(),
+    node({
+      id: "li-t2",
+      quantity: 2,
+      currentQuantity: 2,
+      unfulfilledQuantity: 2,
+      originalUnitPriceSet: { shopMoney: { amount: "10.00" } },
+      discountAllocations: [
+        {
+          allocatedAmountSet: { shopMoney: { amount: "20.00" } },
+          discountApplication: {
+            __typename: "ManualDiscountApplication",
+            title: "Merged from #3, already paid",
+            description: "Merged from #3, already paid · MS-TESTTEST-2",
+          },
+        },
+      ],
+    }),
+  ];
+  const check = (transferred: (any | null)[], forSecondaryId = S2) =>
+    transferredLinesMismatch(stored, expected as any, transferred, "TESTTEST", forSecondaryId);
+
+  it("intact lines → null", () => {
+    expect(check(nodes())).toBeNull();
+  });
+  it("a missing node → reason naming the line", () => {
+    expect(check([nodes()[1]])).toContain("li-t1");
+  });
+  it("a null node → reason naming the line", () => {
+    expect(check([null, nodes()[1]])).toContain("li-t1");
+  });
+  it("a wrong variant → reason", () => {
+    expect(
+      check([node({ variant: { id: "gid://shopify/ProductVariant/9" } }), nodes()[1]]),
+    ).toContain("li-t1");
+  });
+  it("a changed quantity → reason", () => {
+    expect(check([node({ quantity: 3 }), nodes()[1]])).toContain("li-t1");
+  });
+  it("currentQuantity below quantity → reason", () => {
+    expect(check([node({ currentQuantity: 0 }), nodes()[1]])).toContain("li-t1");
+  });
+  it("the wrong token index → reason", () => {
+    const n = node();
+    n.discountAllocations[0].discountApplication.description =
+      "Merged from #2, already paid · MS-TESTTEST-9";
+    expect(check([n, nodes()[1]])).toContain("li-t1");
+  });
+  it("a stripped discount → reason", () => {
+    expect(check([node({ discountAllocations: [] }), nodes()[1]])).toContain("li-t1");
+  });
+  it("an extra non-null node → reason", () => {
+    expect(check([...nodes(), node({ id: "li-extra" })])).not.toBeNull();
+  });
+  it("an unfulfilled line of THIS secondary → reason; of another → null", () => {
+    // Own line partially fulfilled — the merchandise cannot be "put back".
+    expect(check([node({ unfulfilledQuantity: 0 }), nodes()[1]])).toContain("li-t1");
+    // The OTHER secondary's line may be fulfilled without blocking this one.
+    expect(check([nodes()[0], node({ id: "li-t2", quantity: 2, currentQuantity: 2, unfulfilledQuantity: 0,
+      discountAllocations: [
+        {
+          allocatedAmountSet: { shopMoney: { amount: "20.00" } },
+          discountApplication: {
+            __typename: "ManualDiscountApplication",
+            title: "Merged from #3, already paid",
+            description: "Merged from #3, already paid · MS-TESTTEST-2",
+          },
+        },
+      ] })], S2)).toBeNull();
   });
 });

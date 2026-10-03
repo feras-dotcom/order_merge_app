@@ -12,9 +12,10 @@ import {
   gqlNullable,
   IncompletePageError,
   nextPageCursor,
+  ShopifyGraphqlError,
   type AdminClient,
 } from "./graphql.server";
-import { ORDER_STATE_FIELDS } from "./merge.server";
+import { MERGE_LINE_ITEM_FIELDS, ORDER_STATE_FIELDS } from "./merge.server";
 import type { OrderState } from "./eligibility";
 import type { ExpectedTransferEntry, OperationRecord } from "./operation-store.server";
 
@@ -437,4 +438,133 @@ async function recheckTransfer(
       };
     }),
   };
+}
+
+// ── Cancellation snapshot (one bounded request authorizes orderCancel) ────────
+
+/** Largest secondary line-item page the one-request cancel snapshot may ask
+ *  for, and the most transferred lines it may reread — both sized so the
+ *  REQUESTED query cost stays under Shopify's 1,000-point single-query
+ *  limit (measured). Anything larger is REVIEW, never a second page. */
+export const CANCEL_SNAPSHOT_LINE_PAGE = 100;
+export const CANCEL_SNAPSHOT_MAX_TRANSFER_LINES = 50;
+
+export const CANCEL_SNAPSHOT_QUERY = `#graphql
+  query MergeCancelSnapshot($primaryId: ID!, $secondaryId: ID!, $lineIds: [ID!]!) {
+    primary: order(id: $primaryId) {${ORDER_STATE_FIELDS}
+    }
+    secondary: order(id: $secondaryId) {${ORDER_STATE_FIELDS}
+      lineItems(first: ${CANCEL_SNAPSHOT_LINE_PAGE}) {
+        nodes {${MERGE_LINE_ITEM_FIELDS}
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+    transferred: nodes(ids: $lineIds) {
+      ... on LineItem {
+        __typename
+        id
+        quantity
+        currentQuantity
+        unfulfilledQuantity
+        variant { id }
+        originalUnitPriceSet { shopMoney { amount } }
+        discountAllocations {
+          allocatedAmountSet { shopMoney { amount } }
+          discountApplication {
+            __typename
+            ... on ManualDiscountApplication {
+              title
+              description
+            }
+          }
+        }
+      }
+    }
+  }`;
+
+export interface CancelSnapshot {
+  primary: OrderState | null;
+  secondary:
+    | (OrderState & {
+        lineItems?: { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } | null } | null;
+      })
+    | null;
+  transferred: (any | null)[];
+}
+
+/** ONE request. Throws on transport/GraphQL/top-level errors (the driver's
+ *  read-failure path handles it). */
+export async function fetchCancelSnapshot(
+  admin: AdminClient,
+  primaryId: string,
+  secondaryId: string,
+  lineIds: string[],
+): Promise<CancelSnapshot> {
+  const data = await gqlData<CancelSnapshot>(admin, "Cancel snapshot", CANCEL_SNAPSHOT_QUERY, {
+    primaryId,
+    secondaryId,
+    lineIds,
+  });
+  if (!data) throw new ShopifyGraphqlError("Cancel snapshot returned no payload.", false);
+  return data;
+}
+
+/** Pure. Every persisted transferred line (all secondaries) must be present
+ *  and intact in the snapshot: the node exists with __typename "LineItem" and
+ *  that id; variant.id === stored.variantId; quantity === stored.quantity;
+ *  currentQuantity === quantity; a ManualDiscountApplication description
+ *  carrying MS-<opToken>-<secondaryIndex of the entry owning
+ *  stored.secondaryId>; |allocated − originalUnit×quantity| ≤
+ *  FULL_DISCOUNT_TOLERANCE; and the number of non-null LineItem nodes equals
+ *  stored.length. For lines whose secondaryId === forSecondaryId,
+ *  additionally unfulfilledQuantity === quantity. A reason string or null. */
+export function transferredLinesMismatch(
+  stored: AppliedEvidence["lines"],
+  expected: ExpectedTransferEntry[],
+  transferred: (any | null)[],
+  opToken: string | null,
+  forSecondaryId: string,
+): string | null {
+  if (opToken == null) {
+    return "The operation has no token; the transferred lines cannot be verified.";
+  }
+  const indexOf = new Map(expected.map((e) => [e.secondaryId, e.secondaryIndex]));
+  const fresh = new Map<string, any>(
+    (transferred ?? [])
+      .filter((n) => n?.__typename === "LineItem" && n.id)
+      .map((n) => [n.id as string, n]),
+  );
+  for (const l of stored) {
+    const line = fresh.get(l.lineItemId);
+    if (!line) return `Transferred line ${l.lineItemId} no longer exists on the primary.`;
+    let index: number | null = null;
+    for (const alloc of line.discountAllocations ?? []) {
+      const app_ = alloc.discountApplication;
+      if (app_?.__typename !== "ManualDiscountApplication") continue;
+      index = tokenIndex(app_.description, opToken);
+      if (index !== null) break;
+    }
+    const allocated = (line.discountAllocations ?? []).reduce(
+      (sum: number, a: any) => sum + Number(a.allocatedAmountSet?.shopMoney?.amount ?? 0),
+      0,
+    );
+    const full = Number(line.originalUnitPriceSet?.shopMoney?.amount ?? 0) * (line.quantity ?? 0);
+    if (
+      (line.variant?.id ?? null) !== l.variantId ||
+      line.quantity !== l.quantity ||
+      line.currentQuantity !== line.quantity ||
+      index !== indexOf.get(l.secondaryId) ||
+      Math.abs(allocated - full) > FULL_DISCOUNT_TOLERANCE
+    ) {
+      return `Transferred line ${l.lineItemId} no longer matches the recorded transfer.`;
+    }
+    if (l.secondaryId === forSecondaryId && line.unfulfilledQuantity !== line.quantity) {
+      return `Transferred line ${l.lineItemId} on the primary is no longer fully unfulfilled.`;
+    }
+  }
+  if (fresh.size !== stored.length) {
+    return "The transferred line set does not match the recorded transfer.";
+  }
+  return null;
 }

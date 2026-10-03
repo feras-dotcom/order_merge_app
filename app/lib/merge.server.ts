@@ -213,11 +213,9 @@ export async function fetchOrderStates(admin: AdminClient, ids: string[]): Promi
   return orders as OrderState[];
 }
 
-const LINE_ITEMS_QUERY = `#graphql
-  query MergeOrderLineItems($id: ID!, $after: String) {
-    order(id: $id) {
-      lineItems(first: 100, after: $after) {
-        nodes {
+/** The line-item selection shared by MergeOrderLineItems and the cancel
+ *  snapshot — every field the eligibility and manifest rules consume. */
+export const MERGE_LINE_ITEM_FIELDS = `
           id
           name
           quantity
@@ -230,6 +228,13 @@ const LINE_ITEMS_QUERY = `#graphql
           customAttributes { key value }
           sellingPlan { name }
           lineItemGroup { id }
+`;
+
+const LINE_ITEMS_QUERY = `#graphql
+  query MergeOrderLineItems($id: ID!, $after: String) {
+    order(id: $id) {
+      lineItems(first: 100, after: $after) {
+        nodes {${MERGE_LINE_ITEM_FIELDS}
         }
         pageInfo { hasNextPage endCursor }
       }
