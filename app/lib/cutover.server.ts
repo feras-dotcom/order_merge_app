@@ -7,8 +7,9 @@
 // timestamp and the widest configured merge window; an explicit --since that
 // would silently exclude provable work refuses to run.
 
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { gql, nextPageCursor, type AdminClient } from "./graphql.server";
+import { LEGACY_RECONCILE_STATUSES } from "./legacy-reconcile.server";
 import { DB_WALL, dbWallPlus } from "./ownership.server";
 import { WORK_DEADLINE_MS } from "./order-work.server";
 
@@ -63,6 +64,9 @@ export interface CutoverPlan {
   excludedLocked: { shop: string; orderId: string }[];
   /** Candidates excluded because the order is already a merge secondary. */
   excludedMerged: { shop: string; orderId: string }[];
+  /** Candidates excluded because the order is involved in an unreconciled
+   *  v1 operation — it must convert or quarantine before work can requeue. */
+  excludedLegacy: { shop: string; orderId: string }[];
   /** Rows that would be / were requeued. */
   eligible: { shop: string; orderId: string }[];
   /** Rows actually requeued (0 in dry run). */
@@ -72,6 +76,25 @@ export interface CutoverPlan {
    *  mutations were disabled must not exhaust to REVIEW on re-enable. */
   pendingExtended: number;
 }
+
+/** The unreconciled-v1 predicate: TRUE when the order takes part in a v1
+ *  operation still awaiting reconciliation (PENDING_COMMIT / COMMITTED /
+ *  NEEDS_REVIEW / ABANDONED — a v1 abandonment is not proof its commit never
+ *  applied). Such orders are never requeued or backfilled; the arguments are
+ *  SQL fragments — correlated column references for the bulk statements,
+ *  bound literals for a single order. Converted v2 rows no longer match:
+ *  native lock/terminal semantics apply instead. */
+export const unreconciledV1 = (shop: Prisma.Sql, orderId: Prisma.Sql) => Prisma.sql`
+  EXISTS (
+    SELECT 1 FROM "MergeOperation" o
+    WHERE o."protocolVersion" = 1
+      AND o."status" = ANY(${LEGACY_RECONCILE_STATUSES})
+      AND o."shop" = ${shop}
+      AND o."involvedOrderIds" && ARRAY[${orderId}]::text[]
+  )`;
+
+const P_SHOP = Prisma.sql`p."shop"`;
+const P_ORDER = Prisma.sql`p."orderId"`;
 
 /** Throws ControlsNotFrozenError unless both mutation switches are off. */
 export async function requireControlsOff(db: PrismaClient): Promise<void> {
@@ -137,7 +160,8 @@ export async function requeueCutoverWork(
         WHERE l."shop" = p."shop" AND l."orderId" = p."orderId")
       AND NOT EXISTS (
         SELECT 1 FROM "MergeRecord" r
-        WHERE r."shop" = p."shop" AND r."mergedOrderId" = p."orderId")`;
+        WHERE r."shop" = p."shop" AND r."mergedOrderId" = p."orderId")
+      AND NOT ${unreconciledV1(P_SHOP, P_ORDER)}`;
   const olderEligible = Number(olderEligibleCount ?? 0);
 
   let olderAffected = 0;
@@ -156,7 +180,10 @@ export async function requeueCutoverWork(
           WHERE l."shop" = p."shop" AND l."orderId" = p."orderId")
         AND NOT EXISTS (
           SELECT 1 FROM "MergeRecord" r
-          WHERE r."shop" = p."shop" AND r."mergedOrderId" = p."orderId")`;
+          WHERE r."shop" = p."shop" AND r."mergedOrderId" = p."orderId")
+        AND NOT ${unreconciledV1(P_SHOP, P_ORDER)}`;
+  // review/exclude may still stamp a row whose order an unreconciled v1 op
+  // involves — neither puts work back in the queue (harmless).
   } else if (opts.apply && opts.olderLegacy === "review") {
     olderAffected = await db.$executeRaw`
       UPDATE "ProcessedWebhook" p
@@ -200,15 +227,29 @@ export async function requeueCutoverWork(
     SELECT DISTINCT "shop", "orderId" FROM "MergeOrderLock"`;
   const mergedRows = await db.$queryRaw<{ shop: string; orderId: string }[]>`
     SELECT "shop", "mergedOrderId" AS "orderId" FROM "MergeRecord"`;
+  const legacyRows = await db.$queryRaw<{ shop: string; orderId: string }[]>`
+    SELECT o."shop", unnest(o."involvedOrderIds") AS "orderId"
+    FROM "MergeOperation" o
+    WHERE o."protocolVersion" = 1 AND o."status" = ANY(${LEGACY_RECONCILE_STATUSES})`;
   const locked = new Set(lockedRows.map((r) => `${r.shop}${r.orderId}`));
   const merged = new Set(mergedRows.map((r) => `${r.shop}${r.orderId}`));
+  const legacy = new Set(legacyRows.map((r) => `${r.shop}${r.orderId}`));
 
-  const excludedLocked = candidates.filter((c) => locked.has(`${c.shop}${c.orderId}`));
+  const excludedLegacy = candidates.filter((c) => legacy.has(`${c.shop}${c.orderId}`));
+  const excludedLocked = candidates.filter(
+    (c) => !legacy.has(`${c.shop}${c.orderId}`) && locked.has(`${c.shop}${c.orderId}`),
+  );
   const excludedMerged = candidates.filter(
-    (c) => !locked.has(`${c.shop}${c.orderId}`) && merged.has(`${c.shop}${c.orderId}`),
+    (c) =>
+      !legacy.has(`${c.shop}${c.orderId}`) &&
+      !locked.has(`${c.shop}${c.orderId}`) &&
+      merged.has(`${c.shop}${c.orderId}`),
   );
   const eligible = candidates.filter(
-    (c) => !locked.has(`${c.shop}${c.orderId}`) && !merged.has(`${c.shop}${c.orderId}`),
+    (c) =>
+      !legacy.has(`${c.shop}${c.orderId}`) &&
+      !locked.has(`${c.shop}${c.orderId}`) &&
+      !merged.has(`${c.shop}${c.orderId}`),
   );
 
   // Extend before the requeue so pendingExtended counts only the backlog
@@ -242,7 +283,8 @@ export async function requeueCutoverWork(
           WHERE l."shop" = p."shop" AND l."orderId" = p."orderId")
         AND NOT EXISTS (
           SELECT 1 FROM "MergeRecord" r
-          WHERE r."shop" = p."shop" AND r."mergedOrderId" = p."orderId")`;
+          WHERE r."shop" = p."shop" AND r."mergedOrderId" = p."orderId")
+        AND NOT ${unreconciledV1(P_SHOP, P_ORDER)}`;
   }
 
   return {
@@ -259,6 +301,7 @@ export async function requeueCutoverWork(
     candidates,
     excludedLocked,
     excludedMerged,
+    excludedLegacy,
     eligible,
     requeued,
     pendingExtended,
@@ -267,9 +310,9 @@ export async function requeueCutoverWork(
 
 /** Upserts one work item: inserts PENDING when absent; reopens the existing
  *  row only when it is DONE with a NULL/LEGACY outcome — v2 outcomes and
- *  REVIEW rows are never touched. An order a live merge locks or a
- *  MergeRecord already absorbed is never inserted or reopened. Returns the
- *  affected row count. */
+ *  REVIEW rows are never touched. An order a live merge locks, a MergeRecord
+ *  already absorbed, or an unreconciled v1 operation still involves is never
+ *  inserted or reopened. Returns the affected row count. */
 export async function backfillWorkItem(
   db: PrismaClient,
   shop: string,
@@ -290,6 +333,7 @@ export async function backfillWorkItem(
     AND NOT EXISTS (
       SELECT 1 FROM "MergeRecord" r
       WHERE r."shop" = ${shop} AND r."mergedOrderId" = ${orderId})
+    AND NOT ${unreconciledV1(Prisma.sql`${shop}`, Prisma.sql`${orderId}`)}
     ON CONFLICT ("shop", "orderId") DO UPDATE SET
       "status" = 'PENDING', "attempts" = 0, "retryAfter" = ${DB_WALL},
       "deadlineAt" = ${dbWallPlus(WORK_DEADLINE_MS)}, "lastReason" = 'CUTOVER_BACKFILL',
@@ -302,7 +346,8 @@ export async function backfillWorkItem(
         WHERE l."shop" = ${shop} AND l."orderId" = ${orderId})
       AND NOT EXISTS (
         SELECT 1 FROM "MergeRecord" r
-        WHERE r."shop" = ${shop} AND r."mergedOrderId" = ${orderId})`;
+        WHERE r."shop" = ${shop} AND r."mergedOrderId" = ${orderId})
+      AND NOT ${unreconciledV1(Prisma.sql`${shop}`, Prisma.sql`${orderId}`)}`;
 }
 
 const BACKFILL_ORDERS_QUERY = `#graphql

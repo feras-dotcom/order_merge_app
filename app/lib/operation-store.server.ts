@@ -273,7 +273,9 @@ export interface OperationStore {
 
 const toOp = (row: any): OperationRecord => row as OperationRecord;
 
-const V1_BLOCKING = ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"];
+// A v1 ABANDONED row is not proof its commit never applied, so its orders
+// stay blocked until reconciliation converts or quarantines it.
+const V1_BLOCKING = ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW", "ABANDONED"];
 
 /** Legacy `status` shield for v2 rows: NEEDS_REVIEW while non-terminal so old
  *  code still blocks the orders and never resumes them. */

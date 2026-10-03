@@ -1,7 +1,10 @@
 // ── Legacy (protocol v1) reconciliation (spec §11, corrections C1) ───────────
 // Converts leftover v1 MergeOperation rows (status PENDING_COMMIT / COMMITTED
-// / NEEDS_REVIEW) into the v2 protocol. Never abandons: an op whose live state
-// cannot be proven goes to REVIEW_REQUIRED carrying every secondary.
+// / NEEDS_REVIEW / ABANDONED) into the v2 protocol. An op whose live state
+// cannot be proven goes to REVIEW_REQUIRED carrying every secondary. A v1
+// ABANDONED row is not proof the commit never applied: it converts
+// terminally only when a complete scan shows no MergeShip trace on the
+// primary past the quiet period, and quarantines otherwise.
 //
 //   planLegacyReconciliation — pure classification per op → verdicts
 //   applyLegacyVerdict      — one withOwnershipTx per op: locks, conversion,
@@ -17,18 +20,38 @@
 
 import type { PrismaClient } from "@prisma/client";
 import type { AdminClient } from "./graphql.server";
+import { gqlData, gqlNullable, IncompletePageError, nextPageCursor } from "./graphql.server";
 import type { AppliedEvidence } from "./evidence.server";
 import { DB_WALL, newOpToken, OwnershipLostError, withOwnershipTx } from "./ownership.server";
 
-export const LEGACY_BLOCKING = ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"];
+/** v1 statuses awaiting reconciliation — including ABANDONED, which v1 could
+ *  write after an ambiguous commit answer or an unchanged line count, and
+ *  neither proves the edit never applied. */
+export const LEGACY_RECONCILE_STATUSES = [
+  "PENDING_COMMIT",
+  "COMMITTED",
+  "NEEDS_REVIEW",
+  "ABANDONED",
+];
 
-const EVIDENCE_QUERY = `#graphql
-  query LegacyEvidence($id: ID!) {
+/** Same quiet period as operation-protocol's QUIET_PERIOD_MS (kept local —
+ *  importing it would cycle with that module's LEGACY_STAFF_NOTE_RE import). */
+const QUIET_PERIOD_MS = 15 * 60_000;
+
+const STATE_QUERY = `#graphql
+  query LegacyOrderState($id: ID!) {
     order(id: $id) {
       cancelledAt
       displayFulfillmentStatus
+      displayFinancialStatus
       cancellation { staffNote }
-      lineItems(first: 100) {
+    }
+  }`;
+
+const LINES_QUERY = `#graphql
+  query LegacyLines($id: ID!, $after: String) {
+    order(id: $id) {
+      lineItems(first: 100, after: $after) {
         nodes {
           id
           quantity
@@ -41,8 +64,15 @@ const EVIDENCE_QUERY = `#graphql
             }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
-      agreements(first: 50) {
+    }
+  }`;
+
+const AGREEMENTS_QUERY = `#graphql
+  query LegacyAgreements($id: ID!, $after: String) {
+    order(id: $id) {
+      agreements(first: 50, after: $after) {
         nodes {
           __typename
           id
@@ -55,15 +85,17 @@ const EVIDENCE_QUERY = `#graphql
                 quantity
                 ... on ProductSale { lineItem { id } }
               }
+              pageInfo { hasNextPage }
             }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }`;
 
 const APP_QUERY = `#graphql
-  query { currentAppInstallation { app { id } } }`;
+  query LegacyCurrentApp { currentAppInstallation { app { id } } }`;
 
 /** v1 token-line discount description, both separators the old engine wrote:
  *  "Merged from #N, already paid" and "Merged from #N — already paid". The
@@ -92,7 +124,7 @@ export interface LegacyVerdictSecondary extends Record<string, unknown> {
 }
 
 export interface LegacyVerdict {
-  phase: "APPLIED" | "REVIEW_REQUIRED";
+  phase: "APPLIED" | "REVIEW_REQUIRED" | "ABANDONED";
   reason: string | null;
   secondaries: LegacyVerdictSecondary[];
   /** Secondaries whose v1 cancellation is proven — MergeRecords to write. */
@@ -139,8 +171,8 @@ const multisetEqual = (
 const secondaryName = (line: LegacyLine): string | null =>
   LEGACY_DESCRIPTION_RE.exec(line.description ?? "")?.[1] ?? null;
 
-const linesOf = (order: any): LegacyLine[] =>
-  (order?.lineItems?.nodes ?? []).map((n: any) => ({
+const linesOf = (nodes: any[]): LegacyLine[] =>
+  (nodes ?? []).map((n: any) => ({
     id: n.id,
     quantity: n.quantity,
     currentQuantity: n.currentQuantity ?? n.quantity,
@@ -157,10 +189,11 @@ const allSecondaries = (op: any): (LegacySecondary & { secondaryIndex: number })
     secondaryIndex: i + 1,
   }));
 
-/** v1 ops in a blocking status, oldest first. */
+/** v1 ops awaiting reconciliation, oldest first — blocking statuses plus
+ *  ABANDONED, whose orders stay quarantined until proven safe. */
 export async function listBlockingLegacyOps(db: PrismaClient): Promise<any[]> {
   return db.$queryRaw<any[]>`
-    SELECT * FROM "MergeOperation" WHERE "status" = ANY(${LEGACY_BLOCKING}) AND "protocolVersion" = 1
+    SELECT * FROM "MergeOperation" WHERE "status" = ANY(${LEGACY_RECONCILE_STATUSES}) AND "protocolVersion" = 1
     ORDER BY "createdAt"`;
 }
 
@@ -217,9 +250,63 @@ export async function planLegacyReconciliation(
   return plans;
 }
 
-async function readOrder(admin: AdminClient, id: string) {
-  const res = await admin.graphql(EVIDENCE_QUERY, { variables: { id } });
-  return (await res.json()).data?.order ?? null;
+/** One order, fully read: state plus every line and agreement page. Any
+ *  incomplete page, transport error or truncated MergeShip agreement throws
+ *  — the caller's catch turns it into a REVIEW verdict. */
+async function readOrder(admin: AdminClient, id: string, appId: string) {
+  const state = await gqlNullable<any>(
+    admin,
+    `Legacy state for ${id}`,
+    STATE_QUERY,
+    { id },
+    "order",
+  );
+  if (!state) return { state: null, lines: [], agreements: [], complete: false };
+
+  const lines: any[] = [];
+  const agreements: any[] = [];
+  let after: string | null = null;
+  const seenLines = new Set<string>();
+  for (;;) {
+    const order = await gqlNullable<any>(
+      admin,
+      `Legacy lines for ${id}`,
+      LINES_QUERY,
+      { id, after },
+      "order",
+    );
+    const conn = order?.lineItems;
+    const next = nextPageCursor(conn, seenLines, `Legacy lines for ${id}`);
+    lines.push(...((conn as any).nodes as any[]));
+    if (!next) break;
+    after = next;
+  }
+  after = null;
+  const seenAgreements = new Set<string>();
+  for (;;) {
+    const order = await gqlNullable<any>(
+      admin,
+      `Legacy agreements for ${id}`,
+      AGREEMENTS_QUERY,
+      { id, after },
+      "order",
+    );
+    const conn = order?.agreements;
+    const next = nextPageCursor(conn, seenAgreements, `Legacy agreements for ${id}`);
+    agreements.push(...((conn as any).nodes as any[]));
+    if (!next) break;
+    after = next;
+  }
+  for (const a of agreements) {
+    if (
+      a.__typename === "OrderEditAgreement" &&
+      a.app?.id === appId &&
+      a.sales?.pageInfo?.hasNextPage !== false
+    ) {
+      throw new IncompletePageError(`Legacy agreement ${a.id} sales`);
+    }
+  }
+  return { state, lines, agreements, complete: true };
 }
 
 async function classify(
@@ -270,16 +357,16 @@ async function classify(
 
   let appId = appIdCache.get(op.shop);
   if (!appId) {
-    const res: any = await admin.graphql(APP_QUERY);
-    appId = (await res.json()).data?.currentAppInstallation?.app?.id;
+    const data = await gqlData<any>(admin, "Legacy current app", APP_QUERY, {});
+    appId = data?.currentAppInstallation?.app?.id;
     if (appId) appIdCache.set(op.shop, appId);
   }
   if (!appId) return review("could not resolve this app's id");
 
-  const primary = await readOrder(admin, op.primaryOrderId);
-  if (!primary) return review("primary order no longer readable");
-  const primaryLines = linesOf(primary);
-  const agreements = (primary.agreements?.nodes ?? []).filter(
+  const primaryRead = await readOrder(admin, op.primaryOrderId, appId);
+  if (!primaryRead.state) return review("primary order no longer readable");
+  const primaryLines = linesOf(primaryRead.lines);
+  const agreements = (primaryRead.agreements ?? []).filter(
     (a: any) =>
       a.__typename === "OrderEditAgreement" &&
       a.app?.id === appId &&
@@ -292,11 +379,15 @@ async function classify(
   const expectedTransfer: unknown[] = [];
   const appliedLines: AppliedEvidence["lines"] = [];
   let evidenceAgreement: { id: string; happenedAt: string } | null = null;
+  const abandoned = op.status === "ABANDONED";
+  let allReadsComplete = primaryRead.complete;
+  let anyTokenLine = false;
+  let anyUnapplied = false;
 
   for (let i = 0; i < carried.length; i++) {
     const s = carried[i];
-    const secondary = await readOrder(admin, s.id);
-    if (!secondary) {
+    const sRead = await readOrder(admin, s.id, appId);
+    if (!sRead.state) {
       return review(
         `${s.name} no longer readable`,
         secondaries,
@@ -306,7 +397,9 @@ async function classify(
         expectedTransfer,
       );
     }
-    const sLines = linesOf(secondary).map((l) => ({ variantId: l.variantId, quantity: l.quantity }));
+    allReadsComplete = allReadsComplete && sRead.complete;
+    const secondary = sRead.state;
+    const sLines = linesOf(sRead.lines).map((l) => ({ variantId: l.variantId, quantity: l.quantity }));
     expectedTransfer.push({
       secondaryId: s.id,
       secondaryIndex: s.secondaryIndex,
@@ -323,6 +416,7 @@ async function classify(
     // name must appear inside the delimiter-aware description — matching the
     // secondary's multiset and inside one MergeShip agreement.
     const tokenLines = primaryLines.filter((l) => secondaryName(l) === s.name);
+    anyTokenLine = anyTokenLine || tokenLines.length > 0;
     const matchedAgreement = agreements.find((a: any) =>
       tokenLines.every((l) =>
         (a.sales?.nodes ?? []).some(
@@ -338,6 +432,13 @@ async function classify(
       ) &&
       matchedAgreement != null;
     if (!applied) {
+      // For a v1 ABANDONED row a missing transfer is not proof the commit
+      // never applied — keep scanning the remaining secondaries; the
+      // post-loop check decides clean-abandon vs quarantine.
+      if (abandoned) {
+        anyUnapplied = true;
+        continue;
+      }
       return review(
         `no evidence the transfer to ${op.primaryOrderName} applied for ${s.name}`,
         secondaries,
@@ -382,6 +483,36 @@ async function classify(
     } else {
       secondaries.push({ ...s, cancelPhase: "CANCEL_REVIEW" });
     }
+  }
+
+  // A v1 ABANDONED row converts terminally only after a complete scan proves
+  // no MergeShip trace on the primary AND the row has sat past the quiet
+  // period; everything else is quarantined for a human.
+  if (abandoned && anyUnapplied) {
+    const quietElapsed =
+      deps.now().getTime() -
+        Math.max(new Date(op.createdAt).getTime(), new Date(op.updatedAt).getTime()) >=
+      QUIET_PERIOD_MS;
+    if (!anyTokenLine && agreements.length === 0 && allReadsComplete && quietElapsed) {
+      return {
+        phase: "ABANDONED",
+        reason:
+          "v1 abandonment verified: no MergeShip edit agreement and no transferred lines on the primary",
+        secondaries: carried.map((s) => ({ ...s, cancelPhase: "TRANSFER_PENDING" as const })),
+        records: [],
+        syntheticAttempts: [],
+        expectedTransfer: [],
+        appliedEvidence: null,
+      };
+    }
+    return review(
+      "v1 abandonment could not be verified — a missing applied transfer is not proof the commit never applied; orders stay quarantined",
+      [],
+      carried,
+      [],
+      [],
+      expectedTransfer,
+    );
   }
 
   const allResolved = secondaries.every(
@@ -446,6 +577,25 @@ export async function applyLegacyVerdict(
     if (stale) {
       console.log(`[legacy-reconcile] ${op.id}: skipped — ${stale}`);
       return "skipped";
+    }
+
+    // Terminal no-evidence conversion: the plan proved the v1 commit never
+    // applied, so there is nothing to lock, record or attempt — convert the
+    // row straight to a terminal v2 ABANDONED and release the orders.
+    if (verdict.phase === "ABANDONED") {
+      const converted = await tx.$executeRaw`
+        UPDATE "MergeOperation"
+        SET "protocolVersion" = 2, "phase" = 'ABANDONED', "status" = 'ABANDONED',
+            "opToken" = ${`LEGACY-${newOpToken()}`},
+            "expectedTransfer" = '[]'::jsonb, "appliedEvidence" = NULL,
+            "firstDispatchAt" = "createdAt", "nextCheckAt" = NULL,
+            "secondaries" = ${JSON.stringify(verdict.secondaries)}::jsonb,
+            "reviewReason" = NULL,
+            "lastError" = ${verdict.reason}, "updatedAt" = ${DB_WALL}
+        WHERE "id" = ${op.id} AND "protocolVersion" = 1`;
+      if (converted === 0)
+        throw new OwnershipLostError(`Legacy op ${op.id} changed under conversion.`);
+      return "applied";
     }
 
     let phase = verdict.phase;

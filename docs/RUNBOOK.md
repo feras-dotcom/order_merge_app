@@ -59,7 +59,14 @@ the process if its gate committed before the disable did.**
    MergeRecords, synthetic attempts) — but only while the row still matches
    the plan's snapshot; a stale plan prints `skipped (stale plan — rerun)`.
    Re-run until the table is clean. Converted ops never dispatch a fresh
-   `orderCancel`.
+   `orderCancel`. **v1 `ABANDONED` rows are reconciled too**: v1 could abandon
+   on an ambiguous commit answer or an unchanged line count — neither proves
+   the edit never applied. An `ABANDONED` row converts to a terminal v2
+   `ABANDONED` only when a complete scan shows no MergeShip edit agreement
+   and no transferred lines on the primary after the 15-minute quiet period;
+   anything else is quarantined in `REVIEW_REQUIRED` with locks. Steps 6–7
+   refuse orders involved in any unreconciled v1 row (`excludedLegacy`), so
+   this step must be clean before requeue or backfill can reach them.
 6. **`requeue-cutover-work`** — dry run, then `--apply`:
    ```
    npx vite-node scripts/requeue-cutover-work.ts --cutover-at <iso>

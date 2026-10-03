@@ -1,7 +1,8 @@
 // Converts leftover v1 MergeOperation rows (status PENDING_COMMIT / COMMITTED
-// / NEEDS_REVIEW) into the v2 protocol — the logic lives in
-// app/lib/legacy-reconcile.server.ts; this is only the CLI. Never abandons: an
-// op whose live state cannot be proven goes to REVIEW_REQUIRED.
+// / NEEDS_REVIEW / ABANDONED) into the v2 protocol — the logic lives in
+// app/lib/legacy-reconcile.server.ts; this is only the CLI. An op whose live
+// state cannot be proven goes to REVIEW_REQUIRED; a v1 ABANDONED row becomes
+// terminal only when a complete scan proves the commit never applied.
 //
 //   npx vite-node scripts/legacy-reconcile.ts            (dry run, prints table)
 //   npx vite-node scripts/legacy-reconcile.ts --apply

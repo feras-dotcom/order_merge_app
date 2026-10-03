@@ -39,6 +39,7 @@ const legacyOp = (overrides: Record<string, unknown> = {}) => ({
   secondaries: [],
   involvedOrderIds: [] as string[],
   createdAt: new Date(NOW.getTime() - 60 * 60_000),
+  updatedAt: new Date(NOW.getTime() - 60 * 60_000),
   lastError: null,
   protocolVersion: 1,
   ...overrides,
@@ -82,27 +83,92 @@ const evidenceOrder = (o: {
   },
 });
 
-const adminOf = (orders: Map<string, any>, failOn = new Set<string>()): AdminClient => ({
+/** The named Legacy* documents, served from the same per-order fixtures.
+ *  `intercept` may short-circuit a document (return value becomes the body). */
+const adminOf = (
+  orders: Map<string, any>,
+  failOn = new Set<string>(),
+  intercept?: (name: string, vars: Record<string, unknown>) => unknown | undefined,
+): AdminClient => ({
   graphql: async (query: string, options?: { variables?: Record<string, unknown> }) => {
-    if (query.includes("currentAppInstallation")) {
+    const name = /(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? "unknown";
+    const vars = options?.variables ?? {};
+    const intercepted = intercept?.(name, vars);
+    if (intercepted !== undefined) {
+      return new Response(JSON.stringify(intercepted));
+    }
+    if (name === "LegacyCurrentApp") {
       return new Response(
         JSON.stringify({ data: { currentAppInstallation: { app: { id: APP_ID } } } }),
       );
     }
-    const orderId = options?.variables?.id as string;
+    const orderId = vars.id as string;
     if (failOn.has(orderId)) throw new Error("read failed");
-    return new Response(JSON.stringify({ data: { order: orders.get(orderId) ?? null } }));
+    const o = orders.get(orderId) ?? null;
+    if (name === "LegacyOrderState") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            order:
+              o &&
+              (({ lineItems, agreements, ...state }: any) => state)(o),
+          },
+        }),
+      );
+    }
+    if (name === "LegacyLines") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            order: o && {
+              lineItems: {
+                nodes: o.lineItems?.nodes ?? [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      );
+    }
+    if (name === "LegacyAgreements") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            order: o && {
+              agreements: {
+                nodes: (o.agreements?.nodes ?? []).map((a: any) => ({
+                  ...a,
+                  sales: {
+                    nodes: a.sales?.nodes ?? [],
+                    pageInfo: { hasNextPage: false },
+                  },
+                })),
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      );
+    }
+    throw new Error(`canned admin: unhandled document ${name}`);
   },
 });
 
 const planDeps = (
   orders: Map<string, any>,
-  opts: { admin?: AdminClient | null; failOn?: Set<string>; onAdminFor?: () => void } = {},
+  opts: {
+    admin?: AdminClient | null;
+    failOn?: Set<string>;
+    onAdminFor?: () => void;
+    intercept?: (name: string, vars: Record<string, unknown>) => unknown | undefined;
+  } = {},
 ): LegacyReconcileDeps => ({
   db: {} as PrismaClient, // ops are always passed explicitly here
   adminFor: async () => {
     opts.onAdminFor?.();
-    return opts.admin !== undefined ? opts.admin : adminOf(orders, opts.failOn ?? new Set());
+    return opts.admin !== undefined
+      ? opts.admin
+      : adminOf(orders, opts.failOn ?? new Set(), opts.intercept);
   },
   now: () => NOW,
 });
@@ -268,6 +334,175 @@ describe("planLegacyReconciliation", () => {
     // The unread secondary is carried as CANCEL_REVIEW with its index.
     expect(plan.verdict.secondaries[1].cancelPhase).toBe("CANCEL_REVIEW");
     expect(plan.verdict.secondaries[1].secondaryIndex).toBe(2);
+  });
+
+  it("an ABANDONED op with positive transfer evidence and an open secondary: REVIEW_REQUIRED + CANCEL_REVIEW", async () => {
+    const sec = { id: gid(2), name: "#2", items: 1 };
+    const op = legacyOp({
+      status: "ABANDONED",
+      lastError: "Commit edit rejected: The calculated order does not exist.",
+      secondaries: [sec],
+      involvedOrderIds: [gid(1), gid(2)],
+    });
+    const orders = new Map([
+      [gid(1), appliedPrimary("#2")], // the "abandoned" commit DID apply
+      [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
+    ]);
+    const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
+    expect(plan.verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plan.verdict.secondaries[0].cancelPhase).toBe("CANCEL_REVIEW");
+    expect(plan.verdict.reason).toContain("cancelled");
+    expect(plan.verdict.appliedEvidence).not.toBeNull();
+  });
+
+  it("an ABANDONED op past the quiet period with no MergeShip trace: terminal ABANDONED", async () => {
+    const sec = { id: gid(2), name: "#2", items: 1 };
+    const op = legacyOp({
+      status: "ABANDONED",
+      createdAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      updatedAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      secondaries: [sec],
+      involvedOrderIds: [gid(1), gid(2)],
+    });
+    const orders = new Map([
+      // Clean primary: its own line, no token lines, no MergeShip agreement.
+      [gid(1), evidenceOrder({ lines: [{ id: "li-orig", quantity: 1, variantId: VARIANT }] })],
+      [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
+    ]);
+    const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
+    expect(plan.verdict.phase).toBe("ABANDONED");
+    expect(plan.verdict.secondaries[0].cancelPhase).toBe("TRANSFER_PENDING");
+    expect(plan.verdict.records).toHaveLength(0);
+    expect(plan.verdict.syntheticAttempts).toHaveLength(0);
+    expect(plan.verdict.expectedTransfer).toEqual([]);
+    expect(plan.verdict.appliedEvidence).toBeNull();
+  });
+
+  it("an ABANDONED op inside the quiet period: REVIEW_REQUIRED, never terminal", async () => {
+    const sec = { id: gid(2), name: "#2", items: 1 };
+    const op = legacyOp({
+      status: "ABANDONED",
+      createdAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      updatedAt: new Date(NOW.getTime() - 5 * 60_000), // touched 5 minutes ago
+      secondaries: [sec],
+      involvedOrderIds: [gid(1), gid(2)],
+    });
+    const orders = new Map([
+      [gid(1), evidenceOrder({ lines: [{ id: "li-orig", quantity: 1, variantId: VARIANT }] })],
+      [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
+    ]);
+    const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
+    expect(plan.verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plan.verdict.reason).toContain("abandonment could not be verified");
+    expect(plan.verdict.secondaries[0].cancelPhase).toBe("CANCEL_REVIEW");
+  });
+
+  it("an ABANDONED op with a MergeShip agreement in the window but no token lines: REVIEW_REQUIRED", async () => {
+    const sec = { id: gid(2), name: "#2", items: 1 };
+    const op = legacyOp({
+      status: "ABANDONED",
+      createdAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      updatedAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      secondaries: [sec],
+      involvedOrderIds: [gid(1), gid(2)],
+    });
+    const orders = new Map([
+      [
+        gid(1),
+        evidenceOrder({
+          lines: [{ id: "li-orig", quantity: 1, variantId: VARIANT }],
+          agreements: [
+            {
+              happenedAt: new Date(NOW.getTime() - 110 * 60_000).toISOString(),
+              sales: [{ lineItemId: "li-orig" }],
+            },
+          ],
+        }),
+      ],
+      [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
+    ]);
+    const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
+    expect(plan.verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plan.verdict.reason).toContain("abandonment could not be verified");
+  });
+
+  it("an ABANDONED op with incomplete primary line pagination: REVIEW_REQUIRED (reconcile read failed)", async () => {
+    const sec = { id: gid(2), name: "#2", items: 1 };
+    const op = legacyOp({
+      status: "ABANDONED",
+      createdAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      updatedAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      secondaries: [sec],
+      involvedOrderIds: [gid(1), gid(2)],
+    });
+    const orders = new Map([
+      [gid(1), evidenceOrder({ lines: [{ id: "li-orig", quantity: 1, variantId: VARIANT }] })],
+      [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
+    ]);
+    const [plan] = await planLegacyReconciliation(
+      planDeps(orders, {
+        // A page claiming more results with no usable cursor is not a read.
+        intercept: (name, vars) =>
+          name === "LegacyLines" && vars.id === gid(1)
+            ? {
+                data: {
+                  order: {
+                    lineItems: {
+                      nodes: [{ id: "li-orig" }],
+                      pageInfo: { hasNextPage: true, endCursor: null },
+                    },
+                  },
+                },
+              }
+            : undefined,
+      }),
+      [op],
+    );
+    expect(plan.verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plan.verdict.reason).toContain("reconcile read failed");
+  });
+
+  it("an ABANDONED op overlapping another legacy op: both REVIEW_REQUIRED before any read", async () => {
+    const a = legacyOp({
+      status: "ABANDONED",
+      secondaries: [{ id: gid(2), name: "#2", items: 1 }],
+      involvedOrderIds: [gid(1), gid(2), gid(3)],
+    });
+    const b = legacyOp({
+      status: "COMMITTED",
+      primaryOrderId: gid(3),
+      primaryOrderName: "#3",
+      secondaries: [{ id: gid(4), name: "#4", items: 1 }],
+      involvedOrderIds: [gid(3), gid(4)],
+    });
+    let reads = 0;
+    const plans = await planLegacyReconciliation(
+      planDeps(new Map(), { onAdminFor: () => reads++ }),
+      [a, b],
+    );
+    expect(reads).toBe(0);
+    for (const p of plans) {
+      expect(p.verdict.phase).toBe("REVIEW_REQUIRED");
+      expect(p.verdict.reason).toBe("overlapping legacy operations");
+    }
+  });
+
+  it("a PENDING_COMMIT op on a clean primary is still REVIEW_REQUIRED, never ABANDONED", async () => {
+    const sec = { id: gid(2), name: "#2", items: 1 };
+    const op = legacyOp({
+      status: "PENDING_COMMIT",
+      createdAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      updatedAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      secondaries: [sec],
+      involvedOrderIds: [gid(1), gid(2)],
+    });
+    const orders = new Map([
+      [gid(1), evidenceOrder({ lines: [{ id: "li-orig", quantity: 1, variantId: VARIANT }] })],
+      [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
+    ]);
+    const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
+    expect(plan.verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plan.verdict.reason).toContain("no evidence");
   });
 
   it("NEEDS_REVIEW converts straight to REVIEW_REQUIRED without reads", async () => {

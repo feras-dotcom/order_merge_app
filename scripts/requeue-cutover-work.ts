@@ -75,6 +75,8 @@ console.log(`Excluded — order locked by a live op: ${plan.excludedLocked.lengt
 for (const r of plan.excludedLocked) console.log(`  ${r.orderId}  ${r.shop}`);
 console.log(`Excluded — order already merged: ${plan.excludedMerged.length}`);
 for (const r of plan.excludedMerged) console.log(`  ${r.orderId}  ${r.shop}`);
+console.log(`Excluded — order in an unreconciled v1 operation: ${plan.excludedLegacy.length}`);
+for (const r of plan.excludedLegacy) console.log(`  ${r.orderId}  ${r.shop}`);
 console.log(`Eligible for requeue: ${plan.eligible.length}`);
 for (const r of plan.eligible) console.log(`  ${r.orderId}  ${r.shop}`);
 console.log(`PENDING rows within 1h of deadline (extended +6h): ${plan.pendingExtended}`);

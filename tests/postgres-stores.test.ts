@@ -24,10 +24,15 @@ import {
   WORK_DEADLINE_MS,
   type WorkStore,
 } from "../app/lib/order-work.server";
-import type { MergeDeps } from "../app/lib/merge.server";
+import type { AdminClient } from "../app/lib/graphql.server";
+import { executeMerge, type MergeDeps } from "../app/lib/merge.server";
 import { driveOperation } from "../app/lib/operation-protocol.server";
 import { processOrderWork } from "../app/lib/order-work-processor.server";
-import { applyLegacyVerdict, type LegacyVerdict } from "../app/lib/legacy-reconcile.server";
+import {
+  applyLegacyVerdict,
+  planLegacyReconciliation,
+  type LegacyVerdict,
+} from "../app/lib/legacy-reconcile.server";
 import {
   backfillWorkItem,
   ControlsNotFrozenError,
@@ -2088,5 +2093,187 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     // A clean order still inserts and re-runs stay put.
     expect(await backfillWorkItem(db, SHOP, oid(27))).toBe(1);
     expect(await backfillWorkItem(db, SHOP, oid(27))).toBe(0);
+  });
+
+  // ── R3: unreconciled v1 ABANDONED rows quarantine their orders ────────────
+
+  const VARIANT1 = "gid://shopify/ProductVariant/1";
+
+  const insertAbandonedV1 = async (
+    id: string,
+    involved: string[],
+    secondaries: unknown[],
+  ): Promise<any> => {
+    await db.$executeRaw`
+      INSERT INTO "MergeOperation"
+        ("id","shop","status","primaryOrderId","primaryOrderName","customerId",
+         "primaryLineItemCountBefore","addedLineItemCount","secondaries",
+         "involvedOrderIds","createdAt","updatedAt","protocolVersion","lastError")
+      VALUES (${id}, ${SHOP}, 'ABANDONED', ${involved[0]}, ${"#" + involved[0].split("/").pop()}, NULL,
+              1, 1, ${JSON.stringify(secondaries)}::jsonb, ${involved},
+              ${dbWallPlus(-7_200_000)}, ${dbWallPlus(-7_200_000)}, 1,
+              'Commit edit rejected: The calculated order does not exist.')`;
+    return (await db.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "MergeOperation" WHERE id = '${id}'`,
+    ))[0];
+  };
+
+  const clearClaims = () => db.$executeRaw`DELETE FROM "MergeClaim"`;
+
+  it("R3: an ABANDONED v1 op whose commit applied — quarantined before cutover, never re-merged", async () => {
+    // The exact reproduction: the "abandoned" v1 commit DID apply — the
+    // primary carries the legacy token line and our edit agreement — but v1
+    // marked the op ABANDONED on the ambiguous commit answer.
+    const shopify = new FakeShopify([makeOrder(1), makeOrder(2)]);
+    shopify.clock = () => new Date();
+    shopify.applyCommit(
+      shopify.stageEdit(oid(1), [
+        { variantId: VARIANT1, quantity: 1, description: "Merged from #2, already paid" },
+      ]),
+    );
+    const v1 = await insertAbandonedV1("v1-abandoned-applied", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    await insertWork(oid(2), "DONE", "LEGACY", -10 * 60_000);
+    const cutoverAt = new Date();
+
+    // Before reconciliation the unreconciled v1 row refuses everything.
+    const before = await requeueCutoverWork(db, {
+      cutoverAt,
+      olderLegacy: "exclude",
+      apply: true,
+    });
+    expect(before.excludedLegacy.map((c) => c.orderId)).toEqual([oid(2)]);
+    expect(before.requeued).toBe(0);
+    expect((await workRow(oid(2)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+    expect(await backfillWorkItem(db, SHOP, oid(2))).toBe(0);
+    await expect(createOp([oid(1), oid(2)])).rejects.toBeInstanceOf(ClaimContentionError);
+    await ops.setControl({ newMergesEnabled: false, completionEnabled: false });
+    await clearClaims();
+
+    // Reconcile: positive evidence + an open secondary → quarantine with locks.
+    const plans = await planLegacyReconciliation({
+      db,
+      adminFor: async () => shopify.admin,
+      now: () => new Date(),
+    });
+    expect(plans).toHaveLength(1);
+    expect(plans[0].verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plans[0].verdict.secondaries[0].cancelPhase).toBe("CANCEL_REVIEW");
+    expect(await applyLegacyVerdict(db, v1, plans[0].verdict)).toBe("applied");
+    expect(await lockCount()).toBe(2);
+    expect(await freshOp("v1-abandoned-applied")).toMatchObject({
+      protocolVersion: 2,
+      phase: "REVIEW_REQUIRED",
+    });
+
+    // Now the durable locks exclude the order — requeue/backfill still do
+    // nothing, native v2 is LOCKED, and the applied transfer is not repeated.
+    const after = await requeueCutoverWork(db, {
+      cutoverAt,
+      olderLegacy: "exclude",
+      apply: true,
+    });
+    expect(after.excludedLocked.map((c) => c.orderId)).toEqual([oid(2)]);
+    expect(after.excludedLegacy).toEqual([]);
+    expect(after.requeued).toBe(0);
+    expect((await workRow(oid(2)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+    expect(await backfillWorkItem(db, SHOP, oid(2))).toBe(0);
+    const merged = await executeMerge(shopify.admin, SHOP, [oid(2), oid(1)], realDeps());
+    expect(merged.code).toBe("LOCKED");
+    expect(await opCount()).toBe(1); // only the converted op — nothing new
+    expect(shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(shopify.order(1).lineItems).toHaveLength(2);
+    expect(shopify.order(2).cancelledAt).toBeNull();
+
+    // The row is already v2: re-planning sees nothing, replaying is skipped.
+    expect(
+      await planLegacyReconciliation({ db, adminFor: async () => shopify.admin, now: () => new Date() }),
+    ).toHaveLength(0);
+    expect(await applyLegacyVerdict(db, v1, plans[0].verdict)).toBe("skipped");
+    expect(await lockCount()).toBe(2);
+    expect(await opCount()).toBe(1);
+  });
+
+  it("R3: an ABANDONED v1 op proven never applied — terminal conversion frees the orders", async () => {
+    // Clean primary: no token line, no MergeShip agreement; the op is two
+    // hours old, well past the quiet period.
+    const shopify = new FakeShopify([makeOrder(1), makeOrder(2)]);
+    shopify.clock = () => new Date();
+    const v1 = await insertAbandonedV1("v1-abandoned-clean", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    await insertWork(oid(2), "DONE", "LEGACY", -10 * 60_000);
+    const cutoverAt = new Date();
+
+    const plans = await planLegacyReconciliation({
+      db,
+      adminFor: async () => shopify.admin,
+      now: () => new Date(),
+    });
+    expect(plans).toHaveLength(1);
+    expect(plans[0].verdict.phase).toBe("ABANDONED");
+    expect(await applyLegacyVerdict(db, v1, plans[0].verdict)).toBe("applied");
+    expect(await freshOp("v1-abandoned-clean")).toMatchObject({
+      protocolVersion: 2,
+      phase: "ABANDONED",
+      status: "ABANDONED",
+      nextCheckAt: null,
+    });
+    // Terminal non-evidence conversion writes no locks, records or attempts.
+    expect(await lockCount()).toBe(0);
+    expect(await attemptCount()).toBe(0);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
+    ).toBe(0);
+
+    // The orders are free: the work row requeues and a native v2 op is allowed.
+    const after = await requeueCutoverWork(db, {
+      cutoverAt,
+      olderLegacy: "exclude",
+      apply: true,
+    });
+    expect(after.eligible.map((c) => c.orderId)).toEqual([oid(2)]);
+    expect(after.requeued).toBe(1);
+    expect((await workRow(oid(2)))).toMatchObject({ status: "PENDING", outcome: null });
+    const created = await createOp([oid(1), oid(2)]);
+    expect(created.protocolVersion).toBe(2);
+    expect(await applyLegacyVerdict(db, v1, plans[0].verdict)).toBe("skipped");
+  });
+
+  it("R3: an ABANDONED v1 op whose read fails — quarantined with locks, excluded as locked", async () => {
+    const shopify = new FakeShopify([makeOrder(1), makeOrder(2)]);
+    shopify.clock = () => new Date();
+    const v1 = await insertAbandonedV1("v1-abandoned-unread", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    await insertWork(oid(2), "DONE", "LEGACY", -10 * 60_000);
+    const cutoverAt = new Date();
+
+    const flakyAdmin: AdminClient = {
+      graphql: async (query, options) => {
+        if (/query\s+LegacyLines/.test(query)) throw new Error("transport lost mid-scan");
+        return shopify.admin.graphql(query, options);
+      },
+    };
+    const plans = await planLegacyReconciliation({
+      db,
+      adminFor: async () => flakyAdmin,
+      now: () => new Date(),
+    });
+    expect(plans).toHaveLength(1);
+    expect(plans[0].verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plans[0].verdict.reason).toContain("reconcile read failed");
+    expect(await applyLegacyVerdict(db, v1, plans[0].verdict)).toBe("applied");
+    expect(await lockCount()).toBe(2);
+
+    const after = await requeueCutoverWork(db, {
+      cutoverAt,
+      olderLegacy: "exclude",
+      apply: true,
+    });
+    expect(after.excludedLocked.map((c) => c.orderId)).toEqual([oid(2)]);
+    expect(after.requeued).toBe(0);
+    expect(await backfillWorkItem(db, SHOP, oid(2))).toBe(0);
   });
 });

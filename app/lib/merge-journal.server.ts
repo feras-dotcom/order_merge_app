@@ -19,11 +19,14 @@ export type MergeOperationStatus =
   | "ABANDONED"
   | "NEEDS_REVIEW";
 
-/** Statuses whose orders must not take part in any new merge. */
+/** Statuses whose orders must not take part in any new merge. A v1
+ *  ABANDONED row is not proof its commit never applied, so it blocks until
+ *  reconciliation converts or quarantines it. */
 export const BLOCKING_STATUSES: MergeOperationStatus[] = [
   "PENDING_COMMIT",
   "COMMITTED",
   "NEEDS_REVIEW",
+  "ABANDONED",
 ];
 
 /** Statuses a worker may take over and finish. */

@@ -522,6 +522,32 @@ export class FakeShopify {
     },
     MergeJob: ({ id }) => ({ data: { job: { done: this.jobs.get(id)?.done ?? false } } }),
     MergeCurrentApp: () => ({ data: { currentAppInstallation: { app: { id: APP_ID } } } }),
+    // The R3 legacy-reconcile reads: state, lines and agreements as separate
+    // documents (lines/agreements honour evidencePageSize cursors).
+    LegacyOrderState: ({ id }) => {
+      const o = this.orders.get(id);
+      if (!o) return { data: { order: null } };
+      const s = this.snapshot(o);
+      return {
+        data: {
+          order: {
+            cancelledAt: s.cancelledAt,
+            displayFulfillmentStatus: s.displayFulfillmentStatus,
+            displayFinancialStatus: s.displayFinancialStatus,
+            cancellation: o.cancellation ?? null,
+          },
+        },
+      };
+    },
+    LegacyLines: ({ id, after }) => {
+      const o = this.orders.get(id);
+      return { data: { order: o && { lineItems: this.evidencePage(o.lineItems, after) } } };
+    },
+    LegacyAgreements: ({ id, after }) => {
+      const o = this.orders.get(id);
+      return { data: { order: o && { agreements: this.evidencePage(o.agreements ?? [], after) } } };
+    },
+    LegacyCurrentApp: () => ({ data: { currentAppInstallation: { app: { id: APP_ID } } } }),
     // The §6 evidence reads: line items and agreements paginate in separate
     // documents when evidencePageSize is set (cursors are opaque "cursor-N").
     MergeOrderEvidenceLines: ({ id, after }) => {
@@ -909,14 +935,14 @@ export class MemoryJournal implements MergeJournal {
   async findBlockingOrderIds(shop: string) {
     return new Set(
       this.v1Rows()
-        .filter((o) => o.shop === shop && ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(o.status))
+        .filter((o) => o.shop === shop && ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW", "ABANDONED"].includes(o.status))
         .flatMap((o) => o.involvedOrderIds),
     );
   }
   async findBlockingOrderStatuses(shop: string) {
     const map = new Map<string, MergeOperationRecord["status"]>();
     for (const o of this.v1Rows()) {
-      if (o.shop !== shop || !["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(o.status)) continue;
+      if (o.shop !== shop || !["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW", "ABANDONED"].includes(o.status)) continue;
       for (const orderId of o.involvedOrderIds) map.set(orderId, o.status);
     }
     return map;
@@ -1282,7 +1308,7 @@ export class MemoryOperationStore implements OperationStore {
         if (
           (j as any).protocolVersion !== 2 &&
           j.shop === input.shop &&
-          ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(j.status) &&
+          ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW", "ABANDONED"].includes(j.status) &&
           j.involvedOrderIds.some((x) => ids.includes(x))
         ) {
           throw new ClaimContentionError(`Order involved in blocking op ${j.id}.`);
@@ -1593,7 +1619,7 @@ export class MemoryOperationStore implements OperationStore {
       if (
         (j as any).protocolVersion !== 2 &&
         j.shop === shop &&
-        ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(j.status)
+        ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW", "ABANDONED"].includes(j.status)
       ) {
         for (const id of j.involvedOrderIds) if (ids.includes(id)) found.add(id);
       }

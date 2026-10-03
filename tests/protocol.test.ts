@@ -1260,7 +1260,7 @@ it("37. a secondary mutation during the primary evidence scan blocks the cancel 
   const mutations: [string, (s: FakeShopify) => void][] = [
     [
       "source quantity grew 1→3",
-      (s) => s.setLineQuantity(id(2), s.order(2).lineItems[0].id, 3),
+      (s) => s.setLineQuantity(id(2), s.order(2).lineItems[0].id!, 3),
     ],
     [
       "a new line was added to the secondary",

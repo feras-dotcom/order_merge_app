@@ -81,7 +81,9 @@ const MERGE_CANDIDATE_QUERY = `#graphql
 export const isSessionNotFound = (err: unknown) =>
   err instanceof SessionNotFoundError || (err as any)?.constructor?.name === "SessionNotFoundError";
 
-const ACTIVE_STATUSES = ["PENDING_COMMIT", "COMMITTED"];
+// An unreconciled v1 ABANDONED sibling/anchor is "busy, retry", never parked:
+// the abandonment does not prove its commit never applied.
+const ACTIVE_STATUSES = ["PENDING_COMMIT", "COMMITTED", "ABANDONED"];
 
 export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void> {
   const { item, token, shop, deps, work, now } = args;
