@@ -366,7 +366,7 @@ it("driving a CANCEL_IN_DOUBT legacy secondary never dispatches a new orderCance
       {
         secondaryId: gid(2),
         secondaryIndex: 1,
-        lines: [{ sourceLineItemId: null, variantId: VARIANT, quantity: 1, description: "x" }],
+        lines: [{ sourceLineItemId: null, variantId: VARIANT, quantity: 1, sourceQuantity: null, description: "x" }],
       },
     ],
   });

@@ -337,6 +337,61 @@ export type GroupEvaluation<T extends OrderState> =
   | { ok: false; reason: string };
 
 /**
+ * Order-level group rules shared by evaluateMergeGroup and the cancel-time
+ * recheck: every order passes the state rules, and all orders share one
+ * group key (customer, recipient, address, single shipping method), one
+ * shipping-method signature and one currency pair. `orders` is sorted by
+ * createdAt inside; the oldest is the primary.
+ */
+export function groupOrderIncompatibility<T extends OrderState>(orders: T[]): string | null {
+  const sorted = [...orders].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+  if (sorted.some((o) => isNaN(new Date(o.createdAt).getTime()))) {
+    return "An order has an unreadable creation date.";
+  }
+  const primary = sorted[0];
+
+  for (const order of sorted) {
+    const reason = orderStateIneligibility(order);
+    if (reason) return reason;
+  }
+
+  const keys = sorted.map((o) =>
+    buildGroupKey(
+      o.customer?.id,
+      o.shippingAddress,
+      o.shippingLines.nodes.map((l) => l.title),
+    ),
+  );
+  if (keys.some((k) => !k || k !== keys[0])) {
+    return "Orders do not share the same customer, recipient, shipping address and single shipping method.";
+  }
+
+  const signatures: string[] = [];
+  for (const order of sorted) {
+    const shipping = orderShippingSignature(order);
+    if (!shipping.ok) return shipping.reason;
+    signatures.push(shipping.signature);
+  }
+  const mismatch = signatures.findIndex((s) => s !== signatures[0]);
+  if (mismatch !== -1) {
+    return `Shipping methods differ: ${primary.name} ${describeShippingLine(primary.shippingLines.nodes[0])} vs ${sorted[mismatch].name} ${describeShippingLine(sorted[mismatch].shippingLines.nodes[0])}.`;
+  }
+
+  const currencyMismatch = sorted.find(
+    (o) =>
+      o.currencyCode !== primary.currencyCode ||
+      o.presentmentCurrencyCode !== primary.presentmentCurrencyCode,
+  );
+  if (currencyMismatch) {
+    return `Order ${currencyMismatch.name} uses a different currency.`;
+  }
+
+  return null;
+}
+
+/**
  * Authoritative eligibility check for a candidate group. The oldest order is
  * the primary. Every order must pass the state and line-item rules, share one
  * group key (customer, recipient, address, single shipping method) and share
@@ -351,52 +406,9 @@ export function evaluateMergeGroup<T extends OrderState>(
   const sorted = [...orders].sort(
     (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
   );
-  if (sorted.some((o) => isNaN(new Date(o.createdAt).getTime()))) {
-    return { ok: false, reason: "An order has an unreadable creation date." };
-  }
+  const orderReason = groupOrderIncompatibility(sorted);
+  if (orderReason) return { ok: false, reason: orderReason };
   const [primary, ...secondaries] = sorted;
-
-  for (const order of sorted) {
-    const reason = orderStateIneligibility(order);
-    if (reason) return { ok: false, reason };
-  }
-
-  const keys = sorted.map((o) =>
-    buildGroupKey(
-      o.customer?.id,
-      o.shippingAddress,
-      o.shippingLines.nodes.map((l) => l.title),
-    ),
-  );
-  if (keys.some((k) => !k || k !== keys[0])) {
-    return {
-      ok: false,
-      reason: "Orders do not share the same customer, recipient, shipping address and single shipping method.",
-    };
-  }
-
-  const signatures: string[] = [];
-  for (const order of sorted) {
-    const shipping = orderShippingSignature(order);
-    if (!shipping.ok) return { ok: false, reason: shipping.reason };
-    signatures.push(shipping.signature);
-  }
-  const mismatch = signatures.findIndex((s) => s !== signatures[0]);
-  if (mismatch !== -1) {
-    return {
-      ok: false,
-      reason: `Shipping methods differ: ${primary.name} ${describeShippingLine(primary.shippingLines.nodes[0])} vs ${sorted[mismatch].name} ${describeShippingLine(sorted[mismatch].shippingLines.nodes[0])}.`,
-    };
-  }
-
-  const currencyMismatch = sorted.find(
-    (o) =>
-      o.currencyCode !== primary.currencyCode ||
-      o.presentmentCurrencyCode !== primary.presentmentCurrencyCode,
-  );
-  if (currencyMismatch) {
-    return { ok: false, reason: `Order ${currencyMismatch.name} uses a different currency.` };
-  }
 
   for (const order of sorted) {
     const items = lineItemsById.get(order.id);

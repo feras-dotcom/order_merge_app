@@ -1374,7 +1374,7 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
       {
         secondaryId: oid(2),
         secondaryIndex: 1,
-        lines: [{ sourceLineItemId: null, variantId: "gid://shopify/ProductVariant/1", quantity: 1, description: "x" }],
+        lines: [{ sourceLineItemId: null, variantId: "gid://shopify/ProductVariant/1", quantity: 1, sourceQuantity: null, description: "x" }],
       },
     ],
     appliedEvidence: {

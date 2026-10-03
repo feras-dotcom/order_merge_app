@@ -14,6 +14,8 @@ import { gql, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
 import { newLeaseToken, OwnershipLostError } from "./ownership.server";
 import {
   evaluateMergeGroup,
+  groupOrderIncompatibility,
+  lineItemIneligibility,
   orderStateIneligibility,
   REVIEW_TAG,
   type MergeLineItem,
@@ -123,10 +125,10 @@ interface SendResult {
 
 /** Sends a Shopify mutation through the fenced client and classifies the
  *  outcome for the write-ahead attempt row. userErrors rejection is per kind:
- *    EDIT_COMMIT — REJECTED only for the observed-loser message "The
- *      calculated order does not exist." (this op dispatches at most one
- *      commit, so its calc cannot have been consumed by us); everything
- *      else, "already been saved" included, is UNKNOWN — evidence decides.
+ *    EDIT_COMMIT — every userError is UNKNOWN: a commit the response
+ *      rejected may still have applied ("The calculated order does not
+ *      exist." included — it answers the request but does not prove the
+ *      edit was never applied), so only evidence decides.
  *    ORDER_CANCEL — every userError is UNKNOWN: a cancel is never retried
  *      off an error string; the in-doubt poll + ladder reconciles. The
  *      OrderCancelUserError `code` is recorded in the summary.
@@ -167,10 +169,7 @@ async function sendAttempt(
     const summary = reasonFromUnknown(err);
     if (err instanceof ShopifyGraphqlError && err.rejected) {
       if (kind === "EDIT_COMMIT") {
-        const definite =
-          err.userErrors.length > 0 &&
-          err.userErrors.every((e) => /^The calculated order does not exist\.?$/i.test(e.message));
-        return { state: definite ? "REJECTED" : "UNKNOWN", summary };
+        return { state: "UNKNOWN", summary };
       }
       if (kind === "ORDER_CANCEL") {
         const coded = err.userErrors.length
@@ -214,16 +213,28 @@ const isWaiting = (op: OperationRecord, now: Date): boolean =>
  * commit and the cancel must only ever move what was recorded. A secondary
  * that gained, lost, resized or refitted merchandise (or shows any order
  * state change) cannot be committed or cancelled automatically.
+ *
+ * `legacy` selects the matching rule: a native v2 manifest binds every
+ * source line by id and original quantity and never falls back to multiset
+ * matching; a legacy-converted op carries no source ids and compares
+ * variant/quantity multisets instead. Callers pass
+ * `current.calculatedOrderId == null`.
  */
 export function sourceManifestMismatch(
   entry: ExpectedTransferEntry,
   state: OrderState,
   items: MergeLineItem[],
+  legacy = false,
 ): string | null {
   const stateReason = orderStateIneligibility(state);
   if (stateReason) return stateReason;
 
-  if (entry.lines.every((l) => l.sourceLineItemId != null)) {
+  if (!legacy) {
+    // A native v2 manifest is complete by construction — entries missing a
+    // source id or original quantity cannot prove the transfer.
+    if (entry.lines.some((l) => l.sourceLineItemId == null || l.sourceQuantity == null)) {
+      return `${state.name}: the frozen transfer manifest is incomplete; a human must decide.`;
+    }
     const expectedIds = new Set(entry.lines.map((l) => l.sourceLineItemId));
     for (const line of entry.lines) {
       const item = items.find((i) => i.id === line.sourceLineItemId);
@@ -233,7 +244,12 @@ export function sourceManifestMismatch(
       if ((item.variant?.id ?? null) !== line.variantId) {
         return `${state.name}: recorded line ${line.sourceLineItemId}'s variant changed.`;
       }
-      if (item.currentQuantity !== line.quantity || item.unfulfilledQuantity !== line.quantity) {
+      if (
+        item.quantity !== line.sourceQuantity ||
+        item.currentQuantity !== line.quantity ||
+        item.unfulfilledQuantity !== line.quantity ||
+        item.nonFulfillableQuantity !== 0
+      ) {
         return `${state.name}: recorded line ${line.sourceLineItemId}'s quantity changed.`;
       }
     }
@@ -241,25 +257,25 @@ export function sourceManifestMismatch(
     // part of the frozen transfer.
     const extra = items.find((i) => i.currentQuantity > 0 && !expectedIds.has(i.id ?? null));
     if (extra) return `${state.name} has new merchandise since the transfer was frozen.`;
-    return null;
+  } else {
+    const counts = new Map<string, number>();
+    for (const l of entry.lines) {
+      const key = `${l.variantId}×${l.quantity}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    for (const item of items) {
+      if (item.currentQuantity <= 0) continue;
+      const key = `${item.variant?.id ?? null}×${item.currentQuantity}`;
+      counts.set(key, (counts.get(key) ?? 0) - 1);
+    }
+    if ([...counts.values()].some((n) => n !== 0)) {
+      return `${state.name}'s merchandise no longer matches the recorded transfer.`;
+    }
   }
 
-  // Legacy-converted ops carry no source ids: compare variant/quantity
-  // multisets over the remaining merchandise instead.
-  const counts = new Map<string, number>();
-  for (const l of entry.lines) {
-    const key = `${l.variantId}×${l.quantity}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  for (const item of items) {
-    if (item.currentQuantity <= 0) continue;
-    const key = `${item.variant?.id ?? null}×${item.currentQuantity}`;
-    counts.set(key, (counts.get(key) ?? 0) - 1);
-  }
-  if ([...counts.values()].some((n) => n !== 0)) {
-    return `${state.name}'s merchandise no longer matches the recorded transfer.`;
-  }
-  return null;
+  // Line-level eligibility: custom attributes, gift cards, selling plans,
+  // bundles, requiresShipping, partial fulfillment, missing variants.
+  return lineItemIneligibility(state.name, items, true);
 }
 
 // ── the driver ───────────────────────────────────────────────────────────────
@@ -499,10 +515,11 @@ export async function driveOperation(
     // Every secondary must still hold exactly the frozen transfer — a
     // merchant edit between planning and commit changes what the calc
     // describes, so this merge must never dispatch.
+    const legacy = current.calculatedOrderId == null;
     for (const entry of (current.expectedTransfer ?? []) as ExpectedTransferEntry[]) {
       const state = orders.find((o) => o.id === entry.secondaryId);
       const mismatch = state
-        ? sourceManifestMismatch(entry, state, items.get(entry.secondaryId) ?? [])
+        ? sourceManifestMismatch(entry, state, items.get(entry.secondaryId) ?? [], legacy)
         : `A secondary order could no longer be loaded.`;
       if (mismatch) return mismatch;
     }
@@ -788,36 +805,41 @@ export async function driveOperation(
   }
 
   /** Null = safe to dispatch a cancel for `s`. "verified" = already cancelled
-   *  by us and history written. A string = a reason for REVIEW_REQUIRED. */
+   *  by us and history written. A string = a reason for REVIEW_REQUIRED.
+   *  Re-reads both orders immediately before cancellation: the primary must
+   *  still be the order the plan assumed, the secondary's merchandise must
+   *  still be the frozen transfer, and the applied evidence must still read
+   *  back on the primary — anything else fails closed with locks retained. */
   async function cancelPrecondition(
     s: OperationSecondary,
     secondaries: OperationSecondary[],
   ): Promise<string | "verified" | null> {
+    const legacy = current.calculatedOrderId == null;
+
+    const recordVerified = async (cancelledAt: unknown) => {
+      await deps.hooks?.beforeHistoryTx?.();
+      await deps.ops.recordHistoryAndVerifyCancel(
+        { ...current, secondaries },
+        s.id,
+        { cancelledAt: iso(cancelledAt) },
+      );
+      s.cancelPhase = "CANCEL_VERIFIED";
+    };
+
+    // 1 — The secondary, live.
     const st = await fetchOrderStateOrNull(fenced, s.id);
     if (!st) return `${s.name} could no longer be loaded.`;
     if (st.cancelledAt) {
-      if (isOurCancellation(st.cancellation?.staffNote)) {
-        await deps.hooks?.beforeHistoryTx?.();
-        await deps.ops.recordHistoryAndVerifyCancel(
-          { ...current, secondaries },
-          s.id,
-          { cancelledAt: iso(st.cancelledAt) },
-        );
-        s.cancelPhase = "CANCEL_VERIFIED";
-        return "verified";
+      if (!isOurCancellation(st.cancellation?.staffNote)) {
+        return `${s.name} was cancelled outside MergeShip — check whether the customer was refunded.`;
       }
-      return `${s.name} was cancelled outside MergeShip — check whether the customer was refunded.`;
+      await recordVerified(st.cancelledAt);
+      return "verified";
     }
-    if (st.closed) return `${s.name} is closed; cancelling it is no longer possible.`;
-    if (st.displayFulfillmentStatus !== "UNFULFILLED") {
-      return `${s.name} shows fulfillment activity (${st.displayFulfillmentStatus ?? "unknown"}); a human must decide.`;
-    }
-    if ((st.fulfillments?.length ?? 0) > 0) {
-      return `${s.name} has fulfillment objects; a human must decide.`;
-    }
+    const stateReason = orderStateIneligibility(st);
+    if (stateReason) return stateReason;
 
-    // (a) The secondary's merchandise must still be exactly the frozen
-    //     transfer — "put the items back" is only safe when nothing moved.
+    // 2 — The secondary's merchandise is still exactly the frozen transfer.
     const entry = (current.expectedTransfer as ExpectedTransferEntry[] | null)?.find(
       (e) => e.secondaryId === s.id,
     );
@@ -825,13 +847,14 @@ export async function driveOperation(
       return `No recorded transfer exists for ${s.name}; its merchandise cannot be verified.`;
     }
     const sItems = await fetchAllLineItems(fenced, s.id);
-    const mismatch = sourceManifestMismatch(entry, st, sItems);
+    const mismatch = sourceManifestMismatch(entry, st, sItems, legacy);
     if (mismatch) return mismatch;
 
-    // (b) The recorded applied evidence must still be readable on the
+    // 3 — The recorded applied evidence must still be readable on the
     //     primary: a fresh verification, not just stored line ids — the
     //     agreement id and every (lineItemId, variantId, quantity) for this
-    //     secondary must match what APPLIED recorded.
+    //     secondary must match what APPLIED recorded. The recheck's fresh
+    //     token lines and primary state ride along for the checks below.
     const stored = (current.appliedEvidence ?? null) as AppliedEvidence | null;
     const storedLines = new Set(
       (stored?.lines ?? [])
@@ -857,6 +880,47 @@ export async function driveOperation(
       [...storedLines].some((k) => !freshLines.has(k))
     ) {
       return `The applied evidence for ${s.name} no longer matches the recorded transfer.`;
+    }
+    // Every transferred line this secondary owns must still be completely
+    // unfulfilled on the primary — a line the merchant fulfilled cannot be
+    // "put back".
+    const sLineIds = new Set(
+      fresh.evidence.lines.filter((l) => l.secondaryId === s.id).map((l) => l.lineItemId),
+    );
+    for (const line of fresh.recheck.lines) {
+      if (sLineIds.has(line.id) && line.unfulfilledQuantity !== line.quantity) {
+        return `${s.name}: transferred line ${line.id} on the primary is no longer fully unfulfilled.`;
+      }
+    }
+    // The primary itself must still be the order the plan assumed — a
+    // cancelled, refunded or fulfilled primary cannot absorb the
+    // merchandise back.
+    const primaryReason = orderStateIneligibility(fresh.recheck.primary);
+    if (primaryReason) return primaryReason;
+
+    // 4 — A final live re-read of the secondary plus the shared order-level
+    //     group rules against the rechecked primary: customer, address,
+    //     shipping and currency must not have moved while the evidence was
+    //     being verified.
+    const st2 = await fetchOrderStateOrNull(fenced, s.id);
+    if (!st2) return `${s.name} could no longer be loaded.`;
+    if (st2.cancelledAt) {
+      if (!isOurCancellation(st2.cancellation?.staffNote)) {
+        return `${s.name} was cancelled outside MergeShip — check whether the customer was refunded.`;
+      }
+      await recordVerified(st2.cancelledAt);
+      return "verified";
+    }
+    const st2Reason = orderStateIneligibility(st2);
+    if (st2Reason) return st2Reason;
+    const groupReason = groupOrderIncompatibility([fresh.recheck.primary, st2]);
+    if (groupReason) return groupReason;
+    if (
+      current.customerId != null &&
+      (fresh.recheck.primary.customer?.id !== current.customerId ||
+        st2.customer?.id !== current.customerId)
+    ) {
+      return "The customer changed since the merge was planned.";
     }
     return null;
   }

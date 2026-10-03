@@ -187,14 +187,16 @@ export class FakeShopify {
   /** Index-lag knob: ids listed here are invisible to the candidate search
    *  (MergeCandidateOrders) only — direct order loads still see them. */
   hiddenFromSearch = new Set<string>();
-  /** Page size for the MergeOrderEvidence connections (0 = unlimited). */
+  /** Page size for the MergeOrderEvidence* connections (0 = unlimited). */
   evidencePageSize = 0;
   /** v2: commit behaviour per calc id (or '*'):
    *  apply — applies immediately and returns success;
    *  lose-apply-later — the response is lost; the commit applies when
    *    deliverPendingCommit(calcId) is called;
    *  lose-never — the response is lost and the commit never applies;
-   *  reject — the definitive userError "The calculated order does not exist.";
+   *  reject — the userError "The calculated order does not exist."; an
+   *    ambiguous answer — the commit may still apply via
+   *    deliverPendingCommit;
    *  reject-internal — an ambiguous "Internal error" userError; the commit
    *    may still apply via deliverPendingCommit. */
   commitMode = new Map<string, "apply" | "lose-apply-later" | "lose-never" | "reject" | "reject-internal">();
@@ -284,6 +286,24 @@ export class FakeShopify {
 
   fulfillmentOrdersOf(o: FakeOrder): FulfillmentOrderInfo[] {
     return o.fulfillmentOrders ?? [makeFulfillmentOrder(o.location ?? LOC_A, o.lineItems)];
+  }
+
+  /** Cursor paging for the evidence connections: "cursor-N" is the index of
+   *  the last served element; a null cursor starts at 0. */
+  private evidencePage(all: any[], cursor: string | null | undefined) {
+    if (!this.evidencePageSize) {
+      return { nodes: structuredClone(all), pageInfo: { hasNextPage: false, endCursor: null } };
+    }
+    const start = cursor ? Number(cursor.replace("cursor-", "")) + 1 : 0;
+    const nodes = all.slice(start, start + this.evidencePageSize);
+    const end = start + nodes.length - 1;
+    return {
+      nodes: structuredClone(nodes),
+      pageInfo: {
+        hasNextPage: end < all.length - 1,
+        endCursor: nodes.length ? `cursor-${end}` : null,
+      },
+    };
   }
 
   private handlers: Record<string, Handler> = {
@@ -418,12 +438,14 @@ export class FakeShopify {
       }
       const mode = this.commitMode.get(id) ?? this.commitMode.get("*") ?? "apply";
       if (mode === "reject") {
+        // Ambiguous like reject-internal: the response says "does not
+        // exist", but the commit may still apply — parked until
+        // deliverPendingCommit.
+        this.pendingCommits.set(id, edit);
         return {
           data: {
             orderEditCommit: {
               order: null,
-              // The wording Shopify uses for an already-consumed calculated
-              // order — the only userError that definitively means "not us".
               userErrors: [{ field: null, message: "The calculated order does not exist." }],
             },
           },
@@ -500,33 +522,27 @@ export class FakeShopify {
     },
     MergeJob: ({ id }) => ({ data: { job: { done: this.jobs.get(id)?.done ?? false } } }),
     MergeCurrentApp: () => ({ data: { currentAppInstallation: { app: { id: APP_ID } } } }),
-    // The §6 evidence read: line items with discount allocations + agreements,
-    // both paginated when evidencePageSize is set (cursors are opaque "cursor-N").
-    MergeOrderEvidence: ({ id, after, agreementsAfter }) => {
+    // The §6 evidence reads: line items and agreements paginate in separate
+    // documents when evidencePageSize is set (cursors are opaque "cursor-N").
+    MergeOrderEvidenceLines: ({ id, after }) => {
       const o = this.orders.get(id);
-      const paginate = (all: any[], cursor: string | null | undefined) => {
-        if (!this.evidencePageSize) {
-          return { nodes: structuredClone(all), pageInfo: { hasNextPage: false, endCursor: null } };
+      return { data: { order: o && { lineItems: this.evidencePage(o.lineItems, after) } } };
+    },
+    MergeOrderEvidenceAgreements: ({ id, after }) => {
+      const o = this.orders.get(id);
+      return { data: { order: o && { agreements: this.evidencePage(o.agreements ?? [], after) } } };
+    },
+    // The post-scan recheck: fresh order state plus the token lines by id.
+    MergeTransferRecheck: ({ primaryId, lineIds }) => {
+      const o = this.orders.get(primaryId);
+      const nodes = ((lineIds ?? []) as string[]).map((lineId) => {
+        for (const order of this.orders.values()) {
+          const item = order.lineItems.find((i) => i.id === lineId);
+          if (item) return { __typename: "LineItem", ...structuredClone(item) };
         }
-        const start = cursor ? Number(cursor.replace("cursor-", "")) + 1 : 0;
-        const nodes = all.slice(start, start + this.evidencePageSize);
-        const end = start + nodes.length - 1;
-        return {
-          nodes: structuredClone(nodes),
-          pageInfo: {
-            hasNextPage: end < all.length - 1,
-            endCursor: nodes.length ? `cursor-${end}` : null,
-          },
-        };
-      };
-      return {
-        data: {
-          order: o && {
-            lineItems: paginate(o.lineItems, after),
-            agreements: paginate(o.agreements ?? [], agreementsAfter),
-          },
-        },
-      };
+        return null;
+      });
+      return { data: { order: o && this.snapshot(o), nodes } };
     },
     MergeTagsAdd: ({ id, tags }) => {
       const o = this.orders.get(id)!;

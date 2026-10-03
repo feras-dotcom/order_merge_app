@@ -165,7 +165,10 @@ export interface OperationPatch {
 export interface ExpectedTransferLine {
   sourceLineItemId: string | null;
   variantId: string | null;
+  /** Units transferred — the source line's currentQuantity at plan time. */
   quantity: number;
+  /** The source line's original `quantity` at plan time; null on legacy-converted entries. */
+  sourceQuantity: number | null;
   description: string;
 }
 export interface ExpectedTransferEntry {

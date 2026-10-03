@@ -18,9 +18,10 @@ export type AdminClient = {
 export const GQL_TIMEOUT_MS = 45_000;
 
 export class ShopifyGraphqlError extends Error {
-  /** true when Shopify definitively rejected the operation (userErrors), so
-   *  it is known NOT to have been applied. false for transport / top-level
-   *  errors, where the outcome of a mutation is unknown. */
+  /** true when Shopify returned a definitive userErrors response — an
+   *  answer, not proof the change was never applied (an orderEditCommit
+   *  Shopify "rejected" can still take effect; the evidence ladder decides).
+   *  false for transport / top-level errors, where no answer arrived. */
   readonly rejected: boolean;
   /** The userErrors payload when `rejected` (empty otherwise). `code` exists
    *  only on OrderCancelUserError — plain UserError has field+message only. */
@@ -36,6 +37,41 @@ export class ShopifyGraphqlError extends Error {
     this.rejected = rejected;
     this.userErrors = userErrors;
   }
+}
+
+/** A connection page whose completeness cannot be established (missing or
+ *  malformed pageInfo, hasNextPage without a progressing cursor, an empty
+ *  page that claims more). Transient for plain readers; the evidence
+ *  verifier maps it to ANOMALY. */
+export class IncompletePageError extends ShopifyGraphqlError {
+  constructor(what: string) {
+    super(`${what}: page incomplete or malformed`, false);
+    this.name = "IncompletePageError";
+  }
+}
+
+/** Validates a page and returns the cursor for the next request, or null
+ *  when the connection is complete. `seen` accumulates the cursors already
+ *  used for this connection — a repeated or non-progressing cursor throws. */
+export function nextPageCursor(connection: unknown, seen: Set<string>, what: string): string | null {
+  const conn = connection as { nodes?: unknown; pageInfo?: unknown } | null | undefined;
+  if (!conn || !Array.isArray(conn.nodes)) throw new IncompletePageError(what);
+  const pageInfo = conn.pageInfo as { hasNextPage?: unknown; endCursor?: unknown } | null | undefined;
+  if (!pageInfo || typeof pageInfo.hasNextPage !== "boolean") {
+    throw new IncompletePageError(what);
+  }
+  if (!pageInfo.hasNextPage) return null;
+  const cursor = pageInfo.endCursor;
+  if (
+    typeof cursor !== "string" ||
+    cursor.length === 0 ||
+    seen.has(cursor) ||
+    conn.nodes.length === 0
+  ) {
+    throw new IncompletePageError(what);
+  }
+  seen.add(cursor);
+  return cursor;
 }
 
 function describeErrors(errors: unknown): string {
@@ -55,7 +91,7 @@ async function run<T = any>(
   label: string,
   query: string,
   variables: Record<string, unknown>,
-  root: string,
+  root: string | null,
   timeoutMs: number,
 ): Promise<T | null> {
   let body: any;
@@ -96,7 +132,7 @@ async function run<T = any>(
     throw new ShopifyGraphqlError(`${label} failed: ${describeErrors(body.errors)}`, false);
   }
 
-  return (body?.data?.[root] ?? null) as T | null;
+  return (root === null ? body?.data : (body?.data?.[root] ?? null)) as T | null;
 }
 
 /**
@@ -147,4 +183,19 @@ export async function gqlNullable<T = any>(
   timeoutMs: number = GQL_TIMEOUT_MS,
 ): Promise<T | null> {
   return run<T>(admin, label, query, variables, root, timeoutMs);
+}
+
+/**
+ * Like gqlNullable but returns the whole `data` object — for documents with
+ * more than one top-level field (the transfer recheck reads `order` and
+ * `nodes` in a single request).
+ */
+export async function gqlData<T = any>(
+  admin: AdminClient,
+  label: string,
+  query: string,
+  variables: Record<string, unknown>,
+  timeoutMs: number = GQL_TIMEOUT_MS,
+): Promise<T | null> {
+  return run<T>(admin, label, query, variables, null, timeoutMs);
 }

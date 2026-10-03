@@ -242,14 +242,16 @@ describe("executeMerge — mutation failures before the operation exists (nothin
 });
 
 describe("operation protocol — commit outcomes", () => {
-  it("rejected commit: COMMIT_REJECTED, quiet period, then ABANDONED; secondaries untouched, locks released", async () => {
+  it("rejected commit is ambiguous: UNKNOWN, doubt → REVIEW_REQUIRED; secondaries untouched, locks held", async () => {
     const h = setup();
-    h.shopify.commitMode.set("*", "reject");
+    h.shopify.commitMode.set("*", "reject"); // userError response; commit parked — may still apply
     const { result, op } = await runMerge(h);
     expect(result.outcome).toBe("operation_created");
-    expect(op?.phase).toBe("ABANDONED");
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(h.ops.attempts.find((a) => a.kind === "EDIT_COMMIT")).toMatchObject({ state: "UNKNOWN" });
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1); // never resent
     expect(h.shopify.order(2).cancelCount).toBe(0);
-    expect(h.ops.locks.size).toBe(0);
+    expect(h.ops.locks.size).toBe(2); // the commit may have applied — orders stay locked
     expect(h.shopify.order(1).lineItems).toHaveLength(1);
   });
 

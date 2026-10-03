@@ -24,7 +24,15 @@ const opFor = (beforeIds: string[], quantity = 1): OperationRecord =>
       {
         secondaryId: id(2),
         secondaryIndex: 1,
-        lines: [{ sourceLineItemId: null, variantId: VARIANT, quantity, description: "x" }],
+        lines: [
+          {
+            sourceLineItemId: null,
+            variantId: VARIANT,
+            quantity,
+            sourceQuantity: null,
+            description: "x",
+          },
+        ],
       },
     ],
     primaryLineItemIdsBefore: beforeIds,
@@ -54,10 +62,21 @@ async function appliedPrimary(quantity = 1) {
 }
 
 describe("verifyTransferEvidence", () => {
-  it("APPLIED on a clean transfer", async () => {
-    const { shopify, op } = await appliedPrimary();
+  it("APPLIED on a clean transfer, with the recheck's fresh state", async () => {
+    const { shopify, tokenLine, op } = await appliedPrimary();
     const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
     expect(ev.kind).toBe("APPLIED");
+    if (ev.kind !== "APPLIED") return;
+    expect(ev.recheck.primary.id).toBe(id(1));
+    expect(ev.recheck.lines).toHaveLength(1);
+    expect(ev.recheck.lines[0]).toMatchObject({
+      id: tokenLine.id,
+      variantId: VARIANT,
+      quantity: 1,
+      currentQuantity: 1,
+      unfulfilledQuantity: 1,
+    });
+    expect(shopify.mutationCalls("MergeTransferRecheck")).toBe(1);
   });
 
   for (const [label, saleQty] of [
@@ -143,7 +162,165 @@ describe("verifyTransferEvidence", () => {
     shopify.applyCommit(calcId);
     const ev = await verifyTransferEvidence(shopify.admin, opFor(beforeIds), APP_ID);
     expect(ev.kind).toBe("APPLIED");
-    expect(shopify.mutationCalls("MergeOrderEvidence")).toBeGreaterThan(3);
+    expect(shopify.mutationCalls("MergeOrderEvidenceLines")).toBe(6);
+    expect(shopify.mutationCalls("MergeOrderEvidenceAgreements")).toBe(3);
+    expect(shopify.mutationCalls("MergeTransferRecheck")).toBe(1);
+  });
+
+  it("paginates each connection independently (many lines, one agreements page)", async () => {
+    const lines = Array.from({ length: 50 }, () => makeLineItem());
+    const shopify = new FakeShopify([makeOrder(1, { lineItems: lines }), makeOrder(2)]);
+    shopify.evidencePageSize = 25; // 51 lines → 3 pages; 1 agreement → 1 page
+    const beforeIds = shopify.order(1).lineItems.map((i) => i.id!);
+    const calcId = shopify.stageEdit(id(1), [
+      {
+        variantId: VARIANT,
+        quantity: 1,
+        description: "Merged from #2, already paid · MS-TESTTEST-1",
+      },
+    ]);
+    shopify.applyCommit(calcId);
+    const ev = await verifyTransferEvidence(shopify.admin, opFor(beforeIds), APP_ID);
+    expect(ev.kind).toBe("APPLIED");
+    // A finished connection must not restart at cursor null: exactly 3
+    // line-item calls (no extra restart) and exactly 1 agreements call.
+    expect(shopify.mutationCalls("MergeOrderEvidenceLines")).toBe(3);
+    expect(shopify.mutationCalls("MergeOrderEvidenceAgreements")).toBe(1);
+    expect(shopify.mutationCalls("MergeTransferRecheck")).toBe(1);
+  });
+
+  it("paginates each connection independently (one lines page, many agreements)", async () => {
+    const shopify = new FakeShopify([makeOrder(1), makeOrder(2)]);
+    for (let i = 0; i < 59; i++) {
+      shopify.order(1).agreements!.push({
+        __typename: "OrderEditAgreement",
+        id: `gid://shopify/OrderEditAgreement/other-${i}`,
+        happenedAt: shopify.clock().toISOString(),
+        app: { id: OTHER_APP_ID },
+        sales: { nodes: [], pageInfo: { hasNextPage: false } },
+      });
+    }
+    shopify.evidencePageSize = 25; // 2 lines → 1 page; 60 agreements → 3 pages
+    const beforeIds = shopify.order(1).lineItems.map((i) => i.id!);
+    const calcId = shopify.stageEdit(id(1), [
+      {
+        variantId: VARIANT,
+        quantity: 1,
+        description: "Merged from #2, already paid · MS-TESTTEST-1",
+      },
+    ]);
+    shopify.applyCommit(calcId);
+    const ev = await verifyTransferEvidence(shopify.admin, opFor(beforeIds), APP_ID);
+    expect(ev.kind).toBe("APPLIED");
+    expect(shopify.mutationCalls("MergeOrderEvidenceLines")).toBe(1);
+    expect(shopify.mutationCalls("MergeOrderEvidenceAgreements")).toBe(3);
+    expect(shopify.mutationCalls("MergeTransferRecheck")).toBe(1);
+  });
+
+  it("a page with no pageInfo → ANOMALY, not 'complete'", async () => {
+    const { shopify, op } = await appliedPrimary();
+    shopify.on("MergeOrderEvidenceLines", () => ({
+      data: {
+        order: { lineItems: { nodes: structuredClone(shopify.order(1).lineItems) } },
+      },
+    }));
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+  });
+
+  it("hasNextPage with a null endCursor → ANOMALY", async () => {
+    const { shopify, op } = await appliedPrimary();
+    shopify.on("MergeOrderEvidenceLines", () => ({
+      data: {
+        order: {
+          lineItems: {
+            nodes: [structuredClone(shopify.order(1).lineItems[0])],
+            pageInfo: { hasNextPage: true, endCursor: null },
+          },
+        },
+      },
+    }));
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+  });
+
+  it("a cursor that does not progress → ANOMALY", async () => {
+    const { shopify, op } = await appliedPrimary();
+    // Every page serves the same endCursor — the second page repeats a
+    // cursor that was already consumed.
+    shopify.on("MergeOrderEvidenceLines", () => ({
+      data: {
+        order: {
+          lineItems: {
+            nodes: [structuredClone(shopify.order(1).lineItems[0])],
+            pageInfo: { hasNextPage: true, endCursor: "cursor-same" },
+          },
+        },
+      },
+    }));
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+    expect(shopify.mutationCalls("MergeOrderEvidenceLines")).toBe(2);
+  });
+
+  it("hasNextPage on an empty page → ANOMALY", async () => {
+    const { shopify, op } = await appliedPrimary();
+    shopify.on("MergeOrderEvidenceAgreements", () => ({
+      data: {
+        order: {
+          agreements: { nodes: [], pageInfo: { hasNextPage: true, endCursor: "cursor-0" } },
+        },
+      },
+    }));
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+  });
+
+  it("a MergeShip agreement whose sales have no pageInfo → ANOMALY", async () => {
+    const { shopify, agreement, op } = await appliedPrimary();
+    delete (agreement.sales as any).pageInfo;
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+  });
+
+  it("a token line removed between the scan and the recheck → ANOMALY", async () => {
+    const { shopify, tokenLine, op } = await appliedPrimary();
+    shopify.on("MergeTransferRecheck", () => {
+      shopify.removeLine(id(1), tokenLine.id!);
+      return undefined; // the default handler serves the post-mutation state
+    });
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+  });
+
+  it("a token line emptied between the scan and the recheck → ANOMALY", async () => {
+    const { shopify, tokenLine, op } = await appliedPrimary();
+    shopify.on("MergeTransferRecheck", () => {
+      tokenLine.currentQuantity = 0;
+      return undefined;
+    });
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+  });
+
+  it("a token line re-varied between the scan and the recheck → ANOMALY", async () => {
+    const { shopify, tokenLine, op } = await appliedPrimary();
+    shopify.on("MergeTransferRecheck", () => {
+      shopify.setLineVariant(id(1), tokenLine.id!, "gid://shopify/ProductVariant/99");
+      return undefined;
+    });
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
+  });
+
+  it("the primary unreadable at recheck → ANOMALY", async () => {
+    const { shopify, op } = await appliedPrimary();
+    shopify.on("MergeTransferRecheck", () => {
+      shopify.orders.delete(id(1));
+      return undefined;
+    });
+    const ev = await verifyTransferEvidence(shopify.admin, op, APP_ID);
+    expect(ev).toMatchObject({ kind: "ANOMALY" });
   });
 });
 

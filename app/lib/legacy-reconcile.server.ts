@@ -314,6 +314,7 @@ async function classify(
         sourceLineItemId: null,
         variantId: l.variantId,
         quantity: l.quantity,
+        sourceQuantity: null,
         description: `Merged from ${s.name}, already paid`,
       })),
     });

@@ -15,7 +15,6 @@ import {
   makeOrder,
   MemoryWorkStore,
   topLevelError,
-  userError,
 } from "./fake-shopify";
 
 const id = (n: number) => `gid://shopify/Order/${n}`;
@@ -384,31 +383,41 @@ describe("order work items (spec §9)", () => {
     expect(h.shopify.order(2).cancelledAt).not.toBeNull();
   });
 
-  it("#17 rejected commit: the op parks in COMMIT_REJECTED then abandons; the requeued work item merges cleanly", async () => {
+  it("#17 a commit that provably never dispatched: the op abandons; the requeued work item merges cleanly", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
-    let rejects = true;
-    h.shopify.on("MergeEditCommit", () =>
-      // The only wording that proves a commit never applied (spec §7):
-      // the calculated order is gone, so the dispatch provably did nothing.
-      rejects ? userError("orderEditCommit", "userErrors", "The calculated order does not exist.") : undefined,
-    );
-    await h.webhook(id(2)); // op created + driven inline → COMMIT_REJECTED, work row settled
+    // The dispatcher's op lease dies between the dispatch gate and the send —
+    // the only path left that can prove "not dispatched" and record REJECTED.
+    let stalled = false;
+    h.deps.hooks = {
+      afterDispatchGate: async () => {
+        if (stalled) return;
+        stalled = true;
+        h.advance(h.deps.leaseTtlMs + 1);
+      },
+    };
+    await h.webhook(id(2)); // op created + driven inline; the send never left the process
     const rejected = [...h.ops.ops.values()][0];
-    expect(rejected.phase).toBe("COMMIT_REJECTED");
+    expect(rejected.phase).toBe("COMMIT_IN_DOUBT"); // the gate flipped it; the stale drive stopped
+    expect(h.ops.attempts.find((a) => a.kind === "EDIT_COMMIT")).toMatchObject({ state: "REJECTED" });
+    expect(h.ops.attempts.find((a) => a.kind === "EDIT_COMMIT")!.responseSummary).toContain(
+      "not dispatched",
+    );
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(0); // provably never sent
+    expect(h.shopify.order(1).lineItems).toHaveLength(1);
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "OPERATION_CREATED" });
-    expect(h.shopify.order(1).lineItems).toHaveLength(1); // rejected = not applied
 
+    await h.sweep(); // takeover: all-REJECTED commit → COMMIT_REJECTED, quiet period
+    expect(h.ops.ops.get(rejected.id)!.phase).toBe("COMMIT_REJECTED");
     h.advance(16 * 60_000); // past the 15-minute quiet period
-    rejects = false;
-    // The sweep abandons the op, requeues the work item and (same tick)
-    // processes it into a fresh operation that merges cleanly.
+    // This sweep abandons the op, requeues the work item and (same tick)
+    // claims it into a fresh operation that merges cleanly.
     await h.sweep();
     expect(h.ops.ops.get(rejected.id)!.phase).toBe("ABANDONED");
     expect(h.ops.locks.size).toBe(0);
     expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "MERGED" });
     expect([...h.ops.ops.values()].map((o) => o.phase)).toEqual(["ABANDONED", "COMPLETED"]);
     expect(h.shopify.order(1).lineItems).toHaveLength(2);
-    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(2);
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1); // only the fresh merge's commit sent
   });
 
   it("#18 uninstalled shop: no offline session ends DONE SHOP_UNINSTALLED", async () => {

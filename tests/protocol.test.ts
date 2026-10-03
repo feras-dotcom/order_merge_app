@@ -512,9 +512,36 @@ it("13. kill-switch flips before the gate: no Shopify call; completion switch ho
 
 // ── 14. Definitive rejection + quiet period ──────────────────────────────────
 
-it("14. rejected commit: COMMIT_REJECTED, quiet 15m, then ABANDONED — unless a token appears", async () => {
-  // (a) Absence of evidence after the quiet period => ABANDONED, locks
-  //     released, work item requeued.
+it("14. 'the calculated order does not exist' is ambiguous: UNKNOWN, never re-sent", async () => {
+  // (a) Shopify applied the commit despite answering "does not exist": the
+  //     attempt is UNKNOWN, the op waits in COMMIT_IN_DOUBT with locks held,
+  //     and the evidence ladder reconciles it once the lines appear — the
+  //     commit is never re-dispatched.
+  {
+    const ctx = setup();
+    const { shopify, deps, ops } = ctx;
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const calcId = shopify.lastCalcId();
+    shopify.commitMode.set(calcId, "reject"); // error response; parks the commit
+    let op = await drive(ctx, result.operation!);
+    expect(op?.phase).toBe("COMMIT_IN_DOUBT");
+    expect(ops.attempts.find((a) => a.kind === "EDIT_COMMIT")).toMatchObject({ state: "UNKNOWN" });
+    expect(ops.locks.size).toBe(2);
+    // While the outcome is in doubt a replacement merge stays locked out.
+    const replacement = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(replacement.code).toBe("LOCKED");
+
+    advance(deps, 180_000);
+    shopify.deliverPendingCommit(calcId); // the commit actually applied
+    op = await driveToIdle(ctx, op!.id);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(shopify.mutationCalls("MergeEditCommit")).toBe(1);
+    expect(shopify.order(1).lineItems).toHaveLength(2); // applied once, not twice
+    expect(shopify.order(2).cancelCount).toBe(1);
+    expect(ops.locks.size).toBe(0);
+  }
+  // (b) The commit never applies: doubt becomes REVIEW_REQUIRED at +60m —
+  //     locks stay, the commit is never resent, the work item flags review.
   {
     const ctx = setup();
     const { shopify, deps, ops, work } = ctx;
@@ -525,35 +552,14 @@ it("14. rejected commit: COMMIT_REJECTED, quiet 15m, then ABANDONED — unless a
     });
     shopify.commitMode.set(shopify.lastCalcId(), "reject");
     let op = await drive(ctx, result.operation!);
-    expect(op?.phase).toBe("COMMIT_REJECTED");
-    expect(ops.attempts.find((a) => a.kind === "EDIT_COMMIT")).toMatchObject({ state: "REJECTED" });
-    expect(ops.locks.size).toBe(2); // still held during the quiet period
-    expect((await work.find(SHOP, id(2)))?.outcome).toBe("OPERATION_CREATED");
-    advance(deps, 15 * 60_000);
-    op = await drive(ctx, op!.id);
-    expect(op?.phase).toBe("ABANDONED");
-    expect(ops.locks.size).toBe(0);
-    expect((await work.find(SHOP, id(2)))?.status).toBe("PENDING"); // requeued
-    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
-  }
-  // (b) Shopify applied the commit despite returning an (undocumented)
-  //     userError: the wording proves nothing, so the attempt is UNKNOWN and
-  //     evidence — the token lines — reconciles the op to completion.
-  {
-    const ctx = setup();
-    const { shopify, deps, ops } = ctx;
-    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
-    const calcId = shopify.lastCalcId();
-    shopify.on("MergeEditCommit", () => {
-      shopify.applyCommit(calcId);
-      return userError("orderEditCommit", "userErrors", "Rejected at commit");
-    });
-    let op = await drive(ctx, result.operation!);
+    expect(op?.phase).toBe("COMMIT_IN_DOUBT");
     expect(ops.attempts.find((a) => a.kind === "EDIT_COMMIT")).toMatchObject({ state: "UNKNOWN" });
     op = await driveToIdle(ctx, op!.id);
-    expect(op?.phase).toBe("COMPLETED");
-    expect(shopify.order(2).cancelCount).toBe(1);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    expect(ops.locks.size).toBe(2);
     expect(shopify.mutationCalls("MergeEditCommit")).toBe(1);
+    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+    expect((await work.find(SHOP, id(2)))?.outcome).toBe("OPERATION_REVIEW");
   }
 });
 
@@ -881,7 +887,13 @@ it("25. one transient calc-order read failure: stays READY, next drive commits n
 it("26. evidence reads fail through the read-failure horizon: REVIEW_REQUIRED, locks kept", async () => {
   const ctx = setup();
   const { shopify, deps, ops } = ctx;
-  shopify.on("MergeOrderEvidence", () => topLevelError("outage"));
+  for (const name of [
+    "MergeOrderEvidenceLines",
+    "MergeOrderEvidenceAgreements",
+    "MergeTransferRecheck",
+  ]) {
+    shopify.on(name, () => topLevelError("outage"));
+  }
   const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
   const final = await driveToIdle(ctx, result.operation!);
   expect(final?.phase).toBe("REVIEW_REQUIRED");
@@ -975,7 +987,7 @@ it("30. READY reads fail past the read-failure horizon: ABANDONED, nothing dispa
 it("31. one transient evidence read failure: stays COMMIT_IN_DOUBT, then reconciles", async () => {
   const ctx = setup();
   const { shopify, deps } = ctx;
-  shopify.on("MergeOrderEvidence", (_v, call) => (call === 1 ? topLevelError() : undefined));
+  shopify.on("MergeOrderEvidenceLines", (_v, call) => (call === 1 ? topLevelError() : undefined));
   const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
   let op = await drive(ctx, result.operation!);
   expect(op?.phase).toBe("COMMIT_IN_DOUBT"); // read failure retries, not review
@@ -986,9 +998,9 @@ it("31. one transient evidence read failure: stays COMMIT_IN_DOUBT, then reconci
 
 // ── 32. Legacy entries without source ids: multiset binding (B1) ─────────────
 
-it("32. sourceManifestMismatch on legacy entries: (variant, qty) multiset must match", () => {
+it("32. sourceManifestMismatch: legacy multiset vs native id+quantity binding (N2)", () => {
   const state = makeOrder(2);
-  const entry = {
+  const legacyEntry = {
     secondaryId: id(2),
     secondaryIndex: 1,
     lines: [
@@ -996,17 +1008,239 @@ it("32. sourceManifestMismatch on legacy entries: (variant, qty) multiset must m
         sourceLineItemId: null,
         variantId: "gid://shopify/ProductVariant/1",
         quantity: 1,
+        sourceQuantity: null,
         description: "x",
       },
     ],
   };
-  expect(sourceManifestMismatch(entry as any, state, state.lineItems)).toBeNull();
-
+  // Legacy-converted ops keep the (variant, quantity) multiset matching.
+  expect(sourceManifestMismatch(legacyEntry as any, state, state.lineItems, true)).toBeNull();
   const resized = [makeLineItem({ quantity: 3, currentQuantity: 3, unfulfilledQuantity: 3 })];
-  expect(sourceManifestMismatch(entry as any, state, resized)).not.toBeNull();
+  expect(sourceManifestMismatch(legacyEntry as any, state, resized, true)).not.toBeNull();
   const extra = [...state.lineItems, makeLineItem()];
-  expect(sourceManifestMismatch(entry as any, state, extra)).not.toBeNull();
-  expect(sourceManifestMismatch(entry as any, state, [])).not.toBeNull(); // removed
+  expect(sourceManifestMismatch(legacyEntry as any, state, extra, true)).not.toBeNull();
+  expect(sourceManifestMismatch(legacyEntry as any, state, [], true)).not.toBeNull(); // removed
   const swapped = [makeLineItem({ variant: { id: "gid://shopify/ProductVariant/9" } })];
-  expect(sourceManifestMismatch(entry as any, state, swapped)).not.toBeNull();
+  expect(sourceManifestMismatch(legacyEntry as any, state, swapped, true)).not.toBeNull();
+
+  // A native v2 manifest that is missing a source id or the original
+  // quantity can never silently fall back to the multiset — it fails closed.
+  const line = state.lineItems[0];
+  const missingId = {
+    ...legacyEntry,
+    lines: [{ ...legacyEntry.lines[0], sourceLineItemId: null, sourceQuantity: 1 }],
+  };
+  expect(sourceManifestMismatch(missingId as any, state, state.lineItems)).toContain("incomplete");
+  const missingQty = {
+    ...legacyEntry,
+    lines: [{ ...legacyEntry.lines[0], sourceLineItemId: line.id, sourceQuantity: null }],
+  };
+  expect(sourceManifestMismatch(missingQty as any, state, state.lineItems)).toContain("incomplete");
+
+  // A complete native manifest binds every field of the source line.
+  const nativeEntry = {
+    ...legacyEntry,
+    lines: [{ ...legacyEntry.lines[0], sourceLineItemId: line.id, sourceQuantity: 1 }],
+  };
+  expect(sourceManifestMismatch(nativeEntry as any, state, state.lineItems)).toBeNull();
+  const grown = [{ ...line, quantity: 3 }]; // original quantity grew after the freeze
+  expect(sourceManifestMismatch(nativeEntry as any, state, grown)).not.toBeNull();
+  const nonFulfillable = [{ ...line, nonFulfillableQuantity: 1 }];
+  expect(sourceManifestMismatch(nativeEntry as any, state, nonFulfillable)).not.toBeNull();
+  const partlyUnfulfilled = [{ ...line, unfulfilledQuantity: 0 }];
+  expect(sourceManifestMismatch(nativeEntry as any, state, partlyUnfulfilled)).not.toBeNull();
+  const customAttr = [{ ...line, customAttributes: [{ key: "gift", value: "yes" }] }];
+  expect(sourceManifestMismatch(nativeEntry as any, state, customAttr)).not.toBeNull();
+});
+
+// ── 33. Cancel-time revalidation: an ineligible primary (N1) ───────────────
+//
+// Parked at APPLIED (the ORDER_CANCEL gate refuses while completionEnabled is
+// off), the primary's state mutated, then completion enabled. The cancel must
+// never dispatch: REVIEW_REQUIRED + CANCEL_REVIEW, locks kept, evidence
+// untouched — and a replacement merge stays locked out.
+
+it("33. post-APPLIED primary changes block the cancel: REVIEW_REQUIRED, locks kept", async () => {
+  const mutations: [string, (s: FakeShopify) => void][] = [
+    [
+      "merchant-cancelled primary",
+      (s) => {
+        const o = s.order(1);
+        o.cancelledAt = s.clock().toISOString();
+        o.cancellation = { staffNote: "merchant requested" };
+      },
+    ],
+    ["primary partially refunded", (s) => void (s.order(1).displayFinancialStatus = "PARTIALLY_REFUNDED")],
+    ["primary fulfillment in progress", (s) => void (s.order(1).displayFulfillmentStatus = "IN_PROGRESS")],
+    [
+      "primary gained a fulfillment object",
+      (s) => void (s.order(1).fulfillments = [{ id: "gid://shopify/Fulfillment/1" }]),
+    ],
+    ["primary closed", (s) => void (s.order(1).closed = true)],
+  ];
+  for (const [name, mutate] of mutations) {
+    const ctx = setup();
+    const { shopify, deps, ops } = ctx;
+    await ops.setControl({ completionEnabled: false }); // park the op at APPLIED
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.code, name).toBe("OPERATION_CREATED");
+    const op = await drive(ctx, result.operation!);
+    expect(op?.phase, name).toBe("APPLIED");
+    const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
+
+    mutate(shopify);
+    await ops.setControl({ completionEnabled: true });
+    advance(deps, 60_000); // past the gate's retry slot
+    const final = await driveToIdle(ctx, op!.id);
+    expect(final?.phase, name).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.secondaries[0]?.cancelPhase, name).toBe("CANCEL_REVIEW");
+    expect(stored?.appliedEvidence, name).toEqual(evidenceBefore); // never rewritten
+    expect(shopify.mutationCalls("MergeCancelSecondary"), name).toBe(0);
+    expect(shopify.order(2).cancelledAt, name).toBeNull();
+    expect(ops.locks.size, name).toBe(2);
+
+    // A replacement merge on any involved order is durably locked out.
+    const replacement = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(replacement.code, name).toBe("LOCKED");
+  }
+});
+
+// ── 34. Cancel-time revalidation: group compatibility (N2) ─────────────────
+
+it("34. post-APPLIED group changes block the cancel: REVIEW_REQUIRED, locks kept", async () => {
+  const mutations: [string, (s: FakeShopify) => void][] = [
+    [
+      "primary shipping title changed",
+      (s) => void (s.order(1).shippingLines.nodes[0].title = "Express"),
+    ],
+    ["primary address changed", (s) => void (s.order(1).shippingAddress!.address1 = "2 Other St")],
+    ["primary currency changed", (s) => void (s.order(1).currencyCode = "EUR")],
+    ["secondary address changed", (s) => void (s.order(2).shippingAddress!.address1 = "2 Other St")],
+    [
+      "secondary customer changed",
+      (s) => void (s.order(2).customer = { id: "gid://shopify/Customer/2" }),
+    ],
+    ["secondary risk raised", (s) => void (s.order(2).riskLevel = "HIGH")],
+  ];
+  for (const [name, mutate] of mutations) {
+    const ctx = setup();
+    const { shopify, deps, ops } = ctx;
+    await ops.setControl({ completionEnabled: false });
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.code, name).toBe("OPERATION_CREATED");
+    const op = await drive(ctx, result.operation!);
+    expect(op?.phase, name).toBe("APPLIED");
+    const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
+
+    mutate(shopify);
+    await ops.setControl({ completionEnabled: true });
+    advance(deps, 60_000);
+    const final = await driveToIdle(ctx, op!.id);
+    expect(final?.phase, name).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.secondaries[0]?.cancelPhase, name).toBe("CANCEL_REVIEW");
+    expect(stored?.appliedEvidence, name).toEqual(evidenceBefore);
+    expect(shopify.mutationCalls("MergeCancelSecondary"), name).toBe(0);
+    expect(shopify.order(2).cancelledAt, name).toBeNull();
+    expect(ops.locks.size, name).toBe(2);
+
+    const replacement = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(replacement.code, name).toBe("LOCKED");
+  }
+});
+
+// ── 35. Cancel-time revalidation: line predicates + primary token lines ────
+
+it("35. post-APPLIED line-predicate changes block the cancel (N2)", async () => {
+  const mutations: [string, (s: FakeShopify) => void][] = [
+    [
+      "custom attribute added to the source line",
+      (s) => void (s.order(2).lineItems[0].customAttributes = [{ key: "gift", value: "yes" }]),
+    ],
+    ["source line stops requiring shipping", (s) => void (s.order(2).lineItems[0].requiresShipping = false)],
+    ["source line became a gift card", (s) => void (s.order(2).lineItems[0].isGiftCard = true)],
+    ["source line's original quantity grew", (s) => void (s.order(2).lineItems[0].quantity = 3)],
+    [
+      "source line's unfulfilled quantity dropped",
+      (s) => void (s.order(2).lineItems[0].unfulfilledQuantity = 0),
+    ],
+    [
+      "source line became non-fulfillable",
+      (s) => void (s.order(2).lineItems[0].nonFulfillableQuantity = 1),
+    ],
+    [
+      // The transferred line on the primary stays whole but is no longer
+      // fully unfulfilled — the scan and per-line recheck predicates still
+      // pass; only the cancel-time unfulfilled check catches it.
+      "transferred line on the primary no longer fully unfulfilled",
+      (s) => void (s.order(1).lineItems.at(-1)!.unfulfilledQuantity = 0),
+    ],
+  ];
+  for (const [name, mutate] of mutations) {
+    const ctx = setup();
+    const { shopify, deps, ops } = ctx;
+    await ops.setControl({ completionEnabled: false });
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.code, name).toBe("OPERATION_CREATED");
+    const op = await drive(ctx, result.operation!);
+    expect(op?.phase, name).toBe("APPLIED");
+    const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
+
+    mutate(shopify);
+    await ops.setControl({ completionEnabled: true });
+    advance(deps, 60_000);
+    const final = await driveToIdle(ctx, op!.id);
+    expect(final?.phase, name).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.secondaries[0]?.cancelPhase, name).toBe("CANCEL_REVIEW");
+    expect(stored?.appliedEvidence, name).toEqual(evidenceBefore);
+    expect(shopify.mutationCalls("MergeCancelSecondary"), name).toBe(0);
+    expect(shopify.order(2).cancelledAt, name).toBeNull();
+    expect(ops.locks.size, name).toBe(2);
+  }
+});
+
+// ── 36. Mid-scan evidence mutation: the post-scan recheck catches it (N3) ──
+
+it("36. a token line emptied mid-scan: the post-scan recheck blocks the cancel", async () => {
+  const ctx = setup([
+    makeOrder(1, {
+      lineItems: [makeLineItem(), makeLineItem(), makeLineItem(), makeLineItem()],
+    }),
+    makeOrder(2),
+  ]);
+  const { shopify, deps, ops } = ctx;
+  await ops.setControl({ completionEnabled: false }); // park at APPLIED
+  const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+  const op = await drive(ctx, result.operation!);
+  expect(op?.phase).toBe("APPLIED");
+  const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
+
+  // Move the token line to index 1 and page at 2. The parking drive made two
+  // unpaged evidence reads (COMMIT_IN_DOUBT's, then the first
+  // cancelPrecondition's), so the cancel-time scan pages on calls 3-5: the
+  // token line is read on call 3 (page 1), and the mutation lands on the
+  // page-2 request (call 4) — the scan's token snapshot stays clean and only
+  // the post-scan recheck can catch it.
+  const tokenLine = shopify.order(1).lineItems.at(-1)!;
+  const lines = shopify.order(1).lineItems;
+  shopify.order(1).lineItems = [lines[0], tokenLine, ...lines.slice(1, -1)];
+  shopify.evidencePageSize = 2;
+  shopify.on("MergeOrderEvidenceLines", (_v, call) => {
+    if (call === 4) tokenLine.currentQuantity = 0;
+    return undefined;
+  });
+  await ops.setControl({ completionEnabled: true });
+  advance(deps, 60_000);
+  const final = await driveToIdle(ctx, op!.id);
+  expect(final?.phase).toBe("REVIEW_REQUIRED");
+  const stored = await ops.getOperation(op!.id);
+  // The recheck — not the stale scan — is what refused the cancel.
+  expect(stored?.reviewReason).toContain("changed while evidence was being verified");
+  expect(stored?.secondaries[0]?.cancelPhase).toBe("CANCEL_REVIEW");
+  expect(stored?.appliedEvidence).toEqual(evidenceBefore);
+  expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+  expect(shopify.order(2).cancelledAt).toBeNull();
+  expect(ops.locks.size).toBe(2);
 });

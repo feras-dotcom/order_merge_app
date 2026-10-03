@@ -17,7 +17,13 @@
 // (gql() caps a call at 45s, the TTL is 120s). Durable locks + the operation
 // row + evidence are the safety mechanism.
 
-import { gql, gqlNullable, ShopifyGraphqlError, type AdminClient } from "./graphql.server";
+import {
+  gql,
+  gqlNullable,
+  nextPageCursor,
+  ShopifyGraphqlError,
+  type AdminClient,
+} from "./graphql.server";
 import { prismaClaimStore, type ClaimStore } from "./claims.server";
 import {
   newLeaseToken,
@@ -149,10 +155,8 @@ export interface MergeResult {
 
 // ── Shopify reads ─────────────────────────────────────────────────────────────
 
-export const ORDER_STATE_QUERY = `#graphql
-  query MergeOrderState($ids: [ID!]!) {
-    nodes(ids: $ids) {
-      ... on Order {
+/** The Order selection shared by MergeOrderState and the transfer recheck. */
+export const ORDER_STATE_FIELDS = `
         id
         name
         createdAt
@@ -189,6 +193,12 @@ export const ORDER_STATE_QUERY = `#graphql
           }
         }
         fulfillments(first: 5) { id }
+`;
+
+export const ORDER_STATE_QUERY = `#graphql
+  query MergeOrderState($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Order {${ORDER_STATE_FIELDS}
       }
     }
   }`;
@@ -234,15 +244,14 @@ export async function fetchAllLineItems(
   orderId: string,
 ): Promise<MergeLineItem[]> {
   const items: MergeLineItem[] = [];
+  const seen = new Set<string>();
   let after: string | null = null;
   do {
     const order: any = await gql(admin, "Load line items", LINE_ITEMS_QUERY, { id: orderId, after }, "order", null);
-    const connection = order.lineItems;
-    if (!connection?.nodes || !connection.pageInfo) {
-      throw new ShopifyGraphqlError(`Could not load line items for ${orderId}.`, false);
-    }
-    items.push(...connection.nodes);
-    after = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
+    // Validates the page first: a connection that cannot prove completeness
+    // (missing/malformed pageInfo, a non-progressing cursor) throws.
+    after = nextPageCursor(order.lineItems, seen, `Line items of ${orderId}`);
+    items.push(...order.lineItems.nodes);
   } while (after);
   return items;
 }
@@ -468,6 +477,7 @@ interface AddedLine {
   sourceLineItemId: string | null;
   variantId: string | null;
   quantity: number;
+  sourceQuantity: number;
   description: string;
 }
 
@@ -527,6 +537,7 @@ async function buildOrderEdit(
         sourceLineItemId: item.id ?? null,
         variantId: item.variant?.id ?? null,
         quantity: item.currentQuantity,
+        sourceQuantity: item.quantity,
         description,
       });
       lineCount += 1;
