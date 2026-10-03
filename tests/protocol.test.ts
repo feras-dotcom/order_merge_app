@@ -5,9 +5,18 @@
 
 import { expect, it } from "vitest";
 import { executeMerge, type MergeDeps } from "../app/lib/merge.server";
-import { driveOperation, sourceManifestMismatch } from "../app/lib/operation-protocol.server";
+import {
+  cancelStaffNote,
+  driveOperation,
+  matchesCancelStaffNote,
+  sourceManifestMismatch,
+} from "../app/lib/operation-protocol.server";
 import { ClaimContentionError, newLeaseToken, OwnershipLostError } from "../app/lib/ownership.server";
-import type { NewOperationV2, OperationRecord } from "../app/lib/operation-store.server";
+import type {
+  MutationAttempt,
+  NewOperationV2,
+  OperationRecord,
+} from "../app/lib/operation-store.server";
 import {
   advance,
   FakeShopify,
@@ -1243,4 +1252,246 @@ it("36. a token line emptied mid-scan: the post-scan recheck blocks the cancel",
   expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
   expect(shopify.order(2).cancelledAt).toBeNull();
   expect(ops.locks.size).toBe(2);
+});
+
+// ── 37. Mid-scan secondary mutation: the final complete re-proof (R1) ────
+
+it("37. a secondary mutation during the primary evidence scan blocks the cancel (R1)", async () => {
+  const mutations: [string, (s: FakeShopify) => void][] = [
+    [
+      "source quantity grew 1→3",
+      (s) => s.setLineQuantity(id(2), s.order(2).lineItems[0].id, 3),
+    ],
+    [
+      "a new line was added to the secondary",
+      (s) => void s.addSourceLine(id(2), "gid://shopify/ProductVariant/9", 2),
+    ],
+    [
+      "custom attribute added to the source line",
+      (s) => void (s.order(2).lineItems[0].customAttributes = [{ key: "gift", value: "yes" }]),
+    ],
+    [
+      "source line stops requiring shipping",
+      (s) => void (s.order(2).lineItems[0].requiresShipping = false),
+    ],
+    ["secondary address changed", (s) => void (s.order(2).shippingAddress!.address1 = "2 Other St")],
+    [
+      "secondary customer changed",
+      (s) => void (s.order(2).customer = { id: "gid://shopify/Customer/2" }),
+    ],
+  ];
+  for (const [name, mutate] of mutations) {
+    const ctx = setup();
+    const { shopify, deps, ops, journal } = ctx;
+    await ops.setControl({ completionEnabled: false }); // park at APPLIED
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    expect(result.code, name).toBe("OPERATION_CREATED");
+    const op = await drive(ctx, result.operation!);
+    expect(op?.phase, name).toBe("APPLIED");
+    const evidenceBefore = (await ops.getOperation(op!.id))?.appliedEvidence;
+
+    // Fire once, on the first evidence-lines read of the cancel-time scan —
+    // after the secondary's merchandise was already read (step 2).
+    let armed = false;
+    let callsAtMutation = -1;
+    shopify.on("MergeOrderEvidenceLines", () => {
+      if (armed) {
+        armed = false;
+        callsAtMutation = shopify.calls.length - 1; // this call's index
+        mutate(shopify);
+      }
+      return undefined;
+    });
+
+    await ops.setControl({ completionEnabled: true });
+    advance(deps, 60_000);
+    armed = true;
+    const final = await driveToIdle(ctx, op!.id);
+
+    expect(armed, name).toBe(false); // the mutation really fired mid-scan
+    // The secondary's line read happened before the mutating call and again
+    // after it — the final complete re-proof is what refused the cancel.
+    const lineReads = shopify.calls
+      .map((c, i) => i)
+      .filter((i) => shopify.calls[i] === "MergeOrderLineItems");
+    expect(lineReads.some((i) => i < callsAtMutation), name).toBe(true);
+    expect(lineReads.some((i) => i > callsAtMutation), name).toBe(true);
+
+    expect(final?.phase, name).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.secondaries[0]?.cancelPhase, name).toBe("CANCEL_REVIEW");
+    expect(stored?.appliedEvidence, name).toEqual(evidenceBefore);
+    expect(shopify.mutationCalls("MergeCancelSecondary"), name).toBe(0);
+    expect(shopify.order(2).cancelledAt, name).toBeNull();
+    expect(ops.locks.size, name).toBe(2);
+    expect(ops.records, name).toHaveLength(0);
+    expect(journal.history, name).toHaveLength(0);
+  }
+});
+
+// ── 38. Copied-token cancellations are never adopted (R2) ────────────────
+
+it("38. a copied MS- token is never provenance: outside/refunded cancels park review (R2)", async () => {
+  const fakeAttempt = (operationId: string, targetOrderId: string): MutationAttempt => ({
+    id: `att-fake-${operationId}`,
+    operationId,
+    kind: "ORDER_CANCEL",
+    targetOrderId,
+    attemptNo: 1,
+    state: "SUCCEEDED",
+    dispatchToken: "dt",
+    dispatchedAt: new Date(),
+    respondedAt: new Date(),
+    responseSummary: null,
+    jobId: null,
+  });
+  const cases: [
+    string,
+    (c: { op: OperationRecord; shopify: FakeShopify; ops: MemoryOperationStore }) => void,
+    string,
+  ][] = [
+    [
+      "canonical note but REFUNDED",
+      ({ op, shopify }) => {
+        shopify.order(2).cancellation = { staffNote: cancelStaffNote(op.primaryOrderName, op.opToken!) };
+        shopify.order(2).displayFinancialStatus = "REFUNDED";
+      },
+      "refund",
+    ],
+    [
+      "canonical note, PAID, zero attempts",
+      ({ op, shopify }) => {
+        shopify.order(2).cancellation = { staffNote: cancelStaffNote(op.primaryOrderName, op.opToken!) };
+      },
+      "outside MergeShip",
+    ],
+    [
+      "note with a suffixed token",
+      ({ op, shopify }) => {
+        shopify.order(2).cancellation = {
+          staffNote: cancelStaffNote(op.primaryOrderName, `${op.opToken}XYZ`),
+        };
+      },
+      "outside MergeShip",
+    ],
+    [
+      "prose mentioning the token",
+      ({ op, shopify }) => {
+        shopify.order(2).cancellation = {
+          staffNote: `Merchant refund. See app reference MS-${op.opToken}`,
+        };
+      },
+      "outside MergeShip",
+    ],
+    [
+      "canonical note with another op's token",
+      ({ op, shopify }) => {
+        shopify.order(2).cancellation = { staffNote: cancelStaffNote(op.primaryOrderName, "OTHERTOK") };
+      },
+      "outside MergeShip",
+    ],
+    [
+      "canonical note + attempt for the wrong secondary",
+      ({ op, shopify, ops }) => {
+        shopify.order(2).cancellation = { staffNote: cancelStaffNote(op.primaryOrderName, op.opToken!) };
+        ops.attempts.push(fakeAttempt(op.id, id(3)));
+      },
+      "outside MergeShip",
+    ],
+    [
+      "canonical note + attempt for the wrong operation",
+      ({ op, shopify, ops }) => {
+        shopify.order(2).cancellation = { staffNote: cancelStaffNote(op.primaryOrderName, op.opToken!) };
+        ops.attempts.push(fakeAttempt("op-other", id(2)));
+      },
+      "outside MergeShip",
+    ],
+  ];
+  for (const [name, arrange, reasonFrag] of cases) {
+    const ctx = setup();
+    const { shopify, deps, ops, journal } = ctx;
+    await ops.setControl({ completionEnabled: false }); // park at APPLIED
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const op = await drive(ctx, result.operation!);
+    expect(op?.phase, name).toBe("APPLIED");
+    // Zero ORDER_CANCEL attempts of our own exist at this point.
+    expect(
+      (await ops.listAttempts(op!.id, "ORDER_CANCEL")).filter((a) => a.state !== "REJECTED"),
+      name,
+    ).toHaveLength(0);
+
+    // The merchant cancels the secondary — with whatever note the case gives.
+    shopify.order(2).cancelledAt = shopify.clock().toISOString();
+    arrange({ op: op!, shopify, ops });
+    await ops.setControl({ completionEnabled: true });
+    advance(deps, 60_000);
+    const final = await driveToIdle(ctx, op!.id);
+
+    expect(final?.phase, name).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.secondaries[0]?.cancelPhase, name).toBe("CANCEL_REVIEW");
+    expect(stored?.reviewReason, name).toContain(reasonFrag);
+    expect(shopify.mutationCalls("MergeCancelSecondary"), name).toBe(0);
+    expect(ops.records, name).toHaveLength(0);
+    expect(journal.history, name).toHaveLength(0);
+    expect(ops.locks.size, name).toBe(2);
+  }
+});
+
+// ── 39. Provenance positive paths + refund-during-doubt (R2) ─────────────
+
+it("39. canonical note + durable attempt proves ours; a refund during doubt reviews (R2)", async () => {
+  // (a) The fake records the canonical note the engine sent and the durable
+  //     SUCCEEDED attempt exists → "ours" through verifyCancel → COMPLETED.
+  {
+    const ctx = setup();
+    const { shopify, deps, ops } = ctx;
+    shopify.cancelMode.set(id(2), "delay");
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const op = await driveToIdle(ctx, result.operation!);
+    expect(op?.phase).toBe("COMPLETED");
+    expect(op?.sideEffectsDone).toBe(true);
+    expect(shopify.order(2).cancelCount).toBe(1);
+    expect(shopify.order(2).cancelledAt).toBeTruthy();
+    expect(ops.records).toHaveLength(1);
+    expect(ops.locks.size).toBe(0);
+  }
+  // (b) Same delayed cancel, but the order reads back REFUNDED once the
+  //     cancellation is visible — whoever cancelled, a human must look.
+  {
+    const ctx = setup();
+    const { shopify, deps, ops, journal } = ctx;
+    shopify.cancelMode.set(id(2), "delay");
+    shopify.on("MergeOrderState", () => {
+      const o = shopify.order(2);
+      // pendingCancelReads hits 0 on the read that applies the cancel — flip
+      // the payment state in the same response that reveals cancelledAt.
+      if (o.cancelledAt || o.pendingCancelReads === 0) {
+        o.displayFinancialStatus = "REFUNDED";
+      }
+      return undefined;
+    });
+    const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+    const op = await driveToIdle(ctx, result.operation!);
+    expect(op?.phase).toBe("REVIEW_REQUIRED");
+    const stored = await ops.getOperation(op!.id);
+    expect(stored?.secondaries[0]?.cancelPhase).toBe("CANCEL_REVIEW");
+    expect(stored?.reviewReason).toContain("refund");
+    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(1); // never re-sent
+    expect(ops.records).toHaveLength(0);
+    expect(journal.history).toHaveLength(0);
+    expect(ops.locks.size).toBe(2);
+  }
+  // (c) The canonical note matches by whitespace-normalised equality only.
+  {
+    const note = cancelStaffNote("#1", "TESTTEST");
+    expect(matchesCancelStaffNote(note, "#1", "TESTTEST")).toBe(true);
+    expect(matchesCancelStaffNote(note.replace("Items ", "Items   "), "#1", "TESTTEST")).toBe(true);
+    expect(matchesCancelStaffNote(`${note} (refunded)`, "#1", "TESTTEST")).toBe(false);
+    expect(
+      matchesCancelStaffNote("Merchant refund. See app reference MS-TESTTEST", "#1", "TESTTEST"),
+    ).toBe(false);
+    expect(matchesCancelStaffNote(note, "#1", "OTHERTOK")).toBe(false);
+    expect(matchesCancelStaffNote(note, "#1", null)).toBe(false);
+  }
 });

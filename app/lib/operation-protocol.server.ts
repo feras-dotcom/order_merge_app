@@ -57,6 +57,18 @@ export const READ_RETRY_MS = 60_000;
 const MERGED_TAG = "Merged";
 const CONSOLIDATED_TAG = "Consolidated";
 
+/** The exact staff note MergeShip writes on orderCancel; also the only note
+ *  it will ever recognise as its own (whitespace-normalised equality). */
+export const cancelStaffNote = (primaryOrderName: string, opToken: string) =>
+  `Repeat order merged into ${primaryOrderName} by MergeShip. Items transferred, inventory restocked, not refunded. Ref MS-${opToken}`;
+export const matchesCancelStaffNote = (
+  note: string | null | undefined,
+  primaryOrderName: string,
+  opToken: string | null,
+) =>
+  opToken != null &&
+  (note ?? "").trim().replace(/\s+/g, " ") === cancelStaffNote(primaryOrderName, opToken);
+
 const COMMIT_MUTATION = `#graphql
   mutation MergeEditCommit($id: ID!, $staffNote: String) {
     orderEditCommit(id: $id, notifyCustomer: false, staffNote: $staffNote) {
@@ -710,7 +722,7 @@ export async function driveOperation(
         return "wait";
       }
       await deps.hooks?.afterDispatchGate?.();
-      const staffNote = `Repeat order merged into ${current.primaryOrderName} by MergeShip. Items transferred, inventory restocked, not refunded. Ref MS-${current.opToken}`;
+      const staffNote = cancelStaffNote(current.primaryOrderName, current.opToken!);
       const result = await sendAttempt(deps.ops, attempt.id, dispatchToken, sentSoFar, async () => {
         const res = await gql<{ job?: { id?: string } | null }>(
           fenced,
@@ -760,20 +772,42 @@ export async function driveOperation(
     }
   }
 
-  /** A cancellation is ours when its staff note carries `MS-<opToken>`. Ops
-   *  converted from v1 by scripts/legacy-reconcile.ts are marked by
-   *  calculatedOrderId IS NULL (a v2-created op always has a calc) and their
-   *  cancels carried the v1 note "... merged into #P by MergeShip." — accept
-   *  that form for legacy ops only, and only when the captured order name is
-   *  exactly this op's primary, so a v2 op can never adopt somebody else's
-   *  cancellation as proof. */
-  function isOurCancellation(staffNote: string | null | undefined): boolean {
-    const note = staffNote ?? "";
-    const legacy = LEGACY_STAFF_NOTE_RE.exec(note);
-    return (
-      note.includes(`MS-${current.opToken}`) ||
-      (current.calculatedOrderId == null && legacy?.[1] === current.primaryOrderName)
-    );
+  /** How a cancelled secondary's cancellation relates to this operation.
+   *  "refunded": the secondary's payment state is no longer PAID — MergeShip
+   *    cancels WITHOUT refunding, so any refund means a human must look,
+   *    whoever cancelled.
+   *  "ours": native v2 — the staff note is exactly MergeShip's canonical note
+   *    for THIS op and primary AND a durable ORDER_CANCEL attempt
+   *    (DISPATCHING/UNKNOWN/SUCCEEDED) exists for THIS op + THIS secondary;
+   *    legacy-converted ops (calculatedOrderId IS NULL) keep the approved v1
+   *    note rule, again only when the captured name is exactly this primary.
+   *  "outside": anything else — a copied reference is never provenance. */
+  async function classifyCancellation(
+    s: OperationSecondary,
+    st: OrderState & { cancellation?: { staffNote?: string | null } | null },
+  ): Promise<"ours" | "outside" | "refunded"> {
+    if (st.displayFinancialStatus !== "PAID") return "refunded";
+    const note = st.cancellation?.staffNote;
+    if (current.calculatedOrderId == null) {
+      return LEGACY_STAFF_NOTE_RE.exec(note ?? "")?.[1] === current.primaryOrderName
+        ? "ours"
+        : "outside";
+    }
+    const attempts = await deps.ops.listAttempts(current.id, "ORDER_CANCEL", s.id);
+    return matchesCancelStaffNote(note, current.primaryOrderName, current.opToken) &&
+      attempts.some((a) => a.state !== "REJECTED")
+      ? "ours"
+      : "outside";
+  }
+
+  function cancellationReason(
+    s: OperationSecondary,
+    kind: "outside" | "refunded",
+    st: { displayFinancialStatus?: string | null },
+  ) {
+    return kind === "refunded"
+      ? `${s.name} is cancelled with payment state ${st.displayFinancialStatus ?? "unknown"}; MergeShip cancels without refunding, so a human must check the refund.`
+      : `${s.name} was cancelled outside MergeShip — check whether the customer was refunded.`;
   }
 
   /** Reads the secondary: "verified" = cancelled by us + history written;
@@ -784,12 +818,13 @@ export async function driveOperation(
   ): Promise<"verified" | "again" | "pending"> {
     const st = await fetchOrderStateOrNull(fenced, s.id);
     if (!st?.cancelledAt) return "pending";
-    if (!isOurCancellation(st.cancellation?.staffNote)) {
+    const kind = await classifyCancellation(s, st);
+    if (kind !== "ours") {
       s.cancelPhase = "CANCEL_REVIEW";
       await move({
         phase: "REVIEW_REQUIRED",
         secondaries,
-        reviewReason: `${s.name} was cancelled outside MergeShip — check whether the customer was refunded.`,
+        reviewReason: cancellationReason(s, kind, st),
         nextCheckAt: "now",
       });
       return "again";
@@ -830,9 +865,8 @@ export async function driveOperation(
     const st = await fetchOrderStateOrNull(fenced, s.id);
     if (!st) return `${s.name} could no longer be loaded.`;
     if (st.cancelledAt) {
-      if (!isOurCancellation(st.cancellation?.staffNote)) {
-        return `${s.name} was cancelled outside MergeShip — check whether the customer was refunded.`;
-      }
+      const kind = await classifyCancellation(s, st);
+      if (kind !== "ours") return cancellationReason(s, kind, st);
       await recordVerified(st.cancelledAt);
       return "verified";
     }
@@ -898,21 +932,25 @@ export async function driveOperation(
     const primaryReason = orderStateIneligibility(fresh.recheck.primary);
     if (primaryReason) return primaryReason;
 
-    // 4 — A final live re-read of the secondary plus the shared order-level
-    //     group rules against the rechecked primary: customer, address,
-    //     shipping and currency must not have moved while the evidence was
-    //     being verified.
+    // 4 — A final complete re-proof of the secondary: state, then the full
+    //     manifest/eligibility check on merchandise re-read after the primary
+    //     scan, then the shared order-level group rules against the rechecked
+    //     primary — nothing the earlier read could not see may cancel.
     const st2 = await fetchOrderStateOrNull(fenced, s.id);
     if (!st2) return `${s.name} could no longer be loaded.`;
     if (st2.cancelledAt) {
-      if (!isOurCancellation(st2.cancellation?.staffNote)) {
-        return `${s.name} was cancelled outside MergeShip — check whether the customer was refunded.`;
-      }
+      const kind = await classifyCancellation(s, st2);
+      if (kind !== "ours") return cancellationReason(s, kind, st2);
       await recordVerified(st2.cancelledAt);
       return "verified";
     }
     const st2Reason = orderStateIneligibility(st2);
     if (st2Reason) return st2Reason;
+    // The complete secondary merchandise again, on the fresh read — the last
+    // proof before the gate covers what the earlier read could not see.
+    const sItems2 = await fetchAllLineItems(fenced, s.id);
+    const mismatch2 = sourceManifestMismatch(entry, st2, sItems2, legacy);
+    if (mismatch2) return mismatch2;
     const groupReason = groupOrderIncompatibility([fresh.recheck.primary, st2]);
     if (groupReason) return groupReason;
     if (
