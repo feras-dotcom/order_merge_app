@@ -76,6 +76,12 @@ the process if its gate committed before the disable did.**
    - `review` — `status='REVIEW'` with an operator reason (surfaces in the
      dashboard review count);
    - `exclude` — left DONE/LEGACY but stamped `CUTOVER_EXCLUDED_BY_OPERATOR`.
+   **`exclude` is the recommended default**: rows older than `safeSince`
+   were already processed by the v1 engine at the time — only work in
+   flight at the stop is unproven, and that sits inside the window and gets
+   requeued. Use `review` when a human should look at the stranded set.
+   Reserve `requeue` for a known v1 outage period — it re-feeds every
+   pre-cutover row to the engine and can flood the work queue.
    Orders a live op locks or a `MergeRecord` already merged are never
    touched; every disposition is idempotent.
 7. **`backfill-recent-orders`** — covers orders that arrived while merges

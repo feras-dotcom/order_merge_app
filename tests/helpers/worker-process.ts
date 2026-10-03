@@ -12,6 +12,8 @@
 //                          first attempt outcome is durable
 //      SWEEP_ONLY            "true" → no anchor; just sweep until quiet
 //      SWEEP_MAX_MS          (default 60000) sweep deadline
+//      WORKER_NAME           identity posted to /ready so the harness can
+//                          release exactly the workers a case expects
 
 import { PrismaClient } from "@prisma/client";
 import { prismaClaimStore } from "../../app/lib/claims.server";
@@ -31,6 +33,7 @@ const SWEEP_ONLY = process.env.SWEEP_ONLY === "true";
 const OP_LEASE_TTL = Number(process.env.LEASE_TTL_MS) || 0; // 0 → default ttl
 const SWEEP_MAX = Number(process.env.SWEEP_MAX_MS) || 60_000;
 const CRASH_AT = process.env.CRASH_AT;
+const WORKER_NAME = process.env.WORKER_NAME ?? ANCHOR ?? "sweep";
 if (!FAKE || !SHOP || (!ANCHOR && !SWEEP_ONLY) || !process.env.DATABASE_URL) {
   console.error("needs env: DATABASE_URL FAKE_SHOPIFY_URL SHOP ANCHOR_ORDER_ID|SWEEP_ONLY");
   process.exit(2);
@@ -97,7 +100,17 @@ const settings = async () => ({
   onboardingCompletedAt: new Date(),
 });
 
-// Start barrier: both children fire at once.
+// Start barrier: register with the harness, then wait for /go — the test
+// releases once every expected worker has checked in, never on a timer.
+for (;;) {
+  try {
+    await fetch(`${FAKE}/ready?worker=${encodeURIComponent(WORKER_NAME)}`, { method: "POST" });
+    break;
+  } catch {
+    /* server not up yet */
+  }
+  await new Promise((r) => setTimeout(r, 50));
+}
 for (;;) {
   try {
     if ((await (await fetch(`${FAKE}/go`)).json()).go) break;

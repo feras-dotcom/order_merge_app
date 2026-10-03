@@ -28,7 +28,17 @@ const repoRoot = path.resolve(__dirname, "..");
 async function startHarness() {
   const shopify = new FakeShopify([makeOrder(1), makeOrder(2), makeOrder(3)]);
   shopify.clock = () => new Date(); // real wall clock — children run on it
-  let go = false;
+  const registered = new Set<string>();
+  let expectedWorkers: string[] | null = null;
+  let goResolve: (() => void) | null = null;
+  const released = () =>
+    expectedWorkers !== null && expectedWorkers.every((n) => registered.has(n));
+  const maybeRelease = () => {
+    if (released()) {
+      goResolve?.();
+      goResolve = null;
+    }
+  };
 
   const server = http.createServer(async (req, res) => {
     const json = (body: unknown) => {
@@ -51,7 +61,15 @@ async function startHarness() {
       });
       return;
     }
-    if (req.url === "/go") return json({ go });
+    if (req.method === "POST" && req.url?.startsWith("/ready")) {
+      const worker = new URL(req.url, "http://localhost").searchParams.get("worker");
+      if (worker) {
+        registered.add(worker);
+        maybeRelease();
+      }
+      return json({ ok: true });
+    }
+    if (req.url === "/go") return json({ go: released() });
     res.writeHead(404).end();
   });
   const port = await new Promise<number>((resolve) => {
@@ -98,8 +116,24 @@ async function startHarness() {
     shopify,
     db,
     runChild,
-    // Give a fresh child a moment to reach the barrier, then release it.
-    release: () => new Promise((r) => setTimeout(r, 4000)).then(() => (go = true)),
+    // Release once every named worker has posted /ready — event-driven, no
+    // timer. Children arriving later (e.g. a post-completion fourth order)
+    // poll /go and pass immediately once the expected set has checked in.
+    release: (expected: string[]) =>
+      new Promise<void>((resolve, reject) => {
+        expectedWorkers = expected;
+        if (released()) return resolve();
+        goResolve = resolve;
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `workers never registered: want [${expected}], have [${[...registered]}]`,
+              ),
+            ),
+          60_000,
+        );
+      }),
     close: async () => {
       server.close();
       await db.$disconnect();
@@ -132,9 +166,9 @@ run("two processes sharing real Postgres", () => {
       }
     }, 100);
 
-    const a = h.runChild({ ANCHOR_ORDER_ID: id(2) });
-    const b = h.runChild({ ANCHOR_ORDER_ID: id(3) });
-    await h.release();
+    const a = h.runChild({ ANCHOR_ORDER_ID: id(2), WORKER_NAME: "A" });
+    const b = h.runChild({ ANCHOR_ORDER_ID: id(3), WORKER_NAME: "B" });
+    await h.release(["A", "B"]);
     const [ra, rb] = await Promise.all([a, b]);
     clearInterval(sampler);
     await h.close();
@@ -190,8 +224,13 @@ run("two processes sharing real Postgres", () => {
     // must exceed that while still lapsing early in the 90s sweep — the
     // parked COMMIT_IN_DOUBT op becomes re-acquirable ~15s past its first
     // evidence-ladder slot.
-    const child = h.runChild({ ANCHOR_ORDER_ID: id(2), SWEEP_MAX_MS: "90000", LEASE_TTL_MS: "45000" });
-    await h.release();
+    const child = h.runChild({
+      ANCHOR_ORDER_ID: id(2),
+      SWEEP_MAX_MS: "90000",
+      LEASE_TTL_MS: "45000",
+      WORKER_NAME: "A",
+    });
+    await h.release(["A"]);
 
     // Wait for the child's commit to reach the fake, then apply it ~3s later.
     const observed = Date.now();
@@ -230,9 +269,10 @@ run("two processes sharing real Postgres", () => {
       ANCHOR_ORDER_ID: id(2),
       CRASH_AT: "after-attempt-record",
       LEASE_TTL_MS: "45000",
+      WORKER_NAME: "A",
     });
-    const b = h.runChild({ SWEEP_ONLY: "true", SWEEP_MAX_MS: "90000" });
-    await h.release();
+    const b = h.runChild({ SWEEP_ONLY: "true", SWEEP_MAX_MS: "90000", WORKER_NAME: "B" });
+    await h.release(["A", "B"]);
     const [ra, rb] = await Promise.all([a, b]);
     await h.close();
     console.log("── child A (#2, crash) ──\n" + ra.out.trim());
@@ -256,15 +296,106 @@ run("two processes sharing real Postgres", () => {
     expect(await lockCount(h.db)).toBe(0);
   }, 120_000);
 
+  it("late application after a real takeover: B owns the op before the lost commit lands — never re-dispatched", async () => {
+    const h = await startHarness();
+    // The commit response is lost but the edit stays parked — A records
+    // UNKNOWN and crashes; the test applies the commit only after B owns
+    // the op, proving the takeover reconciles A's fact instead of resending.
+    h.shopify.commitMode.set("*", "lose-apply-later");
+    let commitSeenResolve!: () => void;
+    const commitSeen = new Promise<void>((r) => (commitSeenResolve = r));
+    h.shopify.on("MergeEditCommit", () => {
+      commitSeenResolve();
+      return undefined; // the fake's lose-apply-later behaviour still runs
+    });
+
+    // 45s op lease: the dispatch gate requires >30s of lease margin, so this
+    // is the smallest value that lets A dispatch once — it still lapses soon
+    // after the crash for B's sweeps to take over.
+    const a = h.runChild({
+      ANCHOR_ORDER_ID: id(2),
+      CRASH_AT: "after-attempt-record",
+      LEASE_TTL_MS: "45000",
+      WORKER_NAME: "A",
+    });
+    const b = h.runChild({ SWEEP_ONLY: "true", SWEEP_MAX_MS: "240000", WORKER_NAME: "B" });
+    await h.release(["A", "B"]);
+
+    // (1) A's commit reached the fake (lost + parked there).
+    await commitSeen;
+    // (2) A recorded the attempt outcome and crashed.
+    const ra = await a;
+    const crashedAt = performance.now();
+    console.log("── child A (#2, crash) ──\n" + ra.out.trim());
+    expect(ra.code).toBe(1);
+    expect(ra.out).toContain("crash after attempt record");
+
+    const [opAfterCrash] = await opsFor(h.db);
+    expect(opAfterCrash.phase).toBe("COMMIT_IN_DOUBT");
+    const aLeaseToken = opAfterCrash.leaseToken;
+
+    // (3) B takes over only once A's lease lapses — poll for a different
+    // live lease token, never a sleep. performance.now() has sub-ms
+    // resolution — Date.now() can collide on consecutive events.
+    let takeoverAt = 0;
+    for (const deadline = Date.now() + 150_000; Date.now() < deadline; ) {
+      const [op] = await opsFor(h.db);
+      if (
+        op.leaseToken !== aLeaseToken &&
+        new Date(op.leasedUntil).getTime() > Date.now()
+      ) {
+        takeoverAt = performance.now();
+        // Still mid-doubt, and no second commit was ever dispatched.
+        expect(op.phase).toBe("COMMIT_IN_DOUBT");
+        expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+        break;
+      }
+      await sleep(250);
+    }
+    expect(takeoverAt).toBeGreaterThan(0);
+
+    // (4) Only now does Shopify apply the commit A's response lost.
+    h.shopify.deliverPendingCommit(h.shopify.lastCalcId());
+    const deliveredAt = performance.now();
+    console.log(
+      `── timeline ── B took over ${Math.round((takeoverAt - crashedAt) / 1000)}s ` +
+        `after A's crash; commit delivered ${Math.round(deliveredAt - takeoverAt)}ms later`,
+    );
+
+    // (5) B's evidence ladder finds the applied commit and finishes the op.
+    const rb = await b;
+    await h.close();
+    console.log("── child B (sweep) ──\n" + rb.out.trim());
+    expect(rb.code).toBe(0);
+    expect(takeoverAt).toBeLessThan(deliveredAt);
+
+    const ops = await opsFor(h.db);
+    expect(ops).toHaveLength(1);
+    expect(ops[0].phase).toBe("COMPLETED");
+    expect(ops[0].sideEffectsDone).toBe(true);
+    // A's UNKNOWN fact stands — B reconciled it, never re-dispatched or
+    // rewrote the recorded outcome.
+    const commits = await attemptsFor(h.db, ops[0].id, "EDIT_COMMIT");
+    expect(commits).toHaveLength(1);
+    expect(commits[0].state).toBe("UNKNOWN");
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+    expect(h.shopify.order(1).lineItems).toHaveLength(3);
+    for (const n of [2, 3]) {
+      expect(h.shopify.order(n).cancelCount).toBe(1);
+      expect(h.shopify.order(n).cancelledAt).toBeTruthy();
+    }
+    expect(await lockCount(h.db)).toBe(0);
+  }, 300_000);
+
   it("a fourth order after completion starts a second op on the released primary", async () => {
     const h = await startHarness();
-    const first = h.runChild({ ANCHOR_ORDER_ID: id(2) });
-    await h.release();
+    const first = h.runChild({ ANCHOR_ORDER_ID: id(2), WORKER_NAME: "A" });
+    await h.release(["A"]);
     expect((await first).code).toBe(0);
 
     // A new order for the same customer arrives after the merge completed.
     h.shopify.orders.set(id(4), makeOrder(4));
-    const fourth = h.runChild({ ANCHOR_ORDER_ID: id(4) });
+    const fourth = h.runChild({ ANCHOR_ORDER_ID: id(4), WORKER_NAME: "B" });
     const r = await fourth; // go is already released
     await h.close();
     console.log("── child (#4) ──\n" + r.out.trim());
@@ -293,8 +424,8 @@ run("two processes sharing real Postgres", () => {
       o3.cancelCount += 1;
       return { data: { orderEditCommit: { order: { id: id(1) }, userErrors: [] } } };
     });
-    const first = h.runChild({ ANCHOR_ORDER_ID: id(2), SWEEP_MAX_MS: "30000" });
-    await h.release();
+    const first = h.runChild({ ANCHOR_ORDER_ID: id(2), SWEEP_MAX_MS: "30000", WORKER_NAME: "A" });
+    await h.release(["A"]);
     expect((await first).code).toBe(0);
 
     let ops = await opsFor(h.db);
@@ -306,7 +437,7 @@ run("two processes sharing real Postgres", () => {
 
     // A new order can never pull the parked group into a second op.
     h.shopify.orders.set(id(4), makeOrder(4));
-    const fourth = h.runChild({ ANCHOR_ORDER_ID: id(4), SWEEP_MAX_MS: "30000" });
+    const fourth = h.runChild({ ANCHOR_ORDER_ID: id(4), SWEEP_MAX_MS: "30000", WORKER_NAME: "B" });
     const r = await fourth;
     await h.close();
     console.log("── child (#4) ──\n" + r.out.trim());

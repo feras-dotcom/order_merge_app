@@ -464,6 +464,9 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     expect(row.leaseToken).toBe(workToken); // never settled by the stale owner
   });
 
+  // Regression guard, not a discriminator: the 31s lease has already lost
+  // its 30s margin by the time even the old pre-fix predicate evaluated —
+  // the work-lease test above is the one that exposed the N4 defect.
   it("v2 createOperation: claims dropping under the 30s margin during an unchanged-row wait refuse the create (N4)", async () => {
     await ops.setControl({ newMergesEnabled: true, completionEnabled: true, allowShops: [] });
     const claimToken = newLeaseToken();
