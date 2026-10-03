@@ -258,6 +258,58 @@ describe("order work items (spec §9)", () => {
     expect([...h.ops.ops.values()]).toHaveLength(1); // no merge op for order 2
   });
 
+  it("#8c compatible sibling in an ACTIVE v2 op + incompatible free sibling: contention retry, not NO_PARTNER", async () => {
+    const h = makeHarness([makeOrder(1), makeOrder(2, { riskLevel: "HIGH" }), makeOrder(3)]);
+    // Order 1 is held by a v2 op in READY — its legacy status shield reads
+    // NEEDS_REVIEW, but that shield must not count as a v1 review parking
+    // (the journal queries filter protocolVersion=1). If the filter is ever
+    // dropped this test degrades to DONE NO_PARTNER after the lag grace.
+    await h.claims.acquire(h.SHOP, [id(1)], "holder", h.deps.leaseTtlMs);
+    await h.ops.createOperation({
+      shop: h.SHOP,
+      claimToken: "holder",
+      opToken: "HOLDERTK",
+      involvedOrderIds: [id(1)],
+      primaryOrderId: id(1),
+      primaryOrderName: "#1",
+      customerId: null,
+      primaryLineItemCountBefore: 1,
+      addedLineItemCount: 1,
+      secondaries: [],
+      calculatedOrderId: null,
+      expectedTransfer: [],
+      expectedLocationId: null,
+      primaryLineItemIdsBefore: [],
+      leaseToken: "holder-op",
+      ttlMs: 600_000, // outlives the time advance — the sweep never takes it
+    });
+    expect([...h.ops.ops.values()][0].status).toBe("NEEDS_REVIEW"); // the shield
+
+    // Anchor 3: #1 is busy (active op), #2 is free but HIGH-risk — the item
+    // retries on contention and stays PENDING past the index-lag grace.
+    await h.webhook(id(3));
+    let wi = await h.work.find(h.SHOP, id(3));
+    expect(wi?.status).toBe("PENDING");
+    expect(wi?.lastReason).toContain("unfinished merge");
+
+    h.advance(130_000);
+    await h.sweep();
+    wi = await h.work.find(h.SHOP, id(3));
+    expect(wi?.status).toBe("PENDING"); // contention — never NO_PARTNER
+    expect(wi?.lastReason).toContain("unfinished merge");
+  });
+
+  it("#8d kill switch: MERGES_DISABLED parks the item on a 5-minute transient retry", async () => {
+    const h = makeHarness([makeOrder(1), makeOrder(2)]);
+    await h.ops.setControl({ newMergesEnabled: false });
+    await h.webhook(id(2));
+    const wi = await h.work.find(h.SHOP, id(2));
+    expect(wi).toMatchObject({ status: "PENDING", outcome: null });
+    expect(wi!.lastReason).toBe("New merges are disabled.");
+    expect(wi!.retryAfter!.getTime() - h.clock().getTime()).toBe(5 * 60_000);
+    expect(h.shopify.mutationCalls("MergeEditBegin")).toBe(0);
+  });
+
   it("#9 death after orderEditCommit: the sweep reconciles the in-doubt op from evidence, cancels the secondary", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     const g = gate();

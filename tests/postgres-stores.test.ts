@@ -24,6 +24,10 @@ import {
   WORK_DEADLINE_MS,
   type WorkStore,
 } from "../app/lib/order-work.server";
+import type { MergeDeps } from "../app/lib/merge.server";
+import { driveOperation } from "../app/lib/operation-protocol.server";
+import { processOrderWork } from "../app/lib/order-work-processor.server";
+import { FakeShopify, makeOrder } from "./fake-shopify";
 import {
   ClaimContentionError,
   DB_WALL,
@@ -92,7 +96,7 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     await db.$executeRawUnsafe(
       `INSERT INTO "AppControl" ("id","newMergesEnabled","completionEnabled","allowShops","updatedAt")
        VALUES ('control', false, false, ARRAY[]::TEXT[], (clock_timestamp() AT TIME ZONE 'UTC'))
-       ON CONFLICT (id) DO UPDATE SET "newMergesEnabled" = false, "completionEnabled" = false`,
+       ON CONFLICT (id) DO UPDATE SET "newMergesEnabled" = false, "completionEnabled" = false, "allowShops" = ARRAY[]::TEXT[]`,
     );
   });
 
@@ -264,11 +268,14 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
 
   // ── Protocol v2 (spec §3/§12) ─────────────────────────────────────────────
 
-  /** Claims `orderIds` and creates a v2 op over them (locks included). */
+  /** Claims `orderIds` and creates a v2 op over them (locks included). The
+   *  control row is re-seeded OFF per test, so creation must switch it on —
+   *  AppControl is the durable kill-switch gate inside createOperation. */
   const createOp = async (
     orderIds: string[],
     opts: Partial<Parameters<OperationStore["createOperation"]>[0]> = {},
   ): Promise<OperationRecord> => {
+    await ops.setControl({ newMergesEnabled: true, completionEnabled: true, allowShops: [] });
     const claimToken = newLeaseToken();
     expect(await claims.acquire(SHOP, orderIds, claimToken, 120_000)).toBe(true);
     return ops.createOperation({
@@ -424,15 +431,16 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
   });
 
   it("v2 transition: stale owner affects 0 rows even after waiting on a row lock", async () => {
-    // Holder (db2): expires the lease and holds the row lock for ~3s. The
-    // stale owner's conditional UPDATE waits on the lock, then re-evaluates
-    // the WHERE against the COMMITTED expired row => 0 rows. (EvalPlanQual.)
+    // Holder (db2): expires the lease and holds the row lock for ~1s (under
+    // the 2s lock_timeout). The stale owner's SELECT … FOR UPDATE waits on
+    // the lock, then the guarded UPDATE sees the COMMITTED expired row => 0
+    // rows => OwnershipLostError. (EvalPlanQual over the changed row.)
     const op = await createOp([oid(1), oid(2)]);
     const holder = db2.$transaction(
       async (tx) => {
         await tx.$executeRaw`
           UPDATE "MergeOperation" SET "leasedUntil" = ${dbWallPlus(-5_000)} WHERE "id" = ${op.id}`;
-        await tx.$queryRawUnsafe(`SELECT 1 FROM pg_sleep(3)`);
+        await tx.$queryRawUnsafe(`SELECT 1 FROM pg_sleep(1)`);
       },
       { timeout: 10_000 },
     );
@@ -655,6 +663,8 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     const start = Date.now();
     let thrown: unknown = null;
     try {
+      // The kill switch must be on so the create reaches the claim-row lock.
+      await ops.setControl({ newMergesEnabled: true });
       await ops.createOperation({
         shop: SHOP,
         claimToken: claimTok,
@@ -773,5 +783,538 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     expect(rows.filter((r: any) => r.instanceId === "inst-1")).toHaveLength(1);
     expect(await ops.purgeOldInstances(-1_000)).toBe(1); // heartbeat is < now + 1s
     expect(await ops.listRecentInstances()).toHaveLength(0);
+  });
+
+  // ── A1: a lock held on an UNCHANGED row past lease expiry ────────────────
+  // A conditional UPDATE evaluates its WHERE first, then waits on the row
+  // lock; if the locker committed no change PostgreSQL does not re-evaluate
+  // the predicate, so a write that started while the lease was still valid
+  // would land after expiry. The store must therefore force the wait into a
+  // SELECT ... FOR UPDATE and evaluate only while holding the row lock.
+  // Every test here holds the row on db2 WITHOUT changing it, blocks the
+  // ownership write on db, lets the lease expire, then releases — the write
+  // must reject OwnershipLostError and leave leasedUntil in the past.
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("v2 renewOperation: unchanged-row lock held past lease expiry still refuses the write", async () => {
+    const op = await createOp([oid(1), oid(2)]);
+    await db.$executeRaw`UPDATE "MergeOperation" SET "leasedUntil" = ${dbWallPlus(800)} WHERE id = ${op.id}`;
+
+    let release!: () => void;
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
+        await new Promise<void>((r) => (release = r));
+      },
+      { timeout: 15_000 },
+    );
+    await sleep(500); // holder owns the row lock, row unchanged
+
+    let thrown: unknown = null;
+    const write = ops.renewOperation(op, 60_000).catch((e) => (thrown = e));
+    await sleep(1_200); // the lease expires while the write waits
+    release();
+    await write;
+    await holder;
+
+    expect(thrown).toBeInstanceOf(OwnershipLostError);
+    expect(new Date((await freshOp(op.id)).leasedUntil!).getTime()).toBeLessThan(Date.now());
+  });
+
+  it("v2 transition (non-terminal patch): unchanged-row lock held past expiry still refuses the write", async () => {
+    const op = await createOp([oid(1), oid(2)]);
+    await db.$executeRaw`UPDATE "MergeOperation" SET "leasedUntil" = ${dbWallPlus(800)} WHERE id = ${op.id}`;
+
+    let release!: () => void;
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
+        await new Promise<void>((r) => (release = r));
+      },
+      { timeout: 15_000 },
+    );
+    await sleep(500);
+
+    let thrown: unknown = null;
+    const write = ops.transition(op, { nextCheckAt: 60_000 }).catch((e) => (thrown = e));
+    await sleep(1_200);
+    release();
+    await write;
+    await holder;
+
+    expect(thrown).toBeInstanceOf(OwnershipLostError);
+    const row = await freshOp(op.id);
+    expect(new Date(row.leasedUntil!).getTime()).toBeLessThan(Date.now());
+    expect(row.nextCheckAt).not.toBeNull(); // no stale patch landed
+  });
+
+  it("v2 work.renew: unchanged-row lock held past lease expiry still refuses the write", async () => {
+    const item = (await work.insertLeased(SHOP, oid(1), "tok", 800, WORK_DEADLINE_MS))!;
+
+    let release!: () => void;
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "ProcessedWebhook" WHERE id = ${item.id} FOR UPDATE`;
+        await new Promise<void>((r) => (release = r));
+      },
+      { timeout: 15_000 },
+    );
+    await sleep(500);
+
+    let thrown: unknown = null;
+    const write = work.renew(item.id, "tok", 60_000).catch((e) => (thrown = e));
+    await sleep(1_200);
+    release();
+    await write;
+    await holder;
+
+    expect(thrown).toBeInstanceOf(OwnershipLostError);
+    const row = (await work.find(SHOP, oid(1)))!;
+    expect(new Date(row.leasedUntil!).getTime()).toBeLessThan(Date.now());
+    expect(row.leaseToken).toBe("tok");
+  });
+
+  it("v2 claims.renew: unchanged-row lock held past lease expiry still refuses the write", async () => {
+    expect(await claims.acquire(SHOP, [oid(1)], "tok", 800)).toBe(true);
+
+    let release!: () => void;
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "orderId" FROM "MergeClaim" WHERE "orderId" = ${oid(1)} FOR UPDATE`;
+        await new Promise<void>((r) => (release = r));
+      },
+      { timeout: 15_000 },
+    );
+    await sleep(500);
+
+    let thrown: unknown = null;
+    const write = claims.renew(SHOP, [oid(1)], "tok", 60_000).catch((e) => (thrown = e));
+    await sleep(1_200);
+    release();
+    await write;
+    await holder;
+
+    expect(thrown).toBeInstanceOf(OwnershipLostError);
+    const [row] = await db.$queryRawUnsafe<{ leasedUntil: string }[]>(
+      `SELECT "leasedUntil" FROM "MergeClaim" WHERE "orderId" = '${oid(1)}'`,
+    );
+    expect(new Date(row.leasedUntil!).getTime()).toBeLessThan(Date.now());
+    // The expired claim is now re-acquirable — the stale renew did not resurrect it.
+    expect(await claims.acquire(SHOP, [oid(1)], "new", 60_000)).toBe(true);
+  });
+
+  it("v2 transition READY→ABANDONED refuses while an EDIT_COMMIT attempt exists", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      const op = await createOp([oid(1), oid(2)]);
+      const attempt = await ops.openDispatchGate({
+        op,
+        kind: "EDIT_COMMIT",
+        targetOrderId: oid(1),
+        dispatchToken: newLeaseToken(),
+        requiredPhase: "READY",
+      });
+      expect(attempt).not.toBeNull(); // phase flipped to COMMIT_IN_DOUBT
+      // The pathological state the guard exists for: a commit attempt row is
+      // on the books while the phase reads READY again.
+      await db.$executeRaw`UPDATE "MergeOperation" SET "phase" = 'READY' WHERE id = ${op.id}`;
+
+      await expect(
+        ops.transition(op, { phase: "ABANDONED", expectedPhase: "READY", lastError: "give up" }),
+      ).rejects.toBeInstanceOf(OwnershipLostError);
+      expect(await attemptCount()).toBe(1); // no new attempt was written
+      const row = await freshOp(op.id);
+      expect(row.phase).toBe("READY");
+      expect(row.status).not.toBe("ABANDONED");
+      expect(await lockCount()).toBe(2); // locks retained — the merge is unreconciled
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
+  });
+
+  // ── A2: the dispatch gate is linearizable with setControl ────────────────
+
+  const gateControlInterleave = async (
+    kind: "EDIT_COMMIT" | "ORDER_CANCEL",
+    switchKey: "newMergesEnabled" | "completionEnabled",
+    requiredPhase: "READY" | "APPLIED",
+  ) => {
+    const op = await createOp([oid(1), oid(2)]);
+    if (requiredPhase === "APPLIED") {
+      await db.$executeRaw`UPDATE "MergeOperation" SET "phase" = 'APPLIED' WHERE id = ${op.id}`;
+    }
+    // db2 holds the op row lock without changing the row; the gate blocks on
+    // its FOR UPDATE before it ever reads AppControl.
+    let release!: () => void;
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
+        await new Promise<void>((r) => (release = r));
+      },
+      { timeout: 15_000 },
+    );
+    await sleep(500);
+
+    const gate = ops.openDispatchGate({
+      op,
+      kind,
+      targetOrderId: kind === "EDIT_COMMIT" ? oid(1) : oid(2),
+      dispatchToken: newLeaseToken(),
+      requiredPhase,
+    });
+    await sleep(200); // the gate is blocked on the row lock
+    await ops.setControl({ [switchKey]: false }); // commits while it waits
+    await sleep(200);
+    release();
+
+    expect(await gate).toBeNull(); // the disable is observed, no dispatch token
+    expect(await attemptCount()).toBe(0); // no attempt row was inserted
+    expect((await freshOp(op.id)).phase).toBe(requiredPhase); // no phase flip
+    await holder;
+  };
+
+  it("v2 dispatch gate (EDIT_COMMIT): a newMergesEnabled disable committed while the gate blocked is observed", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      await gateControlInterleave("EDIT_COMMIT", "newMergesEnabled", "READY");
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
+  });
+
+  it("v2 dispatch gate (ORDER_CANCEL): a completionEnabled disable committed while the gate blocked is observed", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      await gateControlInterleave("ORDER_CANCEL", "completionEnabled", "APPLIED");
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
+  });
+
+  it("v2 setControl is serialized: its FOR UPDATE waits on a gate's FOR SHARE", async () => {
+    let release!: () => void;
+    let markLocked!: () => void;
+    const held = new Promise<void>((r) => (markLocked = r));
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "AppControl" WHERE id = 'control' FOR SHARE`;
+        markLocked();
+        await new Promise<void>((r) => (release = r));
+      },
+      { timeout: 15_000 },
+    );
+    await held;
+
+    let resolved = false;
+    const flip = ops.setControl({ completionEnabled: true }).then(() => {
+      resolved = true;
+    });
+    await sleep(300);
+    expect(resolved).toBe(false); // the write lock waits on the share lock
+    release();
+    await flip;
+    await holder;
+    expect((await ops.getControl())!.completionEnabled).toBe(true);
+  });
+
+  it("v2 createOperation honours the kill switch — disabled switch and missing allowlist, nothing persists", async () => {
+    // Control re-seeded OFF; acquire claims + work item exactly like a real merge.
+    const claimToken = newLeaseToken();
+    expect(await claims.acquire(SHOP, [oid(1), oid(2)], claimToken, 120_000)).toBe(true);
+    const item = (await work.insertLeased(SHOP, oid(1), "wt", 120_000, WORK_DEADLINE_MS))!;
+    const input = {
+      shop: SHOP,
+      claimToken,
+      involvedOrderIds: [oid(1), oid(2)],
+      primaryOrderId: oid(1),
+      primaryOrderName: "#1",
+      customerId: null,
+      primaryLineItemCountBefore: 1,
+      addedLineItemCount: 1,
+      secondaries: [{ id: oid(2), name: "#2", items: 1, cancelPhase: "TRANSFER_PENDING" as const }],
+      opToken: newOpToken(),
+      calculatedOrderId: "gid://shopify/CalculatedOrder/9",
+      expectedTransfer: [],
+      expectedLocationId: null,
+      primaryLineItemIdsBefore: [],
+      workItemId: item.id,
+      workToken: "wt",
+      leaseToken: newLeaseToken(),
+      ttlMs: 120_000,
+    };
+    await expect(ops.createOperation(input)).rejects.toThrowError(ClaimContentionError);
+
+    // Allowlist that does not contain the shop is equally closed.
+    await ops.setControl({ newMergesEnabled: true, allowShops: ["other.myshopify.com"] });
+    await expect(ops.createOperation(input)).rejects.toThrowError(ClaimContentionError);
+
+    // Claims, locks, op rows and the work item's lease are all unchanged.
+    expect(await opCount()).toBe(0);
+    expect(await lockCount()).toBe(0);
+    expect(await claimCount()).toBe(2);
+    expect((await work.find(SHOP, oid(1)))!).toMatchObject({
+      status: "PENDING",
+      leaseToken: "wt",
+      operationId: null,
+    });
+  });
+
+  // ── A3: end-to-end store-layer runs — FakeShopify for the Admin API,
+  // real Prisma stores, real processOrderWork/driveOperation wiring ────────
+
+  const realDeps = (): MergeDeps => ({
+    journal,
+    claims,
+    ops,
+    leaseTtlMs: 120_000,
+    now: () => new Date(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    cancelPollAttempts: 4,
+    cancelPollIntervalMs: 250,
+  });
+
+  const settings = async () => ({
+    autoMergeEnabled: true,
+    mergeWindowHours: 24,
+    shippingCostSavings: 0,
+    shopifyShopGid: "gid://shopify/Shop/1",
+    autoMergeAcknowledgedAt: new Date(),
+    onboardingStartedAt: new Date(),
+    onboardingCompletedAt: new Date(),
+  });
+
+  /** insertLeased + processOrderWork, exactly like the webhook path. */
+  const deliverWork = async (shopify: FakeShopify, orderId: string, deps: MergeDeps) => {
+    const token = newLeaseToken();
+    const item = await work.insertLeased(SHOP, orderId, token, 120_000, WORK_DEADLINE_MS);
+    if (!item) return null;
+    await processOrderWork({
+      item,
+      token,
+      shop: SHOP,
+      admin: shopify.admin,
+      deps,
+      work,
+      settings,
+      now: () => new Date(),
+      random: () => 0.5,
+    });
+    return work.find(SHOP, orderId);
+  };
+
+  /** Drive until terminal, or parked at a future nextCheckAt waiting point. */
+  const driveUntilSettled = async (shopify: FakeShopify, opId: string, deps: MergeDeps) => {
+    for (let i = 0; i < 30; i++) {
+      const row = await freshOp(opId);
+      if (
+        row.phase === "ABANDONED" ||
+        row.phase === "REVIEW_REQUIRED" ||
+        (row.phase === "COMPLETED" && row.sideEffectsDone)
+      ) {
+        return row;
+      }
+      if (
+        row.nextCheckAt &&
+        new Date(row.nextCheckAt).getTime() > Date.now() &&
+        row.phase !== "COMPLETED"
+      ) {
+        return row; // waiting point a real-time test cannot pass
+      }
+      await driveOperation(row, shopify.admin, deps);
+    }
+    return freshOp(opId);
+  };
+
+  const onlyV2Op = async () => {
+    const rows = await db.$queryRawUnsafe<OperationRecord[]>(
+      `SELECT * FROM "MergeOperation" WHERE "protocolVersion" = 2`,
+    );
+    expect(rows).toHaveLength(1);
+    return rows[0];
+  };
+
+  it("v2 real stores: sibling held by a COMMIT_IN_DOUBT op + incompatible free sibling → anchor retries, never NO_PARTNER", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      await ops.setControl({ newMergesEnabled: true, completionEnabled: true });
+      const shopify = new FakeShopify([
+        makeOrder(1),
+        makeOrder(2),
+        makeOrder(3, { riskLevel: "HIGH" }),
+      ]);
+      shopify.commitMode.set("*", "lose-never");
+      const deps = realDeps();
+
+      // #1 + #2 merge; the commit response is lost → the op parks in doubt
+      // holding durable locks on both. (#3 was same-group but HIGH-risk and
+      // got excluded; it stays free.)
+      await deliverWork(shopify, oid(2), deps);
+      const op1 = await onlyV2Op();
+      expect((await driveUntilSettled(shopify, op1.id, deps)).phase).toBe("COMMIT_IN_DOUBT");
+      expect(await lockCount()).toBe(2);
+
+      // #4's only compatible siblings are locked by the in-doubt op; #3 is
+      // free but incompatible (HIGH risk). Contention — not NO_PARTNER.
+      shopify.orders.set(oid(4), makeOrder(4));
+      const item = await deliverWork(shopify, oid(4), deps);
+      expect(item).toMatchObject({ status: "PENDING", outcome: null });
+      expect(item!.lastReason).toMatch(/unfinished merge/);
+      expect(await opCount()).toBe(1);
+      expect(await lockCount()).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
+  });
+
+  it("v2 real stores: an order arriving while the merge is in doubt waits — no second op, locks unchanged", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      await ops.setControl({ newMergesEnabled: true, completionEnabled: true });
+      const shopify = new FakeShopify([makeOrder(1), makeOrder(2)]);
+      shopify.commitMode.set("*", "lose-never");
+      const deps = realDeps();
+
+      await deliverWork(shopify, oid(2), deps);
+      const op1 = await onlyV2Op();
+      expect((await driveUntilSettled(shopify, op1.id, deps)).phase).toBe("COMMIT_IN_DOUBT");
+
+      // #4 arrives while every same-group sibling is under a live lock —
+      // the item waits.
+      shopify.orders.set(oid(4), makeOrder(4));
+      const item = await deliverWork(shopify, oid(4), deps);
+      expect(item).toMatchObject({ status: "PENDING", outcome: null });
+      expect(item!.lastReason).toMatch(/unfinished merge/);
+      expect(await opCount()).toBe(1);
+      expect(await lockCount()).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
+  });
+
+  it("v2 real stores: after COMPLETED a new order merges into the released primary — second op, 4 lines, cancelled once", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      await ops.setControl({ newMergesEnabled: true, completionEnabled: true });
+      const shopify = new FakeShopify([makeOrder(1), makeOrder(2), makeOrder(3)]);
+      const deps = realDeps();
+
+      // #3 is the newest arrival: its op merges #2+#3 into primary #1.
+      await deliverWork(shopify, oid(3), deps);
+      const op1 = await onlyV2Op();
+      const settled = await driveUntilSettled(shopify, op1.id, deps);
+      expect(settled.phase).toBe("COMPLETED");
+      expect(settled.sideEffectsDone).toBe(true);
+      expect(settled.primaryOrderId).toBe(oid(1));
+      expect(shopify.orders.get(oid(1))!.lineItems).toHaveLength(3);
+      for (const s of [oid(2), oid(3)]) {
+        expect(shopify.orders.get(s)!.cancelledAt).toBeTruthy();
+        expect(shopify.orders.get(s)!.cancelCount).toBe(1);
+      }
+      expect(await lockCount()).toBe(0); // terminal ops release their locks
+
+      // #4 arrives after completion: a SECOND op merges it into #1.
+      shopify.orders.set(oid(4), makeOrder(4));
+      const item = await deliverWork(shopify, oid(4), deps);
+      expect(item!.outcome === "MERGED" || item!.status === "DONE").toBe(true);
+      const all = await db.$queryRawUnsafe<OperationRecord[]>(
+        `SELECT * FROM "MergeOperation" WHERE "protocolVersion" = 2 ORDER BY "createdAt"`,
+      );
+      expect(all).toHaveLength(2);
+      const op2 = all[1];
+      expect(op2.primaryOrderId).toBe(oid(1));
+      const settled2 = await driveUntilSettled(shopify, op2.id, deps);
+      expect(settled2.phase).toBe("COMPLETED");
+      expect(shopify.orders.get(oid(1))!.lineItems).toHaveLength(4);
+      expect(shopify.orders.get(oid(4))!.cancelCount).toBe(1);
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
+  });
+
+  it("v2 real stores: a COMPLETED op keeps status 'COMPLETED' through side-effect dispatches and blocks nothing", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      await ops.setControl({ newMergesEnabled: true, completionEnabled: true });
+      const shopify = new FakeShopify([makeOrder(1), makeOrder(2)]);
+      const deps = realDeps();
+
+      await deliverWork(shopify, oid(2), deps);
+      const op1 = await onlyV2Op();
+      const settled = await driveUntilSettled(shopify, op1.id, deps);
+      expect(settled.phase).toBe("COMPLETED");
+      expect(settled.sideEffectsDone).toBe(true);
+
+      // The cosmetic dispatches really went through the gate (this is what
+      // used to flip the legacy status back to NEEDS_REVIEW).
+      const kinds = (await ops.listAttempts(op1.id)).map((a) => a.kind);
+      expect(kinds).toEqual(expect.arrayContaining(["EDIT_COMMIT", "ORDER_CANCEL", "ANNOTATE", "CLOSE"]));
+
+      const raw = await freshOp(op1.id);
+      expect(raw.status).toBe("COMPLETED");
+
+      // The released orders block neither the v1 queries nor a new op.
+      expect(await ops.findBlockingV1(SHOP, [oid(1), oid(2)])).toEqual(new Set());
+      expect(await journal.findBlockingOrderIds(SHOP)).not.toContain(oid(1));
+      const claimToken = newLeaseToken();
+      expect(await claims.acquire(SHOP, [oid(1), oid(4)], claimToken, 120_000)).toBe(true);
+      const op2 = await ops.createOperation({
+        shop: SHOP,
+        claimToken,
+        involvedOrderIds: [oid(1), oid(4)],
+        primaryOrderId: oid(1),
+        primaryOrderName: "#1",
+        customerId: null,
+        primaryLineItemCountBefore: 2,
+        addedLineItemCount: 1,
+        secondaries: [{ id: oid(4), name: "#4", items: 1, cancelPhase: "TRANSFER_PENDING" }],
+        opToken: newOpToken(),
+        calculatedOrderId: "gid://shopify/CalculatedOrder/7",
+        expectedTransfer: [],
+        expectedLocationId: null,
+        primaryLineItemIdsBefore: shopify.orders.get(oid(1))!.lineItems.map((l) => l.id!),
+        leaseToken: newLeaseToken(),
+        ttlMs: 120_000,
+      });
+      expect(op2.phase).toBe("READY");
+      expect(await lockCount()).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
+  });
+
+  it("v2 real stores: the v2 status shield never leaks into v1 journal queries (no cross-protocol blocking)", async () => {
+    const saved = process.env.MERGESHIP_MUTATIONS;
+    process.env.MERGESHIP_MUTATIONS = "enabled";
+    try {
+      // An ACTIVE v2 op carries status NEEDS_REVIEW — v1 blocking queries
+      // must not see it (v2 involvement is enforced by locks, not status).
+      const op = await createOp([oid(1), oid(2)]);
+      expect(op.status).toBe("NEEDS_REVIEW");
+      expect(await journal.findBlockingOrderIds(SHOP)).toEqual(new Set());
+      expect(await journal.findBlockingOrderStatuses(SHOP)).toEqual(new Map());
+      expect(await journal.findUnfinished(SHOP)).toEqual([]);
+      expect(await journal.findShopsWithUnfinished()).toEqual([]);
+      expect(await ops.findBlockingV1(SHOP, [oid(1)])).toEqual(new Set());
+      // …while the durable locks still mark the orders busy for v2 callers.
+      expect(await ops.findLockedOrderIds(SHOP, [oid(1), oid(9)])).toEqual(new Set([oid(1)]));
+    } finally {
+      if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
+      else process.env.MERGESHIP_MUTATIONS = saved;
+    }
   });
 });

@@ -687,10 +687,27 @@ export class MemoryClaimStore implements ClaimStore {
 
 export class MemoryJournal implements MergeJournal {
   ops = new Map<string, MergeOperationRecord>();
+  /** The companion v2 store. Its rows share the MergeOperation table shape
+   *  (a legacy `status` shield next to `phase`), so the v1 queries below must
+   *  look at them — and must filter them back out. */
+  linkedOps?: MemoryOperationStore;
   history: MergeHistoryEntry[] = [];
   failCreate = false;
   private seq = 1;
   clock: () => Date = () => new Date();
+
+  /** Rows the v1 queries see: this map (legacy fixtures carry no
+   *  protocolVersion → 1) plus linkedOps' v2 rows, filtered to version 1 —
+   *  exactly what the SQL `protocolVersion = 1` predicate does. */
+  private v1Rows(): MergeOperationRecord[] {
+    const rows: MergeOperationRecord[] = [
+      ...this.ops.values(),
+      ...([...(this.linkedOps?.ops.values() ?? [])] as unknown as MergeOperationRecord[]),
+    ];
+    return rows.filter(
+      (o) => ((o as { protocolVersion?: number }).protocolVersion ?? 1) === 1,
+    );
+  }
 
   private owned(op: Pick<MergeOperationRecord, "id" | "leaseToken">): MergeOperationRecord {
     const row = this.ops.get(op.id);
@@ -735,20 +752,20 @@ export class MemoryJournal implements MergeJournal {
     return structuredClone(row);
   }
   async findUnfinished(shop: string) {
-    return [...this.ops.values()]
+    return this.v1Rows()
       .filter((o) => o.shop === shop && ["PENDING_COMMIT", "COMMITTED"].includes(o.status))
-      .map((o) => structuredClone(o));
+      .map((o) => structuredClone(o) as MergeOperationRecord);
   }
   async findBlockingOrderIds(shop: string) {
     return new Set(
-      [...this.ops.values()]
+      this.v1Rows()
         .filter((o) => o.shop === shop && ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(o.status))
         .flatMap((o) => o.involvedOrderIds),
     );
   }
   async findBlockingOrderStatuses(shop: string) {
     const map = new Map<string, MergeOperationRecord["status"]>();
-    for (const o of this.ops.values()) {
+    for (const o of this.v1Rows()) {
       if (o.shop !== shop || !["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"].includes(o.status)) continue;
       for (const orderId of o.involvedOrderIds) map.set(orderId, o.status);
     }
@@ -757,7 +774,7 @@ export class MemoryJournal implements MergeJournal {
   async findShopsWithUnfinished() {
     return [
       ...new Set(
-        [...this.ops.values()]
+        this.v1Rows()
           .filter((o) => ["PENDING_COMMIT", "COMMITTED"].includes(o.status))
           .map((o) => o.shop),
       ),
@@ -787,6 +804,7 @@ export function testDeps(journal: MemoryJournal, overrides: Partial<MergeDeps> =
   workStore.clock = () => new Date(now);
   const ops = new MemoryOperationStore(claims, workStore, journal);
   ops.clock = () => new Date(now);
+  journal.linkedOps = ops;
   return {
     journal,
     claims,
@@ -1074,6 +1092,13 @@ export class MemoryOperationStore implements OperationStore {
   async createOperation(input: NewOperationV2): Promise<OperationRecord> {
     const ids = [...new Set(input.involvedOrderIds)].sort();
     const now = this.clock().getTime();
+    // 0. Kill switch — the creation gate the SQL enforces inside its tx.
+    if (
+      !this.control.newMergesEnabled ||
+      (this.control.allowShops.length > 0 && !this.control.allowShops.includes(input.shop))
+    ) {
+      throw new ClaimContentionError("New merges are disabled (AppControl).");
+    }
     // 1. Every claim held by this token with ≥30s of margin.
     if (this.claims) {
       for (const id of ids) {
@@ -1204,6 +1229,18 @@ export class MemoryOperationStore implements OperationStore {
     if (patch.expectedPhase !== undefined && row!.phase !== patch.expectedPhase) {
       throw new OwnershipLostError(`Merge operation ${op.id} is now ${row!.phase}; expected ${patch.expectedPhase}.`);
     }
+    // READY→ABANDONED is only legal before the first EDIT_COMMIT attempt —
+    // the SQL encodes it as NOT EXISTS in the guarded UPDATE, so a violation
+    // surfaces as OwnershipLostError here too.
+    if (
+      patch.phase === "ABANDONED" &&
+      patch.expectedPhase === "READY" &&
+      this.attempts.some((a) => a.operationId === op.id && a.kind === "EDIT_COMMIT")
+    ) {
+      throw new OwnershipLostError(
+        `Merge operation ${op.id} cannot be abandoned: an EDIT_COMMIT was already attempted.`,
+      );
+    }
     if (patch.phase !== undefined) {
       row!.phase = patch.phase;
       row!.status =
@@ -1305,7 +1342,6 @@ export class MemoryOperationStore implements OperationStore {
       row!.firstDispatchAt ??= now;
     }
     row!.nextCheckAt = new Date(now.getTime() + 30_000);
-    row!.status = "NEEDS_REVIEW";
     row!.updatedAt = now;
     const attempt: MutationAttempt = {
       id: `att-${this.attemptSeq++}`,
@@ -1493,6 +1529,7 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
   work.clock = clock;
   const ops = new MemoryOperationStore(claims, work, journal);
   ops.clock = clock;
+  journal.linkedOps = ops;
   const deps: MergeDeps = {
     journal,
     claims,

@@ -89,14 +89,15 @@ export interface MergeJournal {
    *  the fresh record (with the new token) or null if another worker holds it
    *  or it is no longer unfinished. */
   acquireLease(opId: string, token: string, ttlMs: number): Promise<MergeOperationRecord | null>;
-  /** PENDING_COMMIT and COMMITTED operations for the shop. */
+  /** v1 only: PENDING_COMMIT and COMMITTED operations for the shop. */
   findUnfinished(shop: string): Promise<MergeOperationRecord[]>;
-  /** Order IDs involved in any PENDING_COMMIT / COMMITTED / NEEDS_REVIEW op. */
+  /** v1 only: order IDs involved in any PENDING_COMMIT / COMMITTED /
+   *  NEEDS_REVIEW op (v2 involvement is covered by MergeOrderLock). */
   findBlockingOrderIds(shop: string): Promise<Set<string>>;
-  /** orderId -> status for blocking ops, so callers can tell active
+  /** v1 only: orderId -> status for blocking ops, so callers can tell active
    *  (PENDING_COMMIT/COMMITTED) from flagged (NEEDS_REVIEW) involvement. */
   findBlockingOrderStatuses(shop: string): Promise<Map<string, MergeOperationStatus>>;
-  /** Shops having at least one PENDING_COMMIT/COMMITTED operation. */
+  /** v1 only: shops having at least one PENDING_COMMIT/COMMITTED operation. */
   findShopsWithUnfinished(): Promise<string[]>;
   /** Idempotent: a merged order is only ever recorded once. */
   recordHistory(entry: MergeHistoryEntry): Promise<void>;
@@ -157,21 +158,21 @@ export function makeMergeJournal(db: PrismaClient): MergeJournal {
     },
     async findUnfinished(shop) {
       const rows = await db.mergeOperation.findMany({
-        where: { shop, status: { in: UNFINISHED_STATUSES } },
+        where: { shop, protocolVersion: 1, status: { in: UNFINISHED_STATUSES } },
         orderBy: { createdAt: "asc" },
       });
       return rows.map(toRecord);
     },
     async findBlockingOrderIds(shop) {
       const rows = await db.mergeOperation.findMany({
-        where: { shop, status: { in: BLOCKING_STATUSES } },
+        where: { shop, protocolVersion: 1, status: { in: BLOCKING_STATUSES } },
         select: { involvedOrderIds: true },
       });
       return new Set(rows.flatMap((r) => r.involvedOrderIds));
     },
     async findBlockingOrderStatuses(shop) {
       const rows = await db.mergeOperation.findMany({
-        where: { shop, status: { in: BLOCKING_STATUSES } },
+        where: { shop, protocolVersion: 1, status: { in: BLOCKING_STATUSES } },
         select: { status: true, involvedOrderIds: true },
       });
       const map = new Map<string, MergeOperationStatus>();
@@ -182,7 +183,7 @@ export function makeMergeJournal(db: PrismaClient): MergeJournal {
     },
     async findShopsWithUnfinished() {
       const rows = await db.mergeOperation.findMany({
-        where: { status: { in: UNFINISHED_STATUSES } },
+        where: { protocolVersion: 1, status: { in: UNFINISHED_STATUSES } },
         select: { shop: true },
         distinct: ["shop"],
       });

@@ -278,6 +278,12 @@ export async function processOrderWork(args: ProcessOrderWorkArgs): Promise<void
         }
         return done("NO_PARTNER", result.reason ?? "no compatible partner");
       }
+      if (
+        result.code === "MERGES_DISABLED" ||
+        (result.code === "LOCKED" && result.reason?.includes("New merges are disabled"))
+      ) {
+        return retry("transient", result.reason ?? "New merges are disabled.", 5 * 60_000);
+      }
       if (result.code === "CLAIM_CONFLICT" || result.code === "LOCKED" || result.code === "OWNERSHIP_LOST") {
         return retry("contention", result.reason ?? result.code);
       }

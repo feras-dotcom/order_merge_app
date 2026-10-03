@@ -129,6 +129,7 @@ export type MergeResultCode =
   | "ANCHOR_INELIGIBLE"
   | "NO_COMPATIBLE_PARTNER"
   | "LOCATION_ACCESS"
+  | "MERGES_DISABLED"
   | "CLAIM_CONFLICT"
   | "LOCKED"
   | "OWNERSHIP_LOST"
@@ -660,6 +661,12 @@ export async function executeMerge(
     const blockedId = ids.find((id) => lockedIds.has(id) || v1Blocked.has(id));
     if (blockedId) {
       return skip(`Order ${blockedId} is held by an unfinished merge operation.`, "contention", "LOCKED");
+    }
+
+    // 1b ── Kill switch, read side: disabled mode never prepares a calculated
+    // order. createOperation still enforces this inside its transaction.
+    if (!(await deps.ops.isEnabled(shop, "newMergesEnabled"))) {
+      return skip("New merges are disabled.", "contention", "MERGES_DISABLED");
     }
 
     // 2 ── Load and evaluate fresh state ─────────────────────────────────────

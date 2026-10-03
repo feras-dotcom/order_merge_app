@@ -10,9 +10,9 @@
 // false instead of overwriting another worker's state. All clock comparisons
 // in raw SQL use the database clock in UTC.
 
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import defaultDb from "../db.server";
-import { DB_WALL, dbWallPlus, OwnershipLostError } from "./ownership.server";
+import { DB_WALL, dbWallPlus, OwnershipLostError, withOwnershipTx } from "./ownership.server";
 
 export type WorkOutcome =
   /** The merge reached COMPLETED / NEEDS_REVIEW. */
@@ -130,6 +130,14 @@ export function retryDelayMs(
 
 const toWorkItem = (row: any): WorkItem => row as WorkItem;
 
+/** Row lock taken BEFORE the guarded write: the wait (bounded by
+ *  lock_timeout) happens on the SELECT, and the conditional UPDATE then
+ *  evaluates its predicates against the row as it stands after the wait —
+ *  PG does not re-evaluate a conditional UPDATE whose row was locked but
+ *  not changed. */
+const lockRow = (tx: Prisma.TransactionClient, id: string) =>
+  tx.$queryRaw`SELECT id FROM "ProcessedWebhook" WHERE id = ${id} FOR UPDATE`;
+
 export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
   return {
     async insertLeased(shop, orderId, token, ttlMs, deadlineMs) {
@@ -183,15 +191,18 @@ export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
             OR ("deadlineAt" IS NOT NULL AND "deadlineAt" < ${DB_WALL}))`;
     },
     async linkOperation(id, token, operationId) {
-      const updated = await db.$executeRaw`
-        UPDATE "ProcessedWebhook"
-        SET "status" = 'DONE', "outcome" = 'OPERATION_CREATED',
-            "operationId" = ${operationId}, "doneAt" = ${DB_WALL},
-            "leaseToken" = NULL, "leasedUntil" = NULL, "retryAfter" = NULL,
-            "updatedAt" = ${DB_WALL}
-        WHERE "id" = ${id} AND "leaseToken" = ${token}
-          AND "leasedUntil" > ${DB_WALL} AND "status" = 'PENDING'`;
-      return updated === 1;
+      return withOwnershipTx(db, async (tx) => {
+        await lockRow(tx, id);
+        const updated = await tx.$executeRaw`
+          UPDATE "ProcessedWebhook"
+          SET "status" = 'DONE', "outcome" = 'OPERATION_CREATED',
+              "operationId" = ${operationId}, "doneAt" = ${DB_WALL},
+              "leaseToken" = NULL, "leasedUntil" = NULL, "retryAfter" = NULL,
+              "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${id} AND "leaseToken" = ${token}
+            AND "leasedUntil" > ${DB_WALL} AND "status" = 'PENDING'`;
+        return updated === 1;
+      });
     },
     async requeueFromOperation(workItemId, operationId, reason) {
       const updated = await db.$executeRaw`
@@ -213,30 +224,39 @@ export function prismaWorkStore(db: PrismaClient = defaultDb): WorkStore {
       return updated === 1;
     },
     async renew(id, token, ttlMs) {
-      const updated = await db.$executeRaw`
-        UPDATE "ProcessedWebhook" SET "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
-        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}`;
-      if (updated === 0) throw new OwnershipLostError(`Work item ${id} is owned by another worker.`);
+      await withOwnershipTx(db, async (tx) => {
+        await lockRow(tx, id);
+        const updated = await tx.$executeRaw`
+          UPDATE "ProcessedWebhook" SET "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}`;
+        if (updated === 0) throw new OwnershipLostError(`Work item ${id} is owned by another worker.`);
+      });
     },
     async markDone(id, token, outcome, reason, operationId) {
-      const updated = await db.$executeRaw`
-        UPDATE "ProcessedWebhook"
-        SET "status" = 'DONE', "outcome" = ${outcome}, "lastReason" = ${reason},
-            "operationId" = COALESCE(${operationId ?? null}, "operationId"),
-            "doneAt" = ${DB_WALL}, "leaseToken" = NULL, "leasedUntil" = NULL,
-            "retryAfter" = NULL, "updatedAt" = ${DB_WALL}
-        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}
-          AND "status" = 'PENDING'`;
-      return updated === 1;
+      return withOwnershipTx(db, async (tx) => {
+        await lockRow(tx, id);
+        const updated = await tx.$executeRaw`
+          UPDATE "ProcessedWebhook"
+          SET "status" = 'DONE', "outcome" = ${outcome}, "lastReason" = ${reason},
+              "operationId" = COALESCE(${operationId ?? null}, "operationId"),
+              "doneAt" = ${DB_WALL}, "leaseToken" = NULL, "leasedUntil" = NULL,
+              "retryAfter" = NULL, "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}
+            AND "status" = 'PENDING'`;
+        return updated === 1;
+      });
     },
     async scheduleRetry(id, token, delayMs, reason) {
-      const updated = await db.$executeRaw`
-        UPDATE "ProcessedWebhook"
-        SET "retryAfter" = ${dbWallPlus(delayMs)}, "lastReason" = ${reason},
-            "leaseToken" = NULL, "leasedUntil" = NULL, "updatedAt" = ${DB_WALL}
-        WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}
-          AND "status" = 'PENDING'`;
-      return updated === 1;
+      return withOwnershipTx(db, async (tx) => {
+        await lockRow(tx, id);
+        const updated = await tx.$executeRaw`
+          UPDATE "ProcessedWebhook"
+          SET "retryAfter" = ${dbWallPlus(delayMs)}, "lastReason" = ${reason},
+              "leaseToken" = NULL, "leasedUntil" = NULL, "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${id} AND "leaseToken" = ${token} AND "leasedUntil" >= ${DB_WALL}
+            AND "status" = 'PENDING'`;
+        return updated === 1;
+      });
     },
     async purgeDone(olderThanMs) {
       // COALESCE covers overlap-era DONE rows whose doneAt was never set.

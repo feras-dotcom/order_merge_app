@@ -5,7 +5,13 @@
 
 import type { PrismaClient } from "@prisma/client";
 import defaultDb from "../db.server";
-import { ClaimContentionError, DB_WALL, dbWallPlus, OwnershipLostError } from "./ownership.server";
+import {
+  ClaimContentionError,
+  DB_WALL,
+  dbWallPlus,
+  OwnershipLostError,
+  withOwnershipTx,
+} from "./ownership.server";
 
 export interface ClaimStore {
   /** All-or-nothing. true if every order is now claimed with `token`; false if
@@ -66,22 +72,38 @@ export function prismaClaimStore(db: PrismaClient = defaultDb): ClaimStore {
       }
     },
     async renew(shop, orderIds, token, ttlMs) {
-      const ids = [...new Set(orderIds)];
+      const ids = [...new Set(orderIds)].sort();
       if (!ids.length) return;
-      const updated = await db.$executeRaw`
-        UPDATE "MergeClaim" SET "leasedUntil" = ${dbWallPlus(ttlMs)}
-        WHERE "shop" = ${shop} AND "orderId" = ANY(${ids})
-          AND "leaseToken" = ${token} AND "leasedUntil" > ${DB_WALL}`;
-      if (updated !== ids.length) {
-        throw new OwnershipLostError(`Merge claim lost for ${shop} (${ids.length} orders).`);
-      }
+      await withOwnershipTx(db, async (tx) => {
+        // Lock every row first so the wait happens on the SELECT (bounded by
+        // lock_timeout); the guarded UPDATE then evaluates token+expiry
+        // against the rows as they stand after the wait — a locked-but-
+        // unchanged row would not be re-evaluated by a conditional UPDATE.
+        await tx.$queryRaw`
+          SELECT "orderId" FROM "MergeClaim"
+          WHERE "shop" = ${shop} AND "orderId" = ANY(${ids})
+          ORDER BY "orderId" FOR UPDATE`;
+        const updated = await tx.$executeRaw`
+          UPDATE "MergeClaim" SET "leasedUntil" = ${dbWallPlus(ttlMs)}
+          WHERE "shop" = ${shop} AND "orderId" = ANY(${ids})
+            AND "leaseToken" = ${token} AND "leasedUntil" > ${DB_WALL}`;
+        if (updated !== ids.length) {
+          throw new OwnershipLostError(`Merge claim lost for ${shop} (${ids.length} orders).`);
+        }
+      });
     },
     async release(shop, orderIds, token) {
-      const ids = [...new Set(orderIds)];
+      const ids = [...new Set(orderIds)].sort();
       if (!ids.length) return;
-      await db.$executeRaw`
-        DELETE FROM "MergeClaim"
-        WHERE "shop" = ${shop} AND "orderId" = ANY(${ids}) AND "leaseToken" = ${token}`;
+      await withOwnershipTx(db, async (tx) => {
+        await tx.$queryRaw`
+          SELECT "orderId" FROM "MergeClaim"
+          WHERE "shop" = ${shop} AND "orderId" = ANY(${ids})
+          ORDER BY "orderId" FOR UPDATE`;
+        await tx.$executeRaw`
+          DELETE FROM "MergeClaim"
+          WHERE "shop" = ${shop} AND "orderId" = ANY(${ids}) AND "leaseToken" = ${token}`;
+      });
     },
     async reapExpired() {
       return db.$executeRaw`DELETE FROM "MergeClaim" WHERE "leasedUntil" < ${DB_WALL}`;

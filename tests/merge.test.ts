@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { executeMerge, REVIEW_TAG } from "../app/lib/merge.server";
 import { driveOperation } from "../app/lib/operation-protocol.server";
-import { newLeaseToken } from "../app/lib/ownership.server";
+import { ClaimContentionError, newLeaseToken } from "../app/lib/ownership.server";
 import {
   customRate,
   LOC_A,
@@ -51,6 +51,80 @@ const WRITES = [
   "MergeCloseSecondary",
 ];
 const noWrites = (h: Harness) => WRITES.every((w) => h.shopify.mutationCalls(w) === 0);
+
+describe("executeMerge — kill switch", () => {
+  it("returns MERGES_DISABLED before any Shopify read when new merges are off", async () => {
+    const h = setup();
+    await h.ops.setControl({ newMergesEnabled: false });
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    expect(result).toMatchObject({ outcome: "skipped", code: "MERGES_DISABLED" });
+    expect(h.shopify.calls).toHaveLength(0); // not even a read reached Shopify
+    expect(h.ops.ops.size).toBe(0);
+  });
+
+  it("scopes to the allowlist — a shop not listed is MERGES_DISABLED", async () => {
+    const h = setup();
+    await h.ops.setControl({ newMergesEnabled: true, allowShops: ["other.myshopify.com"] });
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    expect(result).toMatchObject({ outcome: "skipped", code: "MERGES_DISABLED" });
+    expect(h.shopify.calls).toHaveLength(0);
+  });
+
+  it("durable blockers still take precedence over the kill switch", async () => {
+    const h = setup();
+    await h.claims.acquire(h.SHOP, [id(1)], "holder", h.deps.leaseTtlMs);
+    await h.ops.createOperation({
+      shop: h.SHOP,
+      claimToken: "holder",
+      opToken: "HOLDERTK",
+      involvedOrderIds: [id(1)],
+      primaryOrderId: id(1),
+      primaryOrderName: "#1",
+      customerId: null,
+      primaryLineItemCountBefore: 1,
+      addedLineItemCount: 1,
+      secondaries: [],
+      calculatedOrderId: null,
+      expectedTransfer: [],
+      expectedLocationId: null,
+      primaryLineItemIdsBefore: [],
+      leaseToken: "holder-op",
+      ttlMs: 60_000,
+    });
+    await h.claims.release(h.SHOP, [id(1)], "holder"); // lock stays; claim gone
+    await h.ops.setControl({ newMergesEnabled: false });
+    const result = await executeMerge(h.shopify.admin, h.SHOP, IDS, h.deps);
+    expect(result).toMatchObject({ outcome: "skipped", code: "LOCKED" });
+  });
+
+  it("createOperation itself is gated — the durable boundary throws when merges are off", async () => {
+    const h = setup();
+    await h.claims.acquire(h.SHOP, [id(1), id(2)], "tok", h.deps.leaseTtlMs);
+    await h.ops.setControl({ newMergesEnabled: false });
+    await expect(
+      h.ops.createOperation({
+        shop: h.SHOP,
+        claimToken: "tok",
+        opToken: "OPTK",
+        involvedOrderIds: [id(1), id(2)],
+        primaryOrderId: id(1),
+        primaryOrderName: "#1",
+        customerId: null,
+        primaryLineItemCountBefore: 1,
+        addedLineItemCount: 1,
+        secondaries: [{ id: id(2), name: "#2", items: 1, cancelPhase: "TRANSFER_PENDING" }],
+        calculatedOrderId: null,
+        expectedTransfer: [],
+        expectedLocationId: null,
+        primaryLineItemIdsBefore: [],
+        leaseToken: "op-tok",
+        ttlMs: 60_000,
+      }),
+    ).rejects.toBeInstanceOf(ClaimContentionError);
+    expect(h.ops.ops.size).toBe(0);
+    expect(h.ops.locks.size).toBe(0);
+  });
+});
 
 describe("executeMerge — happy path", () => {
   it("creates the operation, then drives it: items moved, cancellation confirmed, history recorded once", async () => {

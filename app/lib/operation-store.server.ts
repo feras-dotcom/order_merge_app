@@ -294,6 +294,20 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       const opId = crypto.randomUUID();
       try {
         return await withOwnershipTx(db, async (tx) => {
+          // 0. Kill switch: read the control row under FOR SHARE so a
+          //    setControl (FOR UPDATE) cannot commit mid-create unseen.
+          const [control] = await tx.$queryRaw<
+            { newMergesEnabled: boolean; allowShops: string[] }[]
+          >`
+            SELECT "newMergesEnabled", "allowShops" FROM "AppControl"
+            WHERE id = 'control' FOR SHARE`;
+          if (
+            !control?.newMergesEnabled ||
+            (control.allowShops.length > 0 && !control.allowShops.includes(input.shop))
+          ) {
+            throw new ClaimContentionError("New merges are disabled (AppControl).");
+          }
+
           // 1. The caller still owns every claim, with enough margin that the
           //    locks are in place before they could expire.
           const held = await tx.$queryRaw<{ orderId: string }[]>`
@@ -331,7 +345,8 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
           if (locked) throw new ClaimContentionError(`Order ${locked.orderId} is locked.`);
           const [blocking] = await tx.$queryRaw<{ id: string }[]>`
             SELECT id FROM "MergeOperation"
-            WHERE "shop" = ${input.shop} AND "status" = ANY(${V1_BLOCKING})
+            WHERE "shop" = ${input.shop} AND "protocolVersion" = 1
+              AND "status" = ANY(${V1_BLOCKING})
               AND "involvedOrderIds" && ${ids} LIMIT 1`;
           if (blocking) throw new ClaimContentionError(`Order involved in blocking op ${blocking.id}.`);
 
@@ -396,14 +411,22 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
     },
 
     async renewOperation(op, ttlMs) {
-      const updated = await db.$executeRaw`
-        UPDATE "MergeOperation"
-        SET "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
-        WHERE "id" = ${op.id} AND "leaseToken" = ${op.leaseToken}
-          AND "leasedUntil" > ${DB_WALL}`;
-      if (updated === 0) {
-        throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
-      }
+      await withOwnershipTx(db, async (tx) => {
+        // Lock the row first: the wait happens HERE (bounded by
+        // lock_timeout), then the guarded UPDATE evaluates its predicates
+        // against the row as it stands after the wait — PG does not
+        // re-evaluate a conditional UPDATE whose row was locked but not
+        // changed, so evaluation must come after the lock.
+        await tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
+        const updated = await tx.$executeRaw`
+          UPDATE "MergeOperation"
+          SET "leasedUntil" = ${dbWallPlus(ttlMs)}, "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${op.id} AND "leaseToken" = ${op.leaseToken}
+            AND "leasedUntil" > ${DB_WALL}`;
+        if (updated === 0) {
+          throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+        }
+      });
     },
 
     async transition(op, patch) {
@@ -439,18 +462,36 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       if (patch.attempts !== undefined) sets.push(Prisma.sql`"attempts" = ${patch.attempts}`);
       sets.push(Prisma.sql`"updatedAt" = ${DB_WALL}`);
 
+      // READY→ABANDONED means "provably nothing was dispatched": the op may
+      // only abandon before the first EDIT_COMMIT attempt exists.
+      const noDispatchGuard =
+        targetPhase === "ABANDONED" && patch.expectedPhase === "READY"
+          ? Prisma.sql`AND NOT EXISTS (
+              SELECT 1 FROM "MergeMutationAttempt" a
+              WHERE a."operationId" = ${op.id} AND a."kind" = 'EDIT_COMMIT')`
+          : Prisma.empty;
+
       const condition = Prisma.sql`
         "id" = ${op.id} AND "leaseToken" = ${op.leaseToken} AND "leasedUntil" > ${DB_WALL}
-        ${patch.expectedPhase ? Prisma.sql`AND "phase" = ${patch.expectedPhase}` : Prisma.empty}`;
+        ${patch.expectedPhase ? Prisma.sql`AND "phase" = ${patch.expectedPhase}` : Prisma.empty}
+        ${noDispatchGuard}`;
+
+      // Lock the op row FIRST so every wait happens before the guarded
+      // UPDATE evaluates (a locked-but-unchanged row does not re-evaluate).
+      const lockRow = (tx: Prisma.TransactionClient) =>
+        tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
 
       const terminal = targetPhase === "COMPLETED" || targetPhase === "ABANDONED";
       const settlesWork = targetPhase === "REVIEW_REQUIRED";
       if (!terminal && !settlesWork) {
-        const updated = await db.$executeRaw`
-          UPDATE "MergeOperation" SET ${Prisma.join(sets)} WHERE ${condition}`;
-        if (updated === 0) {
-          throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
-        }
+        await withOwnershipTx(db, async (tx) => {
+          await lockRow(tx);
+          const updated = await tx.$executeRaw`
+            UPDATE "MergeOperation" SET ${Prisma.join(sets)} WHERE ${condition}`;
+          if (updated === 0) {
+            throw new OwnershipLostError(`Merge operation ${op.id} is owned by another worker.`);
+          }
+        });
         return;
       }
 
@@ -458,6 +499,7 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       // same transaction as the phase change — an op can never end leaving
       // locks behind or its work item stranded.
       await withOwnershipTx(db, async (tx) => {
+        await lockRow(tx);
         const updated = await tx.$executeRaw`
           UPDATE "MergeOperation" SET ${Prisma.join(sets)} WHERE ${condition}`;
         if (updated === 0) {
@@ -524,6 +566,26 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       }
 
       return withOwnershipTx(db, async (tx) => {
+        // Linearizable with setControl: the op row lock (FOR UPDATE) and the
+        // control read (FOR SHARE) are taken inside this tx. A setControl
+        // that commits before this gate's FOR SHARE is acquired is always
+        // seen; one whose FOR UPDATE is still waiting behind this share lock
+        // commits only after the gate decided. Documented boundary: a request
+        // whose gate already committed can still leave the process; a gate
+        // that linearizes after the disable cannot open.
+        await tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
+        const [control] = await tx.$queryRaw<
+          { newMergesEnabled: boolean; completionEnabled: boolean; allowShops: string[] }[]
+        >`
+          SELECT "newMergesEnabled", "completionEnabled", "allowShops"
+          FROM "AppControl" WHERE id = 'control' FOR SHARE`;
+        if (
+          !control?.[switchColumn] ||
+          (control.allowShops.length > 0 && !control.allowShops.includes(op.shop))
+        ) {
+          return null;
+        }
+
         // The gate: phase flip + throttle happen only while we provably own
         // the op (with margin), in the required phase, with the switch on.
         const updated = await tx.$executeRaw`
@@ -532,7 +594,6 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
               "firstDispatchAt" = COALESCE("firstDispatchAt",
                 CASE WHEN ${kind} = 'EDIT_COMMIT' THEN ${DB_WALL} END),
               "nextCheckAt" = ${DB_WALL} + interval '30 seconds',
-              "status" = 'NEEDS_REVIEW',
               "updatedAt" = ${DB_WALL}
           WHERE "id" = ${op.id} AND "leaseToken" = ${op.leaseToken}
             AND "leasedUntil" > ${DB_WALL} + interval '30 seconds'
@@ -588,6 +649,7 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       );
       const secondary = secondaries.find((s) => s.id === secondaryId);
       await withOwnershipTx(db, async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
         const updated = await tx.$executeRaw`
           UPDATE "MergeOperation"
           SET "secondaries" = ${JSON.stringify(secondaries)}::jsonb, "updatedAt" = ${DB_WALL}
@@ -653,12 +715,15 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
     },
 
     async markSideEffectsDone(op) {
-      const updated = await db.$executeRaw`
-        UPDATE "MergeOperation"
-        SET "sideEffectsDone" = true, "nextCheckAt" = NULL, "updatedAt" = ${DB_WALL}
-        WHERE "id" = ${op.id} AND "leaseToken" = ${op.leaseToken}
-          AND "leasedUntil" > ${DB_WALL}`;
-      return updated === 1;
+      return withOwnershipTx(db, async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
+        const updated = await tx.$executeRaw`
+          UPDATE "MergeOperation"
+          SET "sideEffectsDone" = true, "nextCheckAt" = NULL, "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${op.id} AND "leaseToken" = ${op.leaseToken}
+            AND "leasedUntil" > ${DB_WALL}`;
+        return updated === 1;
+      });
     },
 
     async getControl() {
@@ -677,7 +742,13 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       if (patch.note !== undefined) sets.push(Prisma.sql`"note" = ${patch.note}`);
       if (!sets.length) return;
       sets.push(Prisma.sql`"updatedAt" = ${DB_WALL}`);
-      await db.$executeRaw`UPDATE "AppControl" SET ${Prisma.join(sets)} WHERE id = 'control'`;
+      // FOR UPDATE serializes against the gates' FOR SHARE reads: a disable
+      // waits for in-flight gates and every gate that linearizes after this
+      // commits sees the new value.
+      await withOwnershipTx(db, async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "AppControl" WHERE id = 'control' FOR UPDATE`;
+        await tx.$executeRaw`UPDATE "AppControl" SET ${Prisma.join(sets)} WHERE id = 'control'`;
+      });
     },
 
     async isEnabled(shop, sw) {
