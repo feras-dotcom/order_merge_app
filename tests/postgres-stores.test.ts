@@ -27,6 +27,8 @@ import {
 import type { MergeDeps } from "../app/lib/merge.server";
 import { driveOperation } from "../app/lib/operation-protocol.server";
 import { processOrderWork } from "../app/lib/order-work-processor.server";
+import { applyLegacyVerdict, type LegacyVerdict } from "../app/lib/legacy-reconcile.server";
+import { backfillWorkItem, requeueCutoverWork } from "../app/lib/cutover.server";
 import { FakeShopify, makeOrder } from "./fake-shopify";
 import {
   ClaimContentionError,
@@ -456,6 +458,27 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     expect(taken).not.toBeNull();
     await expect(ops.renewOperation(op, 60_000)).rejects.toBeInstanceOf(OwnershipLostError);
     await ops.renewOperation(taken!, 60_000); // the new owner renews fine
+  });
+
+  it("v2 transition: a Date nextCheckAt lands on the UTC wall clock — the op is not due early", async () => {
+    // A bare Prisma Date bind is read in the SESSION timezone: under
+    // Asia/Tokyo, 12:00Z would be stored as 21:00, pushing nextCheckAt ~9h
+    // into the past — the sweeper would pick the op up immediately.
+    const op = await createOp([oid(1), oid(2)]);
+    const target = Date.now() + 5 * 60_000;
+    await ops.transition(op, { nextCheckAt: new Date(target) });
+    const [{ wall, epoch }] = await db.$queryRawUnsafe<{ wall: string; epoch: string }[]>(
+      `SELECT "nextCheckAt"::text AS wall,
+              extract(epoch from ("nextCheckAt" AT TIME ZONE 'UTC')) AS epoch
+       FROM "MergeOperation" WHERE id = '${op.id}'`,
+    );
+    expect(wall.slice(0, 19)).toBe(new Date(target).toISOString().slice(0, 19).replace("T", " "));
+    expect(Math.abs(Number(epoch) * 1000 - target)).toBeLessThan(1_000);
+    // Merchant-visible consequence: the op is due in 5 minutes, so with its
+    // lease expired neither a specific takeover nor the sweeper may claim it.
+    await expireOpLease(op.id);
+    expect(await ops.acquireOperationLease(op.id, newLeaseToken(), 120_000)).toBeNull();
+    expect(await ops.acquireOperationLease(undefined, "sweeper", 120_000)).toBeNull();
   });
 
   it("v2 transition: terminal phases release locks and settle/requeue the work item", async () => {
@@ -1316,5 +1339,313 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
       if (saved === undefined) delete process.env.MERGESHIP_MUTATIONS;
       else process.env.MERGESHIP_MUTATIONS = saved;
     }
+  });
+
+  // ── C1: applyLegacyVerdict — atomic per-op conversion ────────────────────
+
+  const insertV1Op = async (
+    id: string,
+    involved: string[],
+    secondaries: unknown[],
+    status = "COMMITTED",
+  ): Promise<any> => {
+    await db.$executeRaw`
+      INSERT INTO "MergeOperation"
+        ("id","shop","status","primaryOrderId","primaryOrderName","customerId",
+         "primaryLineItemCountBefore","addedLineItemCount","secondaries",
+         "involvedOrderIds","createdAt","updatedAt","protocolVersion")
+      VALUES (${id}, ${SHOP}, ${status}, ${involved[0]}, ${"#" + involved[0].split("/").pop()}, NULL,
+              1, 1, ${JSON.stringify(secondaries)}::jsonb, ${involved},
+              ${dbWallPlus(-3_600_000)}, ${dbWallPlus(-3_600_000)}, 1)`;
+    return (await db.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "MergeOperation" WHERE id = '${id}'`,
+    ))[0];
+  };
+
+  const verifiedVerdict = (overrides: Partial<LegacyVerdict> = {}): LegacyVerdict => ({
+    phase: "APPLIED",
+    reason: "v1 merge completed",
+    secondaries: [
+      { id: oid(2), name: "#2", items: 1, cancelPhase: "CANCEL_VERIFIED", secondaryIndex: 1 },
+    ],
+    records: [{ id: oid(2), name: "#2", items: 1 }],
+    syntheticAttempts: [],
+    expectedTransfer: [
+      {
+        secondaryId: oid(2),
+        secondaryIndex: 1,
+        lines: [{ sourceLineItemId: null, variantId: "gid://shopify/ProductVariant/1", quantity: 1, description: "x" }],
+      },
+    ],
+    appliedEvidence: {
+      agreementId: "gid://shopify/OrderEditAgreement/9",
+      happenedAt: new Date(Date.now() - 1_800_000).toISOString(),
+      lines: [{ secondaryId: oid(2), lineItemId: "gid://shopify/LineItem/9", variantId: "gid://shopify/ProductVariant/1", quantity: 1 }],
+    },
+    ...overrides,
+  });
+
+  it("v1→v2 apply: locks + conversion + MergeRecord are one transaction; re-run is a no-op", async () => {
+    const op = await insertV1Op("v1-happy", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    await applyLegacyVerdict(db, op, verifiedVerdict());
+    const row = await freshOp("v1-happy");
+    expect(row.protocolVersion).toBe(2);
+    expect(row.phase).toBe("APPLIED");
+    expect(row.calculatedOrderId).toBeNull();
+    expect(row.opToken).toMatch(/^LEGACY-/);
+    expect((row.appliedEvidence as any).agreementId).toBe("gid://shopify/OrderEditAgreement/9");
+    expect(await lockCount()).toBe(2);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
+    ).toBe(1);
+    // Idempotent: a second run sees protocolVersion 2 and writes nothing.
+    await applyLegacyVerdict(db, row, verifiedVerdict());
+    expect(await lockCount()).toBe(2);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
+    ).toBe(1);
+  });
+
+  it("v1→v2 apply: a failure inside the MergeRecord insert rolls EVERYTHING back", async () => {
+    const op = await insertV1Op("v1-crash", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    // A record with a null mergedOrderId violates NOT NULL mid-tx.
+    await expect(
+      applyLegacyVerdict(
+        db,
+        op,
+        verifiedVerdict({ records: [{ id: null as any, name: "#2", items: 1 }] }),
+      ),
+    ).rejects.toThrow();
+    const row = await freshOp("v1-crash");
+    expect(row.protocolVersion).toBe(1); // untouched
+    expect(row.phase).toBeNull();
+    expect(await lockCount()).toBe(0);
+    expect(await attemptCount()).toBe(0);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
+    ).toBe(0);
+  });
+
+  it("v1→v2 apply: CANCEL_IN_DOUBT writes the synthetic UNKNOWN attempt at cancelRequestedAt", async () => {
+    const reqAt = new Date(Date.now() - 40 * 60_000);
+    const op = await insertV1Op("v1-doubt", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1, cancelRequestedAt: reqAt.toISOString() },
+    ]);
+    await applyLegacyVerdict(
+      db,
+      op,
+      verifiedVerdict({
+        secondaries: [
+          { id: oid(2), name: "#2", items: 1, cancelPhase: "CANCEL_IN_DOUBT", secondaryIndex: 1 },
+        ],
+        syntheticAttempts: [{ targetOrderId: oid(2), dispatchedAt: reqAt }],
+      }),
+    );
+    const atts = await db.$queryRawUnsafe<any[]>(`SELECT * FROM "MergeMutationAttempt"`);
+    expect(atts).toHaveLength(1);
+    expect(atts[0].kind).toBe("ORDER_CANCEL");
+    expect(atts[0].state).toBe("UNKNOWN");
+    expect(atts[0].targetOrderId).toBe(oid(2));
+    expect(Math.abs(new Date(atts[0].dispatchedAt).getTime() - reqAt.getTime())).toBeLessThan(1000);
+  });
+
+  it("v1→v2 apply: an order locked by a NON-LEGACY op parks this op at REVIEW_REQUIRED", async () => {
+    await createOp([oid(1), oid(2)]); // a real v2 op holds the locks
+    const op = await insertV1Op("v1-conflict", [oid(1), oid(3)], [
+      { id: oid(3), name: "#3", items: 1 },
+    ]);
+    await applyLegacyVerdict(
+      db,
+      op,
+      verifiedVerdict({
+        phase: "REVIEW_REQUIRED",
+        reason: "conflicts with an overlapping operation",
+        secondaries: [
+          { id: oid(3), name: "#3", items: 1, cancelPhase: "CANCEL_REVIEW", secondaryIndex: 1 },
+        ],
+        records: [],
+      }),
+    );
+    expect((await freshOp("v1-conflict")).phase).toBe("REVIEW_REQUIRED");
+    // The v2 owner keeps its phase — a foreign op is never flipped.
+    const owner = await db.$queryRawUnsafe<any[]>(
+      `SELECT phase FROM "MergeOperation" WHERE "calculatedOrderId" IS NOT NULL`,
+    );
+    expect(owner[0].phase).toBe("READY");
+  });
+
+  it("v1→v2 apply: a lock conflict with another LEGACY op flips that owner to REVIEW_REQUIRED", async () => {
+    // Owner: a converted (non-terminal) legacy op holding a lock on oid(1).
+    const owner = await insertV1Op("v1-owner", [oid(1), oid(4)], [
+      { id: oid(4), name: "#4", items: 1 },
+    ]);
+    await applyLegacyVerdict(
+      db,
+      owner,
+      verifiedVerdict({
+        secondaries: [
+          { id: oid(4), name: "#4", items: 1, cancelPhase: "CANCEL_VERIFIED", secondaryIndex: 1 },
+        ],
+        records: [{ id: oid(4), name: "#4", items: 1 }],
+      }),
+    );
+    expect((await freshOp("v1-owner")).phase).toBe("APPLIED");
+    expect(await lockCount()).toBe(2);
+    // The contender shares oid(1): it parks AND the owner is flagged.
+    const op = await insertV1Op("v1-contender", [oid(1), oid(3)], [
+      { id: oid(3), name: "#3", items: 1 },
+    ]);
+    await applyLegacyVerdict(
+      db,
+      op,
+      verifiedVerdict({
+        secondaries: [
+          { id: oid(3), name: "#3", items: 1, cancelPhase: "CANCEL_VERIFIED", secondaryIndex: 1 },
+        ],
+        records: [{ id: oid(3), name: "#3", items: 1 }],
+      }),
+    );
+    expect((await freshOp("v1-contender")).phase).toBe("REVIEW_REQUIRED");
+    expect((await freshOp("v1-owner")).phase).toBe("REVIEW_REQUIRED");
+    // The contender keeps the non-conflicting lock it took on oid(3) —
+    // REVIEW_REQUIRED ops retain their locks.
+    expect(await lockCount()).toBe(3);
+  });
+
+  // ── C2: cutover work policy ───────────────────────────────────────────────
+
+  const insertWork = async (
+    orderId: string,
+    status: string,
+    outcome: string | null,
+    createdAtOffsetMs: number,
+  ) => {
+    // (?::timestamptz AT TIME ZONE 'UTC') → the naive UTC wall clock the
+    // columns store; session-timezone proof under the Tokyo session.
+    const at = new Date(Date.now() + createdAtOffsetMs).toISOString();
+    const now = new Date().toISOString();
+    await db.$executeRaw`
+      INSERT INTO "ProcessedWebhook"
+        ("id","shop","orderId","status","outcome","createdAt","updatedAt","retryAfter")
+      VALUES (${crypto.randomUUID()}, ${SHOP}, ${orderId}, ${status}, ${outcome},
+              (${at}::timestamptz AT TIME ZONE 'UTC'),
+              (${at}::timestamptz AT TIME ZONE 'UTC'),
+              (${now}::timestamptz AT TIME ZONE 'UTC'))`;
+  };
+
+  it("cutover requeue: only since-DONE NULL/LEGACY unblocked items reopen — twice, idempotent", async () => {
+    const since = new Date(Date.now() - 60 * 60_000); // "v2 went live" an hour ago
+    await insertWork(oid(10), "DONE", "LEGACY", -30 * 60_000);      // since → requeue
+    await insertWork(oid(11), "DONE", null, -40 * 60_000);          // since NULL → requeue
+    await insertWork(oid(12), "DONE", "LEGACY", -2 * 60 * 60_000);  // older than since → leave
+    await insertWork(oid(13), "DONE", "MERGED", -30 * 60_000);      // v2 outcome → leave
+    await insertWork(oid(14), "REVIEW", null, -30 * 60_000);        // REVIEW → leave
+    await insertWork(oid(15), "DONE", "LEGACY", -30 * 60_000);      // locked → exclude
+    await db.$executeRaw`
+      INSERT INTO "MergeOperation"
+        ("id","shop","status","primaryOrderId","primaryOrderName",
+         "primaryLineItemCountBefore","addedLineItemCount","secondaries",
+         "involvedOrderIds","createdAt","updatedAt","protocolVersion","phase",
+         "calculatedOrderId")
+      VALUES ('holder', ${SHOP}, 'NEEDS_REVIEW', ${oid(15)}, '#15',
+              1, 1, '[]'::jsonb, ${[oid(15)]},
+              ${dbWallPlus(-3_000_000)}, ${dbWallPlus(-3_000_000)}, 2, 'READY',
+              'gid://shopify/CalculatedOrder/1')`;
+    await db.$executeRaw`
+      INSERT INTO "MergeOrderLock" ("id","shop","orderId","operationId","createdAt")
+      VALUES (${crypto.randomUUID()}, ${SHOP}, ${oid(15)}, 'holder', ${dbWallPlus(0)})`;
+    await insertWork(oid(16), "DONE", "LEGACY", -30 * 60_000);      // MergeRecord → exclude
+    await db.$executeRaw`
+      INSERT INTO "MergeRecord"
+        ("id","shop","primaryOrderId","primaryOrderName","mergedOrderId","mergedOrderName","itemsCombined","createdAt")
+      VALUES (${crypto.randomUUID()}, ${SHOP}, ${oid(1)}, '#1', ${oid(16)}, '#16', 1, ${dbWallPlus(-3_000_000)})`;
+    // The PENDING backlog that waited while mutations were off gets its
+    // deadline extended — #14 (REVIEW) is the control and stays untouched.
+    await insertWork(oid(17), "PENDING", null, -30 * 60_000);
+    await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(-3_600_000)} WHERE "orderId" = ${oid(17)}`;
+    await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(-3_600_000)} WHERE "orderId" = ${oid(14)}`;
+
+    const deadlineMs = async (orderId: string) =>
+      Number(
+        (
+          await db.$queryRawUnsafe<{ ms: string }[]>(
+            `SELECT extract(epoch from ("deadlineAt" AT TIME ZONE 'UTC')) AS ms
+             FROM "ProcessedWebhook" WHERE "orderId" = '${orderId}'`,
+          )
+        )[0].ms,
+      ) * 1000;
+    const reviewDeadlineBefore = await deadlineMs(oid(14));
+
+    const dry = await requeueCutoverWork(db, since, { apply: false });
+    expect(dry.candidates.map((c) => c.orderId).sort()).toEqual(
+      [oid(10), oid(11), oid(15), oid(16)].sort(),
+    );
+    expect(dry.excludedLocked.map((c) => c.orderId)).toEqual([oid(15)]);
+    expect(dry.excludedMerged.map((c) => c.orderId)).toEqual([oid(16)]);
+    expect(dry.eligible.map((c) => c.orderId).sort()).toEqual([oid(10), oid(11)].sort());
+    expect(dry.maxWindowHours).toBe(24); // no Settings row → fallback window
+    // Only #12 (2h old, before `since`) sits in [since − window, since).
+    expect(dry.legacyInWindowBefore).toBe(1);
+    expect(dry.requeued).toBe(0); // dry run writes nothing
+    expect(dry.pendingExtended).toBe(1); // #17's stale deadline would extend
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM "ProcessedWebhook" WHERE status = 'PENDING'`,
+      ))[0].n,
+    ).toBe(1); // #17 only — the dry run requeued nothing
+
+    const live = await requeueCutoverWork(db, since, { apply: true });
+    expect(live.requeued).toBe(2);
+    expect(live.pendingExtended).toBe(1);
+    // #17's deadline is now ~6h out; #14's (REVIEW) was left alone.
+    expect(await deadlineMs(oid(17))).toBeGreaterThan(Date.now() + 5 * 3_600_000);
+    expect(await deadlineMs(oid(14))).toBe(reviewDeadlineBefore);
+    const rows = await db.$queryRawUnsafe<any[]>(
+      `SELECT "orderId", status, attempts, "lastReason" FROM "ProcessedWebhook"`,
+    );
+    const byId = new Map(rows.map((r) => [r.orderId, r]));
+    for (const id of [oid(10), oid(11)]) {
+      expect(byId.get(id).status).toBe("PENDING");
+      expect(byId.get(id).attempts).toBe(0);
+      expect(byId.get(id).lastReason).toBe("CUTOVER_REQUEUE");
+    }
+    for (const id of [oid(12), oid(13), oid(14), oid(15), oid(16)]) {
+      expect(byId.get(id).status).not.toBe("PENDING");
+    }
+    // Second application is a no-op — requeued rows no longer match.
+    expect((await requeueCutoverWork(db, since, { apply: true })).requeued).toBe(0);
+  });
+
+  it("backfillWorkItem: inserts when absent, reopens LEGACY/NULL DONE, leaves v2 and REVIEW rows alone", async () => {
+    // Absent → inserted PENDING (1 row).
+    expect(await backfillWorkItem(db, SHOP, oid(20))).toBe(1);
+    expect(await backfillWorkItem(db, SHOP, oid(20))).toBe(0); // PENDING: untouched
+    // DONE/LEGACY → reopened.
+    await insertWork(oid(21), "DONE", "LEGACY", -60_000);
+    expect(await backfillWorkItem(db, SHOP, oid(21))).toBe(1);
+    const reopened = await db.$queryRaw<any[]>`
+      SELECT status, "lastReason" FROM "ProcessedWebhook" WHERE "orderId" = ${oid(21)}`;
+    expect(reopened[0].status).toBe("PENDING");
+    expect(reopened[0].lastReason).toBe("CUTOVER_BACKFILL");
+    // DONE/MERGED → untouched.
+    await insertWork(oid(22), "DONE", "MERGED", -60_000);
+    expect(await backfillWorkItem(db, SHOP, oid(22))).toBe(0);
+    const merged = await db.$queryRaw<any[]>`
+      SELECT status, outcome FROM "ProcessedWebhook" WHERE "orderId" = ${oid(22)}`;
+    expect(merged[0].status).toBe("DONE");
+    expect(merged[0].outcome).toBe("MERGED");
+    // REVIEW → untouched.
+    await insertWork(oid(23), "REVIEW", null, -60_000);
+    expect(await backfillWorkItem(db, SHOP, oid(23))).toBe(0);
+    const review = await db.$queryRaw<any[]>`
+      SELECT status FROM "ProcessedWebhook" WHERE "orderId" = ${oid(23)}`;
+    expect(review[0].status).toBe("REVIEW");
+    // DONE/NULL → reopened.
+    await insertWork(oid(24), "DONE", null, -60_000);
+    expect(await backfillWorkItem(db, SHOP, oid(24))).toBe(1);
   });
 });

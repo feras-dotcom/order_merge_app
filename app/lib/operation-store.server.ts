@@ -446,7 +446,7 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
             : patch.nextCheckAt === "now"
               ? Prisma.sql`"nextCheckAt" = ${DB_WALL}`
               : patch.nextCheckAt instanceof Date
-                ? Prisma.sql`"nextCheckAt" = ${patch.nextCheckAt}`
+                ? Prisma.sql`"nextCheckAt" = (${patch.nextCheckAt.toISOString()}::timestamptz AT TIME ZONE 'UTC')`
                 : Prisma.sql`"nextCheckAt" = ${dbWallPlus(patch.nextCheckAt)}`,
         );
       }

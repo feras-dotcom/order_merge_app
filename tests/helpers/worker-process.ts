@@ -4,6 +4,14 @@
 //
 // Env: DATABASE_URL, FAKE_SHOPIFY_URL, SHOP, ANCHOR_ORDER_ID,
 //      MERGESHIP_MUTATIONS=enabled
+//      LEASE_TTL_MS          clamps the OPERATION lease to this ttl — claims
+//                          and work leases keep the default so executeMerge
+//                          can still finish; the short op lease is what lets
+//                          a second worker take over after a crash
+//      CRASH_AT              after-attempt-record → exit(1) right after the
+//                          first attempt outcome is durable
+//      SWEEP_ONLY            "true" → no anchor; just sweep until quiet
+//      SWEEP_MAX_MS          (default 60000) sweep deadline
 
 import { PrismaClient } from "@prisma/client";
 import { prismaClaimStore } from "../../app/lib/claims.server";
@@ -19,8 +27,12 @@ import { processOrderWork } from "../../app/lib/order-work-processor.server";
 const FAKE = process.env.FAKE_SHOPIFY_URL;
 const SHOP = process.env.SHOP;
 const ANCHOR = process.env.ANCHOR_ORDER_ID;
-if (!FAKE || !SHOP || !ANCHOR || !process.env.DATABASE_URL) {
-  console.error("needs env: DATABASE_URL FAKE_SHOPIFY_URL SHOP ANCHOR_ORDER_ID");
+const SWEEP_ONLY = process.env.SWEEP_ONLY === "true";
+const OP_LEASE_TTL = Number(process.env.LEASE_TTL_MS) || 0; // 0 → default ttl
+const SWEEP_MAX = Number(process.env.SWEEP_MAX_MS) || 60_000;
+const CRASH_AT = process.env.CRASH_AT;
+if (!FAKE || !SHOP || (!ANCHOR && !SWEEP_ONLY) || !process.env.DATABASE_URL) {
+  console.error("needs env: DATABASE_URL FAKE_SHOPIFY_URL SHOP ANCHOR_ORDER_ID|SWEEP_ONLY");
   process.exit(2);
 }
 
@@ -35,6 +47,33 @@ const admin: AdminClient = {
 
 const db = new PrismaClient();
 const ops = makeOperationStore(db);
+if (OP_LEASE_TTL) {
+  // Shorten only the op lease: the merge CLAIMS and work leases must outlive
+  // an executeMerge eligibility pass, but the op lease is the takeover fence.
+  const create = ops.createOperation.bind(ops);
+  ops.createOperation = async (input: Parameters<typeof create>[0]) =>
+    create({ ...input, ttlMs: Math.min(input.ttlMs, OP_LEASE_TTL) });
+  const renew = ops.renewOperation.bind(ops);
+  ops.renewOperation = async (op: Parameters<typeof renew>[0], ttlMs: number) =>
+    renew(op, Math.min(ttlMs, OP_LEASE_TTL));
+  const acquire = ops.acquireOperationLease.bind(ops);
+  ops.acquireOperationLease = async (
+    shop: Parameters<typeof acquire>[0],
+    token: Parameters<typeof acquire>[1],
+    ttlMs: Parameters<typeof acquire>[2],
+  ) => acquire(shop, token, Math.min(ttlMs, OP_LEASE_TTL));
+}
+if (CRASH_AT === "after-attempt-record") {
+  // Crash the instant the first attempt outcome is durable: the row exists
+  // (SUCCEEDED/UNKNOWN) and the op is mid-flight — a second worker must
+  // reconcile from evidence instead of re-dispatching.
+  const record = ops.recordAttempt.bind(ops);
+  ops.recordAttempt = async (...args: Parameters<typeof record>) => {
+    await record(...args);
+    console.error(`[worker ${ANCHOR ?? "-"}] crash after attempt record`);
+    process.exit(1);
+  };
+}
 const work = prismaWorkStore(db);
 const claims = prismaClaimStore(db);
 const journal = makeMergeJournal(db);
@@ -68,27 +107,29 @@ for (;;) {
   await new Promise((r) => setTimeout(r, 50));
 }
 
-const token = newLeaseToken();
-const item = await work.insertLeased(SHOP, ANCHOR, token, deps.leaseTtlMs, WORK_DEADLINE_MS);
-if (item) {
-  try {
-    await processOrderWork({
-      item,
-      token,
-      shop: SHOP,
-      admin,
-      deps,
-      work,
-      settings,
-      now: deps.now,
-    });
-  } catch (err: any) {
-    console.error(`[worker ${ANCHOR}] processOrderWork: ${err?.message ?? err}`);
+if (!SWEEP_ONLY) {
+  const token = newLeaseToken();
+  const item = await work.insertLeased(SHOP, ANCHOR!, token, deps.leaseTtlMs, WORK_DEADLINE_MS);
+  if (item) {
+    try {
+      await processOrderWork({
+        item,
+        token,
+        shop: SHOP,
+        admin,
+        deps,
+        work,
+        settings,
+        now: deps.now,
+      });
+    } catch (err: any) {
+      console.error(`[worker ${ANCHOR}] processOrderWork: ${err?.message ?? err}`);
+    }
   }
 }
 
-// Keep sweeping until no non-terminal v2 op remains for the shop (or 60s).
-const deadline = Date.now() + 60_000;
+// Keep sweeping until no non-terminal v2 op remains for the shop (or max).
+const deadline = Date.now() + SWEEP_MAX;
 while (Date.now() < deadline) {
   try {
     await runSweepOnce({
@@ -103,7 +144,7 @@ while (Date.now() < deadline) {
       budgetMs: 2_000,
     });
   } catch (err: any) {
-    console.error(`[worker ${ANCHOR}] sweep: ${err?.message ?? err}`);
+    console.error(`[worker ${ANCHOR ?? "-"}] sweep: ${err?.message ?? err}`);
   }
   const open = await db.$queryRaw<{ count: bigint }[]>`
     SELECT (
@@ -119,4 +160,4 @@ while (Date.now() < deadline) {
 }
 
 await db.$disconnect();
-console.log(`[worker ${ANCHOR}] done`);
+console.log(`[worker ${ANCHOR ?? "sweep"}] done`);

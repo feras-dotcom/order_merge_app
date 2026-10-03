@@ -101,7 +101,9 @@ export const AGREEMENT_GRACE_MS = 2 * 60_000;
 const FULL_DISCOUNT_TOLERANCE = 0.005;
 
 const tokenIndex = (description: string | null | undefined, opToken: string) => {
-  const match = new RegExp(`MS-${opToken}-(\\d+)`).exec(description ?? "");
+  const match = new RegExp(`(?:^|[^0-9A-Z])MS-${opToken}-(\\d+)(?!\\d)`).exec(
+    description ?? "",
+  );
   return match ? Number(match[1]) : null;
 };
 

@@ -29,6 +29,7 @@ import {
   type MergeDeps,
 } from "./merge.server";
 import { resolveAppId, verifyTransferEvidence, type AppliedEvidence } from "./evidence.server";
+import { LEGACY_STAFF_NOTE_RE } from "./legacy-reconcile.server";
 import type {
   AttemptKind,
   ExpectedTransferEntry,
@@ -746,13 +747,15 @@ export async function driveOperation(
    *  converted from v1 by scripts/legacy-reconcile.ts are marked by
    *  calculatedOrderId IS NULL (a v2-created op always has a calc) and their
    *  cancels carried the v1 note "... merged into #P by MergeShip." — accept
-   *  that form for legacy ops only, so a v2 op can never adopt somebody
-   *  else's cancellation as proof. */
+   *  that form for legacy ops only, and only when the captured order name is
+   *  exactly this op's primary, so a v2 op can never adopt somebody else's
+   *  cancellation as proof. */
   function isOurCancellation(staffNote: string | null | undefined): boolean {
+    const note = staffNote ?? "";
+    const legacy = LEGACY_STAFF_NOTE_RE.exec(note);
     return (
-      (staffNote ?? "").includes(`MS-${current.opToken}`) ||
-      (current.calculatedOrderId == null &&
-        (staffNote ?? "").includes(`merged into ${current.primaryOrderName} by MergeShip`))
+      note.includes(`MS-${current.opToken}`) ||
+      (current.calculatedOrderId == null && legacy?.[1] === current.primaryOrderName)
     );
   }
 

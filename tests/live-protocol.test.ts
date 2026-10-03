@@ -81,7 +81,11 @@ const cliAdmin = async (query: string, variables?: Record<string, any>): Promise
   const cmd = `shopify app execute --store ${STORE} --version ${API_VERSION} --query-file ${file}${varArg}`;
   const cwd = dirname(fileURLToPath(import.meta.url));
   let lastErr: unknown = new Error("no attempts made");
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // A mutation may have been dispatched before its response was lost — it is
+  // sent exactly once and reconciled from evidence. Queries are side-effect
+  // free, so they keep the retry budget.
+  const maxAttempts = /^\s*(#graphql\s*)?mutation\b/.test(query) ? 1 : 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const { stdout, stderr } = await execAsync(cmd, { cwd });
       const body = parseCliBody(stdout) ?? parseCliBody(stderr);
