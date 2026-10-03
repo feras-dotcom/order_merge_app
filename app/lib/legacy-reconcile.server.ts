@@ -2,9 +2,9 @@
 // Converts leftover v1 MergeOperation rows (status PENDING_COMMIT / COMMITTED
 // / NEEDS_REVIEW / ABANDONED) into the v2 protocol. An op whose live state
 // cannot be proven goes to REVIEW_REQUIRED carrying every secondary. A v1
-// ABANDONED row is not proof the commit never applied: it converts
-// terminally only when a complete scan shows no MergeShip trace on the
-// primary past the quiet period, and quarantines otherwise.
+// ABANDONED row is not proof the commit never applied: there is no terminal
+// automatic conversion — positive evidence takes the normal path, and
+// anything else quarantines in REVIEW_REQUIRED for a human.
 //
 //   planLegacyReconciliation — pure classification per op → verdicts
 //   applyLegacyVerdict      — one withOwnershipTx per op: locks, conversion,
@@ -33,10 +33,6 @@ export const LEGACY_RECONCILE_STATUSES = [
   "NEEDS_REVIEW",
   "ABANDONED",
 ];
-
-/** Same quiet period as operation-protocol's QUIET_PERIOD_MS (kept local —
- *  importing it would cycle with that module's LEGACY_STAFF_NOTE_RE import). */
-const QUIET_PERIOD_MS = 15 * 60_000;
 
 const STATE_QUERY = `#graphql
   query LegacyOrderState($id: ID!) {
@@ -124,7 +120,7 @@ export interface LegacyVerdictSecondary extends Record<string, unknown> {
 }
 
 export interface LegacyVerdict {
-  phase: "APPLIED" | "REVIEW_REQUIRED" | "ABANDONED";
+  phase: "APPLIED" | "REVIEW_REQUIRED";
   reason: string | null;
   secondaries: LegacyVerdictSecondary[];
   /** Secondaries whose v1 cancellation is proven — MergeRecords to write. */
@@ -261,7 +257,7 @@ async function readOrder(admin: AdminClient, id: string, appId: string) {
     { id },
     "order",
   );
-  if (!state) return { state: null, lines: [], agreements: [], complete: false };
+  if (!state) return { state: null, lines: [], agreements: [] };
 
   const lines: any[] = [];
   const agreements: any[] = [];
@@ -306,7 +302,7 @@ async function readOrder(admin: AdminClient, id: string, appId: string) {
       throw new IncompletePageError(`Legacy agreement ${a.id} sales`);
     }
   }
-  return { state, lines, agreements, complete: true };
+  return { state, lines, agreements };
 }
 
 async function classify(
@@ -380,9 +376,6 @@ async function classify(
   const appliedLines: AppliedEvidence["lines"] = [];
   let evidenceAgreement: { id: string; happenedAt: string } | null = null;
   const abandoned = op.status === "ABANDONED";
-  let allReadsComplete = primaryRead.complete;
-  let anyTokenLine = false;
-  let anyUnapplied = false;
 
   for (let i = 0; i < carried.length; i++) {
     const s = carried[i];
@@ -397,7 +390,6 @@ async function classify(
         expectedTransfer,
       );
     }
-    allReadsComplete = allReadsComplete && sRead.complete;
     const secondary = sRead.state;
     const sLines = linesOf(sRead.lines).map((l) => ({ variantId: l.variantId, quantity: l.quantity }));
     expectedTransfer.push({
@@ -416,7 +408,6 @@ async function classify(
     // name must appear inside the delimiter-aware description — matching the
     // secondary's multiset and inside one MergeShip agreement.
     const tokenLines = primaryLines.filter((l) => secondaryName(l) === s.name);
-    anyTokenLine = anyTokenLine || tokenLines.length > 0;
     const matchedAgreement = agreements.find((a: any) =>
       tokenLines.every((l) =>
         (a.sales?.nodes ?? []).some(
@@ -432,15 +423,13 @@ async function classify(
       ) &&
       matchedAgreement != null;
     if (!applied) {
-      // For a v1 ABANDONED row a missing transfer is not proof the commit
-      // never applied — keep scanning the remaining secondaries; the
-      // post-loop check decides clean-abandon vs quarantine.
-      if (abandoned) {
-        anyUnapplied = true;
-        continue;
-      }
+      // A v1 ABANDONED row whose primary shows no trace may still have its
+      // commit in flight — v1 abandoned it on an ambiguous answer, so absence
+      // is not a negative receipt. Quarantine like every other unproven row.
       return review(
-        `no evidence the transfer to ${op.primaryOrderName} applied for ${s.name}`,
+        abandoned
+          ? `no evidence the transfer to ${op.primaryOrderName} applied for ${s.name} — v1 abandoned this commit on an ambiguous answer, so it may still apply; quarantined for a human`
+          : `no evidence the transfer to ${op.primaryOrderName} applied for ${s.name}`,
         secondaries,
         carried.slice(i),
         records,
@@ -483,36 +472,6 @@ async function classify(
     } else {
       secondaries.push({ ...s, cancelPhase: "CANCEL_REVIEW" });
     }
-  }
-
-  // A v1 ABANDONED row converts terminally only after a complete scan proves
-  // no MergeShip trace on the primary AND the row has sat past the quiet
-  // period; everything else is quarantined for a human.
-  if (abandoned && anyUnapplied) {
-    const quietElapsed =
-      deps.now().getTime() -
-        Math.max(new Date(op.createdAt).getTime(), new Date(op.updatedAt).getTime()) >=
-      QUIET_PERIOD_MS;
-    if (!anyTokenLine && agreements.length === 0 && allReadsComplete && quietElapsed) {
-      return {
-        phase: "ABANDONED",
-        reason:
-          "v1 abandonment verified: no MergeShip edit agreement and no transferred lines on the primary",
-        secondaries: carried.map((s) => ({ ...s, cancelPhase: "TRANSFER_PENDING" as const })),
-        records: [],
-        syntheticAttempts: [],
-        expectedTransfer: [],
-        appliedEvidence: null,
-      };
-    }
-    return review(
-      "v1 abandonment could not be verified — a missing applied transfer is not proof the commit never applied; orders stay quarantined",
-      [],
-      carried,
-      [],
-      [],
-      expectedTransfer,
-    );
   }
 
   const allResolved = secondaries.every(
@@ -577,25 +536,6 @@ export async function applyLegacyVerdict(
     if (stale) {
       console.log(`[legacy-reconcile] ${op.id}: skipped — ${stale}`);
       return "skipped";
-    }
-
-    // Terminal no-evidence conversion: the plan proved the v1 commit never
-    // applied, so there is nothing to lock, record or attempt — convert the
-    // row straight to a terminal v2 ABANDONED and release the orders.
-    if (verdict.phase === "ABANDONED") {
-      const converted = await tx.$executeRaw`
-        UPDATE "MergeOperation"
-        SET "protocolVersion" = 2, "phase" = 'ABANDONED', "status" = 'ABANDONED',
-            "opToken" = ${`LEGACY-${newOpToken()}`},
-            "expectedTransfer" = '[]'::jsonb, "appliedEvidence" = NULL,
-            "firstDispatchAt" = "createdAt", "nextCheckAt" = NULL,
-            "secondaries" = ${JSON.stringify(verdict.secondaries)}::jsonb,
-            "reviewReason" = NULL,
-            "lastError" = ${verdict.reason}, "updatedAt" = ${DB_WALL}
-        WHERE "id" = ${op.id} AND "protocolVersion" = 1`;
-      if (converted === 0)
-        throw new OwnershipLostError(`Legacy op ${op.id} changed under conversion.`);
-      return "applied";
     }
 
     let phase = verdict.phase;

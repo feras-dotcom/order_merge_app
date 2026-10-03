@@ -2195,50 +2195,104 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     expect(await opCount()).toBe(1);
   });
 
-  it("R3: an ABANDONED v1 op proven never applied — terminal conversion frees the orders", async () => {
-    // Clean primary: no token line, no MergeShip agreement; the op is two
-    // hours old, well past the quiet period.
+  // ── S2: a v1 ABANDONED commit may still be in flight — never terminal ────
+
+  /** The reviewer sequence: stage the v1 commit, park it with
+   *  lose-apply-later, insert the v1 ABANDONED row (2h old) + DONE/LEGACY
+   *  work, reconcile while the primary still reads clean, then deliver the
+   *  original commit — either AFTER the conversion or DURING the plan's
+   *  reads. Either way the row quarantines with locks and the transfer is
+   *  applied exactly once, by the original commit — never re-merged. */
+  const inflightV1Commit = async (opId: string, deliverDuringRead: boolean) => {
     const shopify = new FakeShopify([makeOrder(1), makeOrder(2)]);
     shopify.clock = () => new Date();
-    const v1 = await insertAbandonedV1("v1-abandoned-clean", [oid(1), oid(2)], [
+    const calc = shopify.stageEdit(oid(1), [
+      { variantId: VARIANT1, quantity: 1, description: "Merged from #2, already paid" },
+    ]);
+    shopify.commitMode.set(calc, "lose-apply-later");
+    // The original v1 commit: the response is lost, the mutation is parked.
+    await shopify.admin.graphql(
+      `mutation MergeEditCommit($id: ID!) {
+        orderEditCommit(id: $id) { order { id } userErrors { field message } }
+      }`,
+      { variables: { id: calc } },
+    );
+    expect(shopify.mutationCalls("MergeEditCommit")).toBe(1);
+    expect(shopify.order(1).lineItems).toHaveLength(1); // parked, not applied
+
+    const v1 = await insertAbandonedV1(opId, [oid(1), oid(2)], [
       { id: oid(2), name: "#2", items: 1 },
     ]);
     await insertWork(oid(2), "DONE", "LEGACY", -10 * 60_000);
     const cutoverAt = new Date();
 
+    if (deliverDuringRead) {
+      // Delivered mid-plan — after the primary was already read clean — by
+      // the first LegacyOrderState call for the secondary.
+      shopify.on("LegacyOrderState", (vars) => {
+        if (vars.id !== oid(2)) return undefined;
+        shopify.interceptors.delete("LegacyOrderState");
+        shopify.deliverPendingCommit(calc);
+        return undefined;
+      });
+    }
     const plans = await planLegacyReconciliation({
       db,
       adminFor: async () => shopify.admin,
       now: () => new Date(),
     });
     expect(plans).toHaveLength(1);
-    expect(plans[0].verdict.phase).toBe("ABANDONED");
+    expect(plans[0].verdict.phase).toBe("REVIEW_REQUIRED");
+    expect(plans[0].verdict.reason).toContain("quarantined for a human");
+    expect(plans[0].verdict.secondaries[0].cancelPhase).toBe("CANCEL_REVIEW");
     expect(await applyLegacyVerdict(db, v1, plans[0].verdict)).toBe("applied");
-    expect(await freshOp("v1-abandoned-clean")).toMatchObject({
+    expect(await lockCount()).toBe(2);
+    expect(await freshOp(opId)).toMatchObject({
       protocolVersion: 2,
-      phase: "ABANDONED",
-      status: "ABANDONED",
-      nextCheckAt: null,
+      phase: "REVIEW_REQUIRED",
     });
-    // Terminal non-evidence conversion writes no locks, records or attempts.
-    expect(await lockCount()).toBe(0);
-    expect(await attemptCount()).toBe(0);
-    expect(
-      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
-    ).toBe(0);
 
-    // The orders are free: the work row requeues and a native v2 op is allowed.
+    if (!deliverDuringRead) shopify.deliverPendingCommit(calc); // after conversion
+
+    // The durable locks — not the stale clean read — keep the orders out of
+    // requeue, backfill and native creation.
     const after = await requeueCutoverWork(db, {
       cutoverAt,
       olderLegacy: "exclude",
       apply: true,
     });
-    expect(after.eligible.map((c) => c.orderId)).toEqual([oid(2)]);
-    expect(after.requeued).toBe(1);
-    expect((await workRow(oid(2)))).toMatchObject({ status: "PENDING", outcome: null });
-    const created = await createOp([oid(1), oid(2)]);
-    expect(created.protocolVersion).toBe(2);
+    expect(after.excludedLocked.map((c) => c.orderId)).toEqual([oid(2)]);
+    expect(after.requeued).toBe(0);
+    expect((await workRow(oid(2)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+    expect(await backfillWorkItem(db, SHOP, oid(2))).toBe(0);
+    await ops.setControl({ newMergesEnabled: false, completionEnabled: false });
+    await clearClaims();
+    const merged = await executeMerge(shopify.admin, SHOP, [oid(2), oid(1)], realDeps());
+    expect(merged.code).toBe("LOCKED");
+    expect(await opCount()).toBe(1);
+    expect(shopify.mutationCalls("MergeEditCommit")).toBe(1); // the original only
+    expect(shopify.order(1).lineItems).toHaveLength(2); // applied once, never twice
+    expect(shopify.order(2).cancelledAt).toBeNull();
+
+    // Converted row: re-planning sees nothing, replaying is skipped, locks stay.
+    expect(
+      await planLegacyReconciliation({
+        db,
+        adminFor: async () => shopify.admin,
+        now: () => new Date(),
+      }),
+    ).toHaveLength(0);
     expect(await applyLegacyVerdict(db, v1, plans[0].verdict)).toBe("skipped");
+    expect(await lockCount()).toBe(2);
+    expect(await opCount()).toBe(1);
+  };
+
+  it("S2: a v1 ABANDONED commit delivered AFTER conversion still quarantines — never re-merged", async () => {
+    await inflightV1Commit("v1-abandoned-late-commit", false);
+  });
+
+  it("S2: a v1 ABANDONED commit delivered DURING reconciliation still quarantines", async () => {
+    await inflightV1Commit("v1-abandoned-mid-scan-commit", true);
   });
 
   it("R3: an ABANDONED v1 op whose read fails — quarantined with locks, excluded as locked", async () => {

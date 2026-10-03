@@ -355,7 +355,7 @@ describe("planLegacyReconciliation", () => {
     expect(plan.verdict.appliedEvidence).not.toBeNull();
   });
 
-  it("an ABANDONED op past the quiet period with no MergeShip trace: terminal ABANDONED", async () => {
+  it("an ABANDONED op with no MergeShip trace on the primary: REVIEW_REQUIRED quarantine, never terminal (2h old)", async () => {
     const sec = { id: gid(2), name: "#2", items: 1 };
     const op = legacyOp({
       status: "ABANDONED",
@@ -366,35 +366,18 @@ describe("planLegacyReconciliation", () => {
     });
     const orders = new Map([
       // Clean primary: its own line, no token lines, no MergeShip agreement.
-      [gid(1), evidenceOrder({ lines: [{ id: "li-orig", quantity: 1, variantId: VARIANT }] })],
-      [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
-    ]);
-    const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
-    expect(plan.verdict.phase).toBe("ABANDONED");
-    expect(plan.verdict.secondaries[0].cancelPhase).toBe("TRANSFER_PENDING");
-    expect(plan.verdict.records).toHaveLength(0);
-    expect(plan.verdict.syntheticAttempts).toHaveLength(0);
-    expect(plan.verdict.expectedTransfer).toEqual([]);
-    expect(plan.verdict.appliedEvidence).toBeNull();
-  });
-
-  it("an ABANDONED op inside the quiet period: REVIEW_REQUIRED, never terminal", async () => {
-    const sec = { id: gid(2), name: "#2", items: 1 };
-    const op = legacyOp({
-      status: "ABANDONED",
-      createdAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
-      updatedAt: new Date(NOW.getTime() - 5 * 60_000), // touched 5 minutes ago
-      secondaries: [sec],
-      involvedOrderIds: [gid(1), gid(2)],
-    });
-    const orders = new Map([
+      // Absence + elapsed time is not a negative receipt — the v1 commit may
+      // still be in flight, so the row quarantines instead of converting.
       [gid(1), evidenceOrder({ lines: [{ id: "li-orig", quantity: 1, variantId: VARIANT }] })],
       [gid(2), evidenceOrder({ lines: [{ id: "li-2", quantity: 1, variantId: VARIANT }] })],
     ]);
     const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
     expect(plan.verdict.phase).toBe("REVIEW_REQUIRED");
-    expect(plan.verdict.reason).toContain("abandonment could not be verified");
+    expect(plan.verdict.reason).toContain("v1 abandoned this commit on an ambiguous answer");
+    expect(plan.verdict.reason).toContain("quarantined for a human");
     expect(plan.verdict.secondaries[0].cancelPhase).toBe("CANCEL_REVIEW");
+    expect(plan.verdict.records).toHaveLength(0);
+    expect(plan.verdict.syntheticAttempts).toHaveLength(0);
   });
 
   it("an ABANDONED op with a MergeShip agreement in the window but no token lines: REVIEW_REQUIRED", async () => {
@@ -423,7 +406,7 @@ describe("planLegacyReconciliation", () => {
     ]);
     const [plan] = await planLegacyReconciliation(planDeps(orders), [op]);
     expect(plan.verdict.phase).toBe("REVIEW_REQUIRED");
-    expect(plan.verdict.reason).toContain("abandonment could not be verified");
+    expect(plan.verdict.reason).toContain("quarantined for a human");
   });
 
   it("an ABANDONED op with incomplete primary line pagination: REVIEW_REQUIRED (reconcile read failed)", async () => {
