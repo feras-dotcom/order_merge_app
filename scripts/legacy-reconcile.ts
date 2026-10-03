@@ -12,8 +12,23 @@ import {
   applyLegacyVerdict,
   planLegacyReconciliation,
 } from "../app/lib/legacy-reconcile.server";
+import { ControlsNotFrozenError, requireControlsOff } from "../app/lib/cutover.server";
 
 const apply = process.argv.slice(2).includes("--apply");
+
+// Converting ops while the v2 engine is live races it — --apply requires
+// both mutation switches off.
+if (apply) {
+  try {
+    await requireControlsOff(db);
+  } catch (err) {
+    if (err instanceof ControlsNotFrozenError) {
+      console.error(`error: ${err.message}`);
+      process.exit(2);
+    }
+    throw err;
+  }
+}
 
 const { unauthenticated } = await import("../app/shopify.server");
 const adminFor = async (shop: string) => {
@@ -42,7 +57,10 @@ for (const { op, verdict } of plans) {
   for (const a of verdict.syntheticAttempts ?? []) {
     console.log(`    + synthetic UNKNOWN ORDER_CANCEL for ${a.targetOrderId}`);
   }
-  if (apply) await applyLegacyVerdict(db, op, verdict);
+  if (apply) {
+    const result = await applyLegacyVerdict(db, op, verdict);
+    if (result === "skipped") console.log("    → skipped (stale plan — rerun)");
+  }
 }
 
 console.log(apply ? "\nApplied." : "\nDry run — pass --apply to write.");

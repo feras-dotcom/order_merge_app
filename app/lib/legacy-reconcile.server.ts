@@ -18,7 +18,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type { AdminClient } from "./graphql.server";
 import type { AppliedEvidence } from "./evidence.server";
-import { DB_WALL, newOpToken, withOwnershipTx } from "./ownership.server";
+import { DB_WALL, newOpToken, OwnershipLostError, withOwnershipTx } from "./ownership.server";
 
 export const LEGACY_BLOCKING = ["PENDING_COMMIT", "COMMITTED", "NEEDS_REVIEW"];
 
@@ -403,18 +403,51 @@ async function classify(
 }
 
 /** Applies one verdict inside a single transaction: lock rows, the op's v2
- *  conversion, MergeRecords and synthetic attempts — all or nothing. On a
- *  lock conflict the owner is flagged REVIEW_REQUIRED when it is a
- *  legacy-origin op (calculatedOrderId IS NULL) that is still non-terminal,
- *  and this op goes to REVIEW_REQUIRED. Idempotent: ops already at
- *  protocolVersion 2 are skipped. */
+ *  conversion, MergeRecords and synthetic attempts — all or nothing. The op
+ *  row is re-read FOR UPDATE before anything is written and must still be
+ *  the v1 row the plan saw (same status, updatedAt and involved orders) —
+ *  a stale plan (already converted, completed, or re-planned) is "skipped"
+ *  with zero writes. On a lock conflict the owner is flagged REVIEW_REQUIRED
+ *  when it is a legacy-origin op (calculatedOrderId IS NULL) that is still
+ *  non-terminal, and this op goes to REVIEW_REQUIRED. */
 export async function applyLegacyVerdict(
   db: PrismaClient,
   op: any,
   verdict: LegacyVerdict,
-): Promise<void> {
-  if (op.protocolVersion === 2) return;
-  await withOwnershipTx(db, async (tx) => {
+): Promise<"applied" | "skipped"> {
+  if (op.protocolVersion === 2) return "skipped";
+  return withOwnershipTx(db, async (tx) => {
+    // The plan was made against a snapshot — prove the row is still exactly
+    // that v1 row under the lock before a single lock/record/attempt write.
+    const [row] = await tx.$queryRaw<
+      {
+        protocolVersion: number;
+        status: string;
+        involvedOrderIds: string[];
+        updatedAt: Date;
+      }[]
+    >`
+      SELECT "protocolVersion", "status", "involvedOrderIds", "updatedAt"
+      FROM "MergeOperation" WHERE id = ${op.id} FOR UPDATE`;
+    const sortIds = (ids: unknown) =>
+      [...((ids as string[]) ?? [])].sort();
+    const stale =
+      !row ||
+      row.protocolVersion !== 1
+        ? "already converted or gone"
+        : row.status !== op.status
+          ? `status changed (${op.status} → ${row.status})`
+          : new Date(row.updatedAt).getTime() !== new Date(op.updatedAt).getTime()
+            ? "row touched since the plan was made"
+            : JSON.stringify(sortIds(row.involvedOrderIds)) !==
+                JSON.stringify(sortIds(op.involvedOrderIds))
+              ? "involved orders changed"
+              : null;
+    if (stale) {
+      console.log(`[legacy-reconcile] ${op.id}: skipped — ${stale}`);
+      return "skipped";
+    }
+
     let phase = verdict.phase;
     let reason = verdict.reason;
 
@@ -459,7 +492,9 @@ export async function applyLegacyVerdict(
           "reviewRequiredAt" = CASE WHEN ${phase} = 'REVIEW_REQUIRED' THEN ${DB_WALL} ELSE "reviewRequiredAt" END,
           "updatedAt" = ${DB_WALL}
       WHERE "id" = ${op.id} AND "protocolVersion" = 1`;
-    if (n === 0) return; // a concurrent applier converted it first
+    // Unreachable while the row is locked above — the reread already proved
+    // protocolVersion 1. Roll back rather than commit half an application.
+    if (n === 0) throw new OwnershipLostError(`Legacy op ${op.id} changed under conversion.`);
 
     for (const rec of verdict.records) {
       await tx.$executeRaw`
@@ -480,5 +515,6 @@ export async function applyLegacyVerdict(
                 (${att.dispatchedAt.toISOString()}::timestamptz AT TIME ZONE 'UTC'),
                 ${DB_WALL}, 'synthetic: cancelRequestedAt was set before cutover')`;
     }
+    return "applied";
   });
 }

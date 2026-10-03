@@ -297,7 +297,43 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       const opId = crypto.randomUUID();
       try {
         return await withOwnershipTx(db, async (tx) => {
-          // 0. Kill switch: read the control row under FOR SHARE so a
+          // 1. Lock the claim rows and the work row BY IDENTITY first — the
+          //    wait happens here, bounded by lock_timeout. A predicate-carrying
+          //    SELECT FOR UPDATE only waits on rows that matched at scan time,
+          //    and PostgreSQL does not re-evaluate a predicate whose row was
+          //    locked but not changed, so a lease that expired during the wait
+          //    would pass a check evaluated before it.
+          await tx.$queryRaw`
+            SELECT "orderId" FROM "MergeClaim"
+            WHERE "shop" = ${input.shop} AND "orderId" = ANY(${ids})
+            FOR UPDATE`;
+          if (input.workItemId) {
+            await tx.$queryRaw`
+              SELECT id FROM "ProcessedWebhook" WHERE id = ${input.workItemId} FOR UPDATE`;
+          }
+
+          // 2. Validate ownership under our locks: every claim is still ours
+          //    with enough margin that the locks are in place before they
+          //    could expire.
+          const [{ n: held }] = await tx.$queryRaw<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM "MergeClaim"
+            WHERE "shop" = ${input.shop} AND "orderId" = ANY(${ids})
+              AND "leaseToken" = ${input.claimToken}
+              AND "leasedUntil" > ${DB_WALL} + interval '30 seconds'`;
+          if (held !== ids.length) {
+            throw new OwnershipLostError(`Merge claims lost for ${input.shop} before operation create.`);
+          }
+          if (input.workItemId) {
+            const [owned] = await tx.$queryRaw<{ id: string }[]>`
+              SELECT id FROM "ProcessedWebhook"
+              WHERE "id" = ${input.workItemId} AND "leaseToken" = ${input.workToken}
+                AND "leasedUntil" > ${DB_WALL} AND "status" = 'PENDING'`;
+            if (!owned) {
+              throw new OwnershipLostError(`Work item ${input.workItemId} is owned by another worker.`);
+            }
+          }
+
+          // 3. Kill switch: read the control row under FOR SHARE so a
           //    setControl (FOR UPDATE) cannot commit mid-create unseen.
           const [control] = await tx.$queryRaw<
             { newMergesEnabled: boolean; allowShops: string[] }[]
@@ -311,35 +347,7 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
             throw new ClaimContentionError("New merges are disabled (AppControl).");
           }
 
-          // 1. The caller still owns every claim, with enough margin that the
-          //    locks are in place before they could expire.
-          const held = await tx.$queryRaw<{ orderId: string }[]>`
-            SELECT "orderId" FROM "MergeClaim"
-            WHERE "shop" = ${input.shop} AND "orderId" = ANY(${ids})
-              AND "leaseToken" = ${input.claimToken}
-              AND "leasedUntil" > ${DB_WALL} + interval '30 seconds'
-            FOR UPDATE`;
-          if (held.length !== ids.length) {
-            throw new OwnershipLostError(`Merge claims lost for ${input.shop} before operation create.`);
-          }
-
-          // 2. Settle the work item this operation replaces (same tx, same
-          //    lease semantics as WorkStore.linkOperation).
-          if (input.workItemId) {
-            const linked = await tx.$executeRaw`
-              UPDATE "ProcessedWebhook"
-              SET "status" = 'DONE', "outcome" = 'OPERATION_CREATED',
-                  "operationId" = ${opId}, "doneAt" = ${DB_WALL},
-                  "leaseToken" = NULL, "leasedUntil" = NULL, "retryAfter" = NULL,
-                  "updatedAt" = ${DB_WALL}
-              WHERE "id" = ${input.workItemId} AND "leaseToken" = ${input.workToken}
-                AND "leasedUntil" > ${DB_WALL} AND "status" = 'PENDING'`;
-            if (linked !== 1) {
-              throw new OwnershipLostError(`Work item ${input.workItemId} is owned by another worker.`);
-            }
-          }
-
-          // 3. Blocking: a durable lock on any involved order, or a v1
+          // 4. Blocking: a durable lock on any involved order, or a v1
           //    operation in a blocking status touching it. (The unique index
           //    on MergeOrderLock would also catch the lock case on insert.)
           const [locked] = await tx.$queryRaw<{ orderId: string }[]>`
@@ -353,7 +361,7 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
               AND "involvedOrderIds" && ${ids} LIMIT 1`;
           if (blocking) throw new ClaimContentionError(`Order involved in blocking op ${blocking.id}.`);
 
-          // 4. The v2 operation row (READY; legacy status shield NEEDS_REVIEW).
+          // 5. The v2 operation row (READY; legacy status shield NEEDS_REVIEW).
           const [op] = await tx.$queryRaw<any[]>`
             INSERT INTO "MergeOperation" (
               "id", "shop", "status", "protocolVersion", "phase", "opToken",
@@ -376,11 +384,29 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
             )
             RETURNING *`;
 
-          // 5. Durable locks — unique violation rolls everything back.
+          // 6. Durable locks — unique violation rolls everything back.
           for (const orderId of ids) {
             await tx.$executeRaw`
               INSERT INTO "MergeOrderLock" ("id", "shop", "orderId", "operationId", "createdAt")
               VALUES (${crypto.randomUUID()}, ${input.shop}, ${orderId}, ${opId}, ${DB_WALL})`;
+          }
+
+          // 7. Settle the work item this operation replaces — same lease
+          //    predicates as WorkStore.linkOperation, now evaluated while we
+          //    hold the row lock, so nothing can change them between step 2's
+          //    validation and this write.
+          if (input.workItemId) {
+            const linked = await tx.$executeRaw`
+              UPDATE "ProcessedWebhook"
+              SET "status" = 'DONE', "outcome" = 'OPERATION_CREATED',
+                  "operationId" = ${opId}, "doneAt" = ${DB_WALL},
+                  "leaseToken" = NULL, "leasedUntil" = NULL, "retryAfter" = NULL,
+                  "updatedAt" = ${DB_WALL}
+              WHERE "id" = ${input.workItemId} AND "leaseToken" = ${input.workToken}
+                AND "leasedUntil" > ${DB_WALL} AND "status" = 'PENDING'`;
+            if (linked !== 1) {
+              throw new OwnershipLostError(`Work item ${input.workItemId} is owned by another worker.`);
+            }
           }
           return toOp(op);
         });

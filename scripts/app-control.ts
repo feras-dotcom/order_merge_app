@@ -13,16 +13,20 @@ import { isTransientDbError } from "../app/lib/ownership.server";
 
 const usage = () => {
   console.error(
-    "usage: npx vite-node scripts/app-control.ts [--new-merges on|off] [--completion on|off] [--allow shop,...]",
+    "usage: npx vite-node scripts/app-control.ts [--new-merges on|off] [--completion on|off] [--allow shop,...] [--allow-all-shops]",
   );
   process.exit(2);
 };
 
 const argv = process.argv.slice(2);
+// Boolean opt-out for the empty-allowlist guard — filtered out before the
+// flag/value pairs are read.
+const allowAllShops = argv.includes("--allow-all-shops");
+const rest = argv.filter((a) => a !== "--allow-all-shops");
 const flags = new Map<string, string>();
-for (let i = 0; i < argv.length; i += 2) {
-  if (!argv[i]?.startsWith("--") || argv[i + 1] === undefined) usage();
-  flags.set(argv[i], argv[i + 1]);
+for (let i = 0; i < rest.length; i += 2) {
+  if (!rest[i]?.startsWith("--") || rest[i + 1] === undefined) usage();
+  flags.set(rest[i], rest[i + 1]);
 }
 
 const onOff = (flag: string): boolean | undefined => {
@@ -50,6 +54,20 @@ if (newMerges !== undefined) patch.newMergesEnabled = newMerges;
 if (completion !== undefined) patch.completionEnabled = completion;
 if (flags.has("--allow")) {
   patch.allowShops = flags.get("--allow")!.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// An empty allowlist means the switches apply to EVERY shop — clearing a
+// dev-only allowlist while either switch stays on is a full-enable, so it
+// must be explicit.
+if (Array.isArray(patch.allowShops) && patch.allowShops.length === 0 && !allowAllShops) {
+  const mergesAfter = (patch.newMergesEnabled ?? before?.newMergesEnabled) === true;
+  const completionAfter = (patch.completionEnabled ?? before?.completionEnabled) === true;
+  if (mergesAfter || completionAfter) {
+    console.error(
+      "error: empty allowlist means ALL shops — pass --allow-all-shops to confirm.",
+    );
+    process.exit(2);
+  }
 }
 
 if (Object.keys(patch).length) {

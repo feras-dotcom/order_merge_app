@@ -28,8 +28,14 @@ import type { MergeDeps } from "../app/lib/merge.server";
 import { driveOperation } from "../app/lib/operation-protocol.server";
 import { processOrderWork } from "../app/lib/order-work-processor.server";
 import { applyLegacyVerdict, type LegacyVerdict } from "../app/lib/legacy-reconcile.server";
-import { backfillWorkItem, requeueCutoverWork } from "../app/lib/cutover.server";
-import { FakeShopify, makeOrder } from "./fake-shopify";
+import {
+  backfillWorkItem,
+  ControlsNotFrozenError,
+  CutoverWindowError,
+  listBackfillOrderIds,
+  requeueCutoverWork,
+} from "../app/lib/cutover.server";
+import { FakeShopify, makeOrder, topLevelError } from "./fake-shopify";
 import {
   ClaimContentionError,
   DB_WALL,
@@ -402,6 +408,101 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     ).rejects.toBeInstanceOf(ClaimContentionError);
     expect(await opCount()).toBe(1);
     expect(await lockCount()).toBe(2); // only op A's {1,2}
+  });
+
+  it("v2 createOperation: a work lease expiring during an unchanged-row wait refuses the create (N4)", async () => {
+    // The work row is locked by another transaction holding it FOR UPDATE
+    // without changing it. createOperation must wait, then re-validate the
+    // lease — a predicate evaluated before the wait would pass on a lease
+    // that expired while it waited.
+    await ops.setControl({ newMergesEnabled: true, completionEnabled: true, allowShops: [] });
+    const claimToken = newLeaseToken();
+    expect(await claims.acquire(SHOP, [oid(1), oid(2)], claimToken, 60_000)).toBe(true);
+    const workToken = newLeaseToken();
+    const item = await work.insertLeased(SHOP, oid(2), workToken, 1_200, WORK_DEADLINE_MS);
+    expect(item).not.toBeNull();
+
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRawUnsafe(
+          `SELECT id FROM "ProcessedWebhook" WHERE id = '${item!.id}' FOR UPDATE`,
+        );
+        await tx.$queryRawUnsafe(`SELECT 1 FROM pg_sleep(2)`); // outlasts the 1.2s lease
+      },
+      { timeout: 15_000 },
+    );
+    await new Promise((r) => setTimeout(r, 500)); // let the holder take the lock
+
+    const creating = ops.createOperation({
+      shop: SHOP,
+      claimToken,
+      involvedOrderIds: [oid(1), oid(2)],
+      primaryOrderId: oid(1),
+      primaryOrderName: "#1",
+      customerId: null,
+      primaryLineItemCountBefore: 1,
+      addedLineItemCount: 1,
+      secondaries: [{ id: oid(2), name: "#2", items: 1, cancelPhase: "TRANSFER_PENDING" }],
+      opToken: newOpToken(),
+      calculatedOrderId: "gid://shopify/CalculatedOrder/1",
+      expectedTransfer: [],
+      expectedLocationId: null,
+      primaryLineItemIdsBefore: ["gid://shopify/LineItem/1"],
+      leaseToken: newLeaseToken(),
+      ttlMs: 120_000,
+      workItemId: item!.id,
+      workToken,
+    });
+    await holder; // commits ~1.5s into the wait — the lease is dead by then
+    await expect(creating).rejects.toBeInstanceOf(OwnershipLostError);
+    expect(await opCount()).toBe(0);
+    expect(await lockCount()).toBe(0);
+    const [row] = await db.$queryRawUnsafe<any[]>(
+      `SELECT status, "leaseToken" FROM "ProcessedWebhook" WHERE id = '${item!.id}'`,
+    );
+    expect(row.status).toBe("PENDING");
+    expect(row.leaseToken).toBe(workToken); // never settled by the stale owner
+  });
+
+  it("v2 createOperation: claims dropping under the 30s margin during an unchanged-row wait refuse the create (N4)", async () => {
+    await ops.setControl({ newMergesEnabled: true, completionEnabled: true, allowShops: [] });
+    const claimToken = newLeaseToken();
+    // 31s of lease: just above the create's 30-second safety margin.
+    expect(await claims.acquire(SHOP, [oid(1), oid(2)], claimToken, 31_000)).toBe(true);
+
+    const holder = db2.$transaction(
+      async (tx) => {
+        await tx.$queryRawUnsafe(
+          `SELECT "orderId" FROM "MergeClaim" WHERE "shop" = '${SHOP}' FOR UPDATE`,
+        );
+        await tx.$queryRawUnsafe(`SELECT 1 FROM pg_sleep(2)`);
+      },
+      { timeout: 15_000 },
+    );
+    await new Promise((r) => setTimeout(r, 500));
+
+    const creating = ops.createOperation({
+      shop: SHOP,
+      claimToken,
+      involvedOrderIds: [oid(1), oid(2)],
+      primaryOrderId: oid(1),
+      primaryOrderName: "#1",
+      customerId: null,
+      primaryLineItemCountBefore: 1,
+      addedLineItemCount: 1,
+      secondaries: [{ id: oid(2), name: "#2", items: 1, cancelPhase: "TRANSFER_PENDING" }],
+      opToken: newOpToken(),
+      calculatedOrderId: "gid://shopify/CalculatedOrder/1",
+      expectedTransfer: [],
+      expectedLocationId: null,
+      primaryLineItemIdsBefore: ["gid://shopify/LineItem/1"],
+      leaseToken: newLeaseToken(),
+      ttlMs: 120_000,
+    });
+    await holder; // ~1.5s later the margin is gone
+    await expect(creating).rejects.toBeInstanceOf(OwnershipLostError);
+    expect(await opCount()).toBe(0);
+    expect(await lockCount()).toBe(0);
   });
 
   it("v2 acquireOperationLease: SKIP LOCKED — 10 parallel claimers on 3 due ops, each claimed once", async () => {
@@ -1516,6 +1617,66 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     expect(await lockCount()).toBe(3);
   });
 
+  // ── N6: applyLegacyVerdict re-reads the op row under lock ────────────────
+
+  it("v1→v2 apply: a stale plan replayed after conversion is skipped with zero writes", async () => {
+    const stale = await insertV1Op("v1-stale", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    expect(await applyLegacyVerdict(db, stale, verifiedVerdict())).toBe("applied");
+    const converted = await freshOp("v1-stale");
+    // Replaying the SAME captured snapshot must write nothing.
+    expect(await applyLegacyVerdict(db, stale, verifiedVerdict())).toBe("skipped");
+    expect(await lockCount()).toBe(2);
+    expect(await attemptCount()).toBe(0);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
+    ).toBe(1);
+    const after = await freshOp("v1-stale");
+    expect(after.updatedAt).toEqual(converted.updatedAt);
+    expect(after.protocolVersion).toBe(2);
+  });
+
+  it("v1→v2 apply: a stale plan replayed after the converted op COMPLETED is skipped — no locks", async () => {
+    const stale = await insertV1Op("v1-done", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    expect(await applyLegacyVerdict(db, stale, verifiedVerdict())).toBe("applied");
+    // The op ran to completion and released its locks.
+    await db.$executeRaw`
+      UPDATE "MergeOperation"
+      SET "phase" = 'COMPLETED', "status" = 'COMPLETED', "updatedAt" = ${DB_WALL}
+      WHERE id = 'v1-done'`;
+    await db.$executeRaw`DELETE FROM "MergeOrderLock"`;
+    // Replaying the stale snapshot must not resurrect locks on a terminal op.
+    expect(await applyLegacyVerdict(db, stale, verifiedVerdict())).toBe("skipped");
+    expect(await lockCount()).toBe(0);
+    expect(await attemptCount()).toBe(0);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
+    ).toBe(1); // only the first application's record
+    const row = await freshOp("v1-done");
+    expect(row.phase).toBe("COMPLETED");
+    expect(row.protocolVersion).toBe(2);
+  });
+
+  it("v1→v2 apply: two concurrent appliers of the same plan — exactly one writes", async () => {
+    const plan = await insertV1Op("v1-race", [oid(1), oid(2)], [
+      { id: oid(2), name: "#2", items: 1 },
+    ]);
+    const [a, b] = await Promise.all([
+      applyLegacyVerdict(db, plan, verifiedVerdict()),
+      applyLegacyVerdict(db2, plan, verifiedVerdict()),
+    ]);
+    expect([a, b].sort()).toEqual(["applied", "skipped"]);
+    expect(await lockCount()).toBe(2);
+    expect((await freshOp("v1-race")).protocolVersion).toBe(2);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM "MergeRecord"`))[0].n,
+    ).toBe(1);
+    expect(await attemptCount()).toBe(0);
+  });
+
   // ── C2: cutover work policy ───────────────────────────────────────────────
 
   const insertWork = async (
@@ -1537,11 +1698,28 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
               (${now}::timestamptz AT TIME ZONE 'UTC'))`;
   };
 
+  const deadlineMs = async (orderId: string) =>
+    Number(
+      (
+        await db.$queryRawUnsafe<{ ms: string }[]>(
+          `SELECT extract(epoch from ("deadlineAt" AT TIME ZONE 'UTC')) AS ms
+           FROM "ProcessedWebhook" WHERE "orderId" = '${orderId}'`,
+        )
+      )[0].ms,
+    ) * 1000;
+
+  const workRow = async (orderId: string) =>
+    (
+      await db.$queryRawUnsafe<any[]>(
+        `SELECT * FROM "ProcessedWebhook" WHERE "orderId" = '${orderId}'`,
+      )
+    )[0];
+
   it("cutover requeue: only since-DONE NULL/LEGACY unblocked items reopen — twice, idempotent", async () => {
-    const since = new Date(Date.now() - 60 * 60_000); // "v2 went live" an hour ago
-    await insertWork(oid(10), "DONE", "LEGACY", -30 * 60_000);      // since → requeue
-    await insertWork(oid(11), "DONE", null, -40 * 60_000);          // since NULL → requeue
-    await insertWork(oid(12), "DONE", "LEGACY", -2 * 60 * 60_000);  // older than since → leave
+    const cutoverAt = new Date(); // "v1 stopped" now; derived since = −24h
+    await insertWork(oid(10), "DONE", "LEGACY", -30 * 60_000);      // in window → requeue
+    await insertWork(oid(11), "DONE", null, -40 * 60_000);          // NULL → requeue
+    await insertWork(oid(12), "DONE", "LEGACY", -26 * 60 * 60_000); // older than the window → needs a disposition
     await insertWork(oid(13), "DONE", "MERGED", -30 * 60_000);      // v2 outcome → leave
     await insertWork(oid(14), "REVIEW", null, -30 * 60_000);        // REVIEW → leave
     await insertWork(oid(15), "DONE", "LEGACY", -30 * 60_000);      // locked → exclude
@@ -1564,48 +1742,46 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
         ("id","shop","primaryOrderId","primaryOrderName","mergedOrderId","mergedOrderName","itemsCombined","createdAt")
       VALUES (${crypto.randomUUID()}, ${SHOP}, ${oid(1)}, '#1', ${oid(16)}, '#16', 1, ${dbWallPlus(-3_000_000)})`;
     // The PENDING backlog that waited while mutations were off gets its
-    // deadline extended — #14 (REVIEW) is the control and stays untouched.
+    // deadline extended only when it is inside an hour of exhausting — #17
+    // (1h past) extends, #18 (+5h) and #14 (REVIEW) stay untouched.
     await insertWork(oid(17), "PENDING", null, -30 * 60_000);
     await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(-3_600_000)} WHERE "orderId" = ${oid(17)}`;
     await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(-3_600_000)} WHERE "orderId" = ${oid(14)}`;
+    await insertWork(oid(18), "PENDING", null, -30 * 60_000);
+    await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(5 * 3_600_000)} WHERE "orderId" = ${oid(18)}`;
 
-    const deadlineMs = async (orderId: string) =>
-      Number(
-        (
-          await db.$queryRawUnsafe<{ ms: string }[]>(
-            `SELECT extract(epoch from ("deadlineAt" AT TIME ZONE 'UTC')) AS ms
-             FROM "ProcessedWebhook" WHERE "orderId" = '${orderId}'`,
-          )
-        )[0].ms,
-      ) * 1000;
     const reviewDeadlineBefore = await deadlineMs(oid(14));
+    const farDeadlineBefore = await deadlineMs(oid(18));
 
-    const dry = await requeueCutoverWork(db, since, { apply: false });
+    const dry = await requeueCutoverWork(db, { cutoverAt, olderLegacy: "exclude", apply: false });
+    expect(dry.maxWindowHours).toBe(24); // no Settings row → fallback window
+    expect(dry.safeSince.getTime()).toBe(cutoverAt.getTime() - 24 * 3_600_000);
+    expect(dry.since).toEqual(dry.safeSince);
     expect(dry.candidates.map((c) => c.orderId).sort()).toEqual(
       [oid(10), oid(11), oid(15), oid(16)].sort(),
     );
     expect(dry.excludedLocked.map((c) => c.orderId)).toEqual([oid(15)]);
     expect(dry.excludedMerged.map((c) => c.orderId)).toEqual([oid(16)]);
     expect(dry.eligible.map((c) => c.orderId).sort()).toEqual([oid(10), oid(11)].sort());
-    expect(dry.maxWindowHours).toBe(24); // no Settings row → fallback window
-    // Only #12 (2h old, before `since`) sits in [since − window, since).
-    expect(dry.legacyInWindowBefore).toBe(1);
+    expect(dry.olderLegacy).toEqual({ count: 1, disposition: "exclude", eligible: 1, affected: 0 });
     expect(dry.requeued).toBe(0); // dry run writes nothing
     expect(dry.pendingExtended).toBe(1); // #17's stale deadline would extend
     expect(
       (await db.$queryRawUnsafe<{ n: number }[]>(
         `SELECT count(*)::int AS n FROM "ProcessedWebhook" WHERE status = 'PENDING'`,
       ))[0].n,
-    ).toBe(1); // #17 only — the dry run requeued nothing
+    ).toBe(2); // #17 + #18 — the dry run requeued nothing
 
-    const live = await requeueCutoverWork(db, since, { apply: true });
+    const live = await requeueCutoverWork(db, { cutoverAt, olderLegacy: "exclude", apply: true });
     expect(live.requeued).toBe(2);
     expect(live.pendingExtended).toBe(1);
-    // #17's deadline is now ~6h out; #14's (REVIEW) was left alone.
+    expect(live.olderLegacy.affected).toBe(1);
+    // #17's deadline is now ~6h out; #14's (REVIEW) and #18's (+5h) were left alone.
     expect(await deadlineMs(oid(17))).toBeGreaterThan(Date.now() + 5 * 3_600_000);
     expect(await deadlineMs(oid(14))).toBe(reviewDeadlineBefore);
+    expect(await deadlineMs(oid(18))).toBe(farDeadlineBefore);
     const rows = await db.$queryRawUnsafe<any[]>(
-      `SELECT "orderId", status, attempts, "lastReason" FROM "ProcessedWebhook"`,
+      `SELECT "orderId", status, outcome, attempts, "lastReason" FROM "ProcessedWebhook"`,
     );
     const byId = new Map(rows.map((r) => [r.orderId, r]));
     for (const id of [oid(10), oid(11)]) {
@@ -1616,8 +1792,228 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     for (const id of [oid(12), oid(13), oid(14), oid(15), oid(16)]) {
       expect(byId.get(id).status).not.toBe("PENDING");
     }
-    // Second application is a no-op — requeued rows no longer match.
-    expect((await requeueCutoverWork(db, since, { apply: true })).requeued).toBe(0);
+    // The older row was excluded, not requeued — stamped, still DONE/LEGACY.
+    expect(byId.get(oid(12)).status).toBe("DONE");
+    expect(byId.get(oid(12)).outcome).toBe("LEGACY");
+    expect(byId.get(oid(12)).lastReason).toBe("CUTOVER_EXCLUDED_BY_OPERATOR");
+
+    // Second application is a no-op — requeued rows no longer match, the
+    // stamped older row no longer counts (no disposition flag needed).
+    const again = await requeueCutoverWork(db, { cutoverAt, apply: true });
+    expect(again.requeued).toBe(0);
+    expect(again.pendingExtended).toBe(0);
+    expect(again.olderLegacy.count).toBe(0);
+  });
+
+  it("cutover window: derived from max mergeWindowHours; a --since inside it throws (N7)", async () => {
+    try {
+      await db.$executeRaw`
+        INSERT INTO "Settings" ("id","shop","mergeWindowHours")
+        VALUES ('w24','w24', 24), ('w72','w72', 72)`;
+      const cutoverAt = new Date();
+      const dry = await requeueCutoverWork(db, { cutoverAt, apply: false });
+      expect(dry.maxWindowHours).toBe(72);
+      expect(dry.safeSince.getTime()).toBe(cutoverAt.getTime() - 72 * 3_600_000);
+      expect(dry.since).toEqual(dry.safeSince);
+
+      // A LEGACY row 2h old sits inside the 72h window: an explicit --since
+      // that would skip it is refused; the derived bound requeues it.
+      await insertWork(oid(30), "DONE", "LEGACY", -2 * 3_600_000);
+      await expect(
+        requeueCutoverWork(db, {
+          cutoverAt,
+          since: new Date(cutoverAt.getTime() - 3_600_000),
+          apply: false,
+        }),
+      ).rejects.toBeInstanceOf(CutoverWindowError);
+      const live = await requeueCutoverWork(db, { cutoverAt, apply: true });
+      expect(live.eligible.map((c) => c.orderId)).toContain(oid(30));
+      expect(live.requeued).toBe(1);
+      expect((await workRow(oid(30))).status).toBe("PENDING");
+    } finally {
+      // Settings is not in the per-test truncate — never let it leak.
+      await db.$executeRawUnsafe(`DELETE FROM "Settings"`);
+    }
+  });
+
+  it("cutover older LEGACY rows need a disposition — requeue / review / exclude, each idempotent (N7)", async () => {
+    const cutoverAt = new Date();
+    const old = -100 * 3_600_000; // far older than any merge window
+    await insertWork(oid(40), "DONE", "LEGACY", old);
+    // No disposition while un-dispositioned rows exist → refuse, dry or live.
+    await expect(
+      requeueCutoverWork(db, { cutoverAt, apply: false }),
+    ).rejects.toBeInstanceOf(CutoverWindowError);
+    await expect(
+      requeueCutoverWork(db, { cutoverAt, apply: true }),
+    ).rejects.toBeInstanceOf(CutoverWindowError);
+
+    // requeue → PENDING like an in-window row.
+    const requeued = await requeueCutoverWork(db, {
+      cutoverAt,
+      olderLegacy: "requeue",
+      apply: true,
+    });
+    expect(requeued.olderLegacy.affected).toBe(1);
+    expect((await workRow(oid(40)))).toMatchObject({
+      status: "PENDING",
+      outcome: null,
+      lastReason: "CUTOVER_REQUEUE",
+    });
+    expect((await requeueCutoverWork(db, { cutoverAt, apply: true })).olderLegacy.count).toBe(0);
+
+    // review → REVIEW with the operator's reason; outcome stays LEGACY.
+    await insertWork(oid(41), "DONE", "LEGACY", old);
+    const reviewed = await requeueCutoverWork(db, {
+      cutoverAt,
+      olderLegacy: "review",
+      apply: true,
+    });
+    expect(reviewed.olderLegacy.affected).toBe(1);
+    expect((await workRow(oid(41)))).toMatchObject({
+      status: "REVIEW",
+      outcome: "LEGACY",
+      lastReason: "CUTOVER_REVIEW",
+      reviewReason: "Unproven pre-cutover work (LEGACY) routed to review by the operator",
+    });
+    expect((await requeueCutoverWork(db, { cutoverAt, apply: true })).olderLegacy.count).toBe(0);
+
+    // exclude → stays DONE/LEGACY but stamped; a rerun does not re-ask.
+    await insertWork(oid(42), "DONE", "LEGACY", old);
+    const excluded = await requeueCutoverWork(db, {
+      cutoverAt,
+      olderLegacy: "exclude",
+      apply: true,
+    });
+    expect(excluded.olderLegacy.affected).toBe(1);
+    expect((await workRow(oid(42)))).toMatchObject({
+      status: "DONE",
+      outcome: "LEGACY",
+      lastReason: "CUTOVER_EXCLUDED_BY_OPERATOR",
+    });
+    const rerun = await requeueCutoverWork(db, { cutoverAt, apply: true });
+    expect(rerun.olderLegacy.count).toBe(0);
+    expect(rerun.olderLegacy.affected).toBe(0);
+  });
+
+  it("cutover: the lock/MergeRecord exclusions apply to older LEGACY rows too (N7)", async () => {
+    const cutoverAt = new Date();
+    const old = -100 * 3_600_000;
+    // Locked by a live op.
+    await insertWork(oid(43), "DONE", "LEGACY", old);
+    await db.$executeRaw`
+      INSERT INTO "MergeOperation"
+        ("id","shop","status","primaryOrderId","primaryOrderName",
+         "primaryLineItemCountBefore","addedLineItemCount","secondaries",
+         "involvedOrderIds","createdAt","updatedAt","protocolVersion","phase",
+         "calculatedOrderId")
+      VALUES ('holder', ${SHOP}, 'NEEDS_REVIEW', ${oid(43)}, '#43',
+              1, 1, '[]'::jsonb, ${[oid(43)]},
+              ${dbWallPlus(-3_000_000)}, ${dbWallPlus(-3_000_000)}, 2, 'READY',
+              'gid://shopify/CalculatedOrder/1')`;
+    await db.$executeRaw`
+      INSERT INTO "MergeOrderLock" ("id","shop","orderId","operationId","createdAt")
+      VALUES (${crypto.randomUUID()}, ${SHOP}, ${oid(43)}, 'holder', ${dbWallPlus(0)})`;
+    // Already merged.
+    await insertWork(oid(44), "DONE", "LEGACY", old);
+    await db.$executeRaw`
+      INSERT INTO "MergeRecord"
+        ("id","shop","primaryOrderId","primaryOrderName","mergedOrderId","mergedOrderName","itemsCombined","createdAt")
+      VALUES (${crypto.randomUUID()}, ${SHOP}, ${oid(1)}, '#1', ${oid(44)}, '#44', 1, ${dbWallPlus(-3_000_000)})`;
+    // Free.
+    await insertWork(oid(45), "DONE", "LEGACY", old);
+
+    const plan = await requeueCutoverWork(db, { cutoverAt, olderLegacy: "requeue", apply: true });
+    expect(plan.olderLegacy).toEqual({ count: 3, disposition: "requeue", eligible: 1, affected: 1 });
+    expect((await workRow(oid(43)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+    expect((await workRow(oid(44)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+    expect((await workRow(oid(45)))).toMatchObject({ status: "PENDING" });
+  });
+
+  it("cutover: --apply refuses while a mutation switch is on, before any write (N7)", async () => {
+    const cutoverAt = new Date();
+    await insertWork(oid(60), "DONE", "LEGACY", -30 * 60_000);
+    await insertWork(oid(61), "PENDING", null, -30 * 60_000);
+    await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(-3_600_000)} WHERE "orderId" = ${oid(61)}`;
+
+    await ops.setControl({ newMergesEnabled: true });
+    await expect(
+      requeueCutoverWork(db, { cutoverAt, apply: true }),
+    ).rejects.toBeInstanceOf(ControlsNotFrozenError);
+    // Nothing was written.
+    expect((await workRow(oid(60)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+    expect(await deadlineMs(oid(61))).toBeLessThan(Date.now());
+    // Dry runs are unaffected by the switches.
+    await expect(requeueCutoverWork(db, { cutoverAt, apply: false })).resolves.toMatchObject({
+      requeued: 0,
+    });
+    await ops.setControl({ newMergesEnabled: false });
+    await ops.setControl({ completionEnabled: true });
+    await expect(
+      requeueCutoverWork(db, { cutoverAt, apply: true }),
+    ).rejects.toBeInstanceOf(ControlsNotFrozenError);
+    await ops.setControl({ completionEnabled: false });
+    expect((await requeueCutoverWork(db, { cutoverAt, apply: true })).requeued).toBe(1);
+  });
+
+  it("cutover deadline rule: only PENDING rows inside an hour of deadline extend; rerun is a no-op (N7)", async () => {
+    const cutoverAt = new Date();
+    await insertWork(oid(70), "PENDING", null, -30 * 60_000);
+    await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(30 * 60_000)} WHERE "orderId" = ${oid(70)}`;
+    await insertWork(oid(71), "PENDING", null, -30 * 60_000);
+    await db.$executeRaw`UPDATE "ProcessedWebhook" SET "deadlineAt" = ${dbWallPlus(5 * 3_600_000)} WHERE "orderId" = ${oid(71)}`;
+
+    const farBefore = await deadlineMs(oid(71));
+    const live = await requeueCutoverWork(db, { cutoverAt, apply: true });
+    expect(live.pendingExtended).toBe(1); // only #70 (+30min)
+    expect(await deadlineMs(oid(70))).toBeGreaterThan(Date.now() + 5 * 3_600_000);
+    expect(await deadlineMs(oid(71))).toBe(farBefore);
+    expect((await requeueCutoverWork(db, { cutoverAt, apply: true })).pendingExtended).toBe(0);
+  });
+
+  it("listBackfillOrderIds: errors, missing payloads and malformed pages throw; clean pages return ids (N7)", async () => {
+    const shopify = new FakeShopify([makeOrder(1)]);
+    const list = () => listBackfillOrderIds(shopify.admin, "2026-10-01T00:00:00Z");
+
+    // Top-level errors → throws.
+    shopify.on("BackfillOrders", () => topLevelError());
+    await expect(list()).rejects.toThrow();
+    // Missing orders payload → throws.
+    shopify.on("BackfillOrders", () => ({ data: {} }));
+    await expect(list()).rejects.toThrow();
+    // hasNextPage with a null cursor → throws.
+    shopify.on("BackfillOrders", () => ({
+      data: { orders: { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } } },
+    }));
+    await expect(list()).rejects.toThrow();
+    // A cursor that does not progress → throws.
+    shopify.on("BackfillOrders", () => ({
+      data: {
+        orders: { nodes: [{ id: oid(1) }], pageInfo: { hasNextPage: true, endCursor: "same" } },
+      },
+    }));
+    await expect(list()).rejects.toThrow();
+    // Two clean pages → both ids.
+    shopify.on("BackfillOrders", (vars: any) =>
+      vars.after == null
+        ? {
+            data: {
+              orders: {
+                nodes: [{ id: oid(1) }],
+                pageInfo: { hasNextPage: true, endCursor: "c1" },
+              },
+            },
+          }
+        : {
+            data: {
+              orders: {
+                nodes: [{ id: oid(2) }],
+                pageInfo: { hasNextPage: false, endCursor: "c2" },
+              },
+            },
+          },
+    );
+    expect(await list()).toEqual([oid(1), oid(2)]);
   });
 
   it("backfillWorkItem: inserts when absent, reopens LEGACY/NULL DONE, leaves v2 and REVIEW rows alone", async () => {
@@ -1647,5 +2043,47 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     // DONE/NULL → reopened.
     await insertWork(oid(24), "DONE", null, -60_000);
     expect(await backfillWorkItem(db, SHOP, oid(24))).toBe(1);
+  });
+
+  it("backfillWorkItem: locked or merged orders are never inserted or reopened (N7)", async () => {
+    // A live op locks oid(25).
+    await db.$executeRaw`
+      INSERT INTO "MergeOperation"
+        ("id","shop","status","primaryOrderId","primaryOrderName",
+         "primaryLineItemCountBefore","addedLineItemCount","secondaries",
+         "involvedOrderIds","createdAt","updatedAt","protocolVersion","phase",
+         "calculatedOrderId")
+      VALUES ('holder', ${SHOP}, 'NEEDS_REVIEW', ${oid(25)}, '#25',
+              1, 1, '[]'::jsonb, ${[oid(25)]},
+              ${dbWallPlus(-3_000_000)}, ${dbWallPlus(-3_000_000)}, 2, 'READY',
+              'gid://shopify/CalculatedOrder/1')`;
+    await db.$executeRaw`
+      INSERT INTO "MergeOrderLock" ("id","shop","orderId","operationId","createdAt")
+      VALUES (${crypto.randomUUID()}, ${SHOP}, ${oid(25)}, 'holder', ${dbWallPlus(0)})`;
+    // No row exists → nothing is inserted for a locked order.
+    expect(await backfillWorkItem(db, SHOP, oid(25))).toBe(0);
+    expect(
+      (await db.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM "ProcessedWebhook" WHERE "orderId" = '${oid(25)}'`,
+      ))[0].n,
+    ).toBe(0);
+    // …and a DONE/LEGACY row for the locked order is NOT reopened.
+    await insertWork(oid(25), "DONE", "LEGACY", -60_000);
+    expect(await backfillWorkItem(db, SHOP, oid(25))).toBe(0);
+    expect((await workRow(oid(25)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+
+    // An already-merged order: same exclusions.
+    await db.$executeRaw`
+      INSERT INTO "MergeRecord"
+        ("id","shop","primaryOrderId","primaryOrderName","mergedOrderId","mergedOrderName","itemsCombined","createdAt")
+      VALUES (${crypto.randomUUID()}, ${SHOP}, ${oid(1)}, '#1', ${oid(26)}, '#26', 1, ${dbWallPlus(-3_000_000)})`;
+    expect(await backfillWorkItem(db, SHOP, oid(26))).toBe(0);
+    await insertWork(oid(26), "DONE", "LEGACY", -60_000);
+    expect(await backfillWorkItem(db, SHOP, oid(26))).toBe(0);
+    expect((await workRow(oid(26)))).toMatchObject({ status: "DONE", outcome: "LEGACY" });
+
+    // A clean order still inserts and re-runs stay put.
+    expect(await backfillWorkItem(db, SHOP, oid(27))).toBe(1);
+    expect(await backfillWorkItem(db, SHOP, oid(27))).toBe(0);
   });
 });
