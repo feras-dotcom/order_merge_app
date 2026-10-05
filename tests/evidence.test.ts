@@ -337,13 +337,20 @@ describe("raw GraphQL evidence response validation", () => {
         ? { data: { order: structuredClone(shopify.order(1)), nodes: [duplicate, duplicate] } }
         : { data: { order: { currencyCode: "USD", lineItems: { nodes: [duplicate, duplicate], pageInfo: { hasNextPage: false } } } } };
     });
-    expect(await verifyTransferEvidence(shopify.admin, op, APP_ID)).toMatchObject({ kind: "ANOMALY" });
+    expect(await verifyTransferEvidence(shopify.admin, op, APP_ID)).toEqual({ kind: "ANOMALY",
+      reason: name === "MergeTransferRecheck"
+        ? `The raw transferred response cardinality does not match ${tokenLine.id}.`
+        : "The evidence line response has missing or duplicate ids." });
+    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
   });
 
   it.each(["NaN", "Infinity", undefined, "10.00x", "9.996"])("invalid scan allocation %s is ANOMALY", async (amount) => {
     const { shopify, tokenLine, op } = await appliedPrimary();
     (tokenLine as any).discountAllocations[0].allocatedAmountSet.shopMoney.amount = amount;
-    expect(await verifyTransferEvidence(shopify.admin, op, APP_ID)).toMatchObject({ kind: "ANOMALY" });
+    expect(await verifyTransferEvidence(shopify.admin, op, APP_ID)).toEqual({ kind: "ANOMALY",
+      reason: `Token line ${tokenLine.id} lacks valid currency-specific full-discount proof.` });
+    expect(shopify.mutationCalls("MergeTransferRecheck")).toBe(0);
+    expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
   });
 });
 
@@ -411,6 +418,9 @@ describe("transferredLinesMismatch (the cancel snapshot's transferred-line proof
   ];
   const check = (transferred: (any | null)[], forSecondaryId = S2) =>
     transferredLinesMismatch(stored, expected as any, transferred, "TESTTEST", forSecondaryId, "USD");
+  const cardinalityFailure = /^The raw transferred response cardinality/;
+  const malformedFailure = /^A required transferred node is malformed, unexpected or duplicated/;
+  const lineMismatch = "Transferred line li-t1 no longer matches the recorded transfer.";
 
   it("intact lines → null", () => {
     expect(check(nodes())).toBeNull();
@@ -430,34 +440,35 @@ describe("transferredLinesMismatch (the cancel snapshot's transferred-line proof
     n.originalUnitPriceSet.shopMoney = { amount: unit, currencyCode };
     n.discountAllocations[0].allocatedAmountSet.shopMoney = { amount: allocated, currencyCode };
     const result = transferredLinesMismatch(stored.slice(0, 1), expected as any, [n], "TESTTEST", S2, currencyCode);
-    expect(result === null).toBe(accepted);
+    if (accepted) expect(result).toBeNull();
+    else expect(result).toBe(lineMismatch);
   });
 
   it.each(["NaN", "Infinity", "-Infinity", "1e1", "0xA", "", " 10.00 ", "10.00x", ".5", "10.", "-10", "1".repeat(129), NaN, Infinity, null, undefined])(
     "invalid allocation %s fails closed", (amount) => {
       const n = node();
       n.discountAllocations[0].allocatedAmountSet.shopMoney.amount = amount;
-      expect(check([n, nodes()[1]])).not.toBeNull();
+      expect(check([n, nodes()[1]])).toBe(lineMismatch);
     },
   );
 
   it.each(["NaN", "Infinity", null, undefined, "invalid", "1e1"])("invalid unit price %s fails closed", (amount) => {
     const n = node();
     n.originalUnitPriceSet.shopMoney.amount = amount;
-    expect(check([n, nodes()[1]])).not.toBeNull();
+    expect(check([n, nodes()[1]])).toBe(lineMismatch);
   });
 
   it.each(["EUR", null, undefined])("allocation currency %s cannot satisfy USD price", (currencyCode) => {
     const n = node();
     n.discountAllocations[0].allocatedAmountSet.shopMoney.currencyCode = currencyCode;
-    expect(check([n, nodes()[1]])).not.toBeNull();
+    expect(check([n, nodes()[1]])).toBe(lineMismatch);
   });
 
   it("uses exact large integers rather than rounding two distinct prices to one Number", () => {
     const n = node();
     n.originalUnitPriceSet.shopMoney.amount = "9007199254740993.00";
     n.discountAllocations[0].allocatedAmountSet.shopMoney.amount = "9007199254740992.00";
-    expect(check([n, nodes()[1]])).not.toBeNull();
+    expect(check([n, nodes()[1]])).toBe(lineMismatch);
   });
 
   it("sums multiple allocations exactly and multiplies the unit price by quantity", () => {
@@ -470,56 +481,57 @@ describe("transferredLinesMismatch (the cancel snapshot's transferred-line proof
 
   it("rejects duplicate raw nodes even if every expected GID has otherwise correct values", () => {
     const good = nodes();
-    expect(check([...good, structuredClone(good[0])])).not.toBeNull();
+    expect(check([...good, structuredClone(good[0])])).toMatch(cardinalityFailure);
   });
 
   it("rejects a duplicate replacing the other expected GID", () => {
-    expect(check([node(), node()])).not.toBeNull();
+    expect(check([node(), node()])).toMatch(malformedFailure);
   });
 
   it.each([null, {}, { __typename: "Product" }, { __typename: "LineItem", id: "" }])("malformed raw node %s fails closed", (bad) => {
-    expect(check([node(), bad])).not.toBeNull();
+    expect(check([node(), bad])).toMatch(malformedFailure);
   });
 
   it.each(["variant", "quantity", "currentQuantity", "unfulfilledQuantity", "originalUnitPriceSet", "discountAllocations"])(
     "missing required transferred field %s fails closed", (field) => {
       const n = node();
       delete n[field];
-      expect(check([n, nodes()[1]])).not.toBeNull();
+      if (field === "originalUnitPriceSet") expect(check([n, nodes()[1]])).toBe(lineMismatch);
+      else expect(check([n, nodes()[1]])).toMatch(malformedFailure);
     },
   );
-  it("a missing node → reason naming the line", () => {
-    expect(check([nodes()[1]])).toContain("li-t1");
+  it("a missing node → raw cardinality failure", () => {
+    expect(check([nodes()[1]])).toMatch(cardinalityFailure);
   });
-  it("a null node → reason naming the line", () => {
-    expect(check([null, nodes()[1]])).toContain("li-t1");
+  it("a null node → malformed response failure", () => {
+    expect(check([null, nodes()[1]])).toMatch(malformedFailure);
   });
   it("a wrong variant → reason", () => {
     expect(
       check([node({ variant: { id: "gid://shopify/ProductVariant/9" } }), nodes()[1]]),
-    ).toContain("li-t1");
+    ).toBe(lineMismatch);
   });
   it("a changed quantity → reason", () => {
-    expect(check([node({ quantity: 3 }), nodes()[1]])).toContain("li-t1");
+    expect(check([node({ quantity: 3 }), nodes()[1]])).toBe(lineMismatch);
   });
   it("currentQuantity below quantity → reason", () => {
-    expect(check([node({ currentQuantity: 0 }), nodes()[1]])).toContain("li-t1");
+    expect(check([node({ currentQuantity: 0 }), nodes()[1]])).toBe(lineMismatch);
   });
   it("the wrong token index → reason", () => {
     const n = node();
     n.discountAllocations[0].discountApplication.description =
       "Merged from #2, already paid · MS-TESTTEST-9";
-    expect(check([n, nodes()[1]])).toContain("li-t1");
+    expect(check([n, nodes()[1]])).toBe(lineMismatch);
   });
   it("a stripped discount → reason", () => {
-    expect(check([node({ discountAllocations: [] }), nodes()[1]])).toContain("li-t1");
+    expect(check([node({ discountAllocations: [] }), nodes()[1]])).toBe(lineMismatch);
   });
   it("an extra non-null node → reason", () => {
-    expect(check([...nodes(), node({ id: "li-extra" })])).not.toBeNull();
+    expect(check([...nodes(), node({ id: "li-extra" })])).toMatch(cardinalityFailure);
   });
   it("an unfulfilled line of THIS secondary → reason; of another → null", () => {
     // Own line partially fulfilled — the merchandise cannot be "put back".
-    expect(check([node({ unfulfilledQuantity: 0 }), nodes()[1]])).toContain("li-t1");
+    expect(check([node({ unfulfilledQuantity: 0 }), nodes()[1]])).toBe("Transferred line li-t1 on the primary is no longer fully unfulfilled.");
     // The OTHER secondary's line may be fulfilled without blocking this one.
     expect(check([nodes()[0], node({ id: "li-t2", quantity: 2, currentQuantity: 2, unfulfilledQuantity: 0,
       discountAllocations: [

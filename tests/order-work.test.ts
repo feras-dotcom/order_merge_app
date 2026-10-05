@@ -34,6 +34,28 @@ function gate() {
 }
 
 describe("order work items (spec §9)", () => {
+  it.each("BGN HRK JEP KID LTL LVL SLL XXX ANG BYR STD VEF".split(" "))("F1: ordinary discovery settles unsupported %s as DONE/INELIGIBLE without mutations", async (currencyCode) => {
+    const h = makeHarness([makeOrder(1, { currencyCode, presentmentCurrencyCode: currencyCode }), makeOrder(2, { currencyCode, presentmentCurrencyCode: currencyCode })]);
+    const original = structuredClone(h.shopify.order(1).lineItems);
+    await h.webhook(id(2));
+    expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "INELIGIBLE", attempts: 1,
+      operationId: null, retryAfter: null, leaseToken: null,
+      lastReason: `Order #2 uses currency ${currencyCode}, whose monetary precision is unsupported.` });
+    for (const request of ["MergeEditBegin", "MergeEditAddVariant", "MergeEditCommit", "MergeCancelSecondary"]) {
+      expect(h.shopify.mutationCalls(request), request).toBe(0);
+    }
+    expect(h.shopify.order(1).lineItems).toEqual(original);
+    expect(h.ops.ops.size).toBe(0);
+    expect(h.ops.locks.size).toBe(0);
+    expect(h.ops.records).toHaveLength(0);
+    expect(h.journal.history).toHaveLength(0);
+    expect(await h.webhook(id(2))).toBeNull();
+    h.advance(INDEX_LAG_GRACE_MS + 1);
+    const reads = h.shopify.calls.length;
+    await h.sweep();
+    expect(h.shopify.calls.length).toBe(reads);
+  });
+
   it("location mismatch retries only inside index grace, then settles NO_PARTNER without accumulating active work", async () => {
     const h = makeHarness([makeOrder(1, { location: LOC_A }), makeOrder(2, { location: LOC_B })]);
     h.shopify.fulfillmentOrdersScope = true;

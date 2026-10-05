@@ -4,7 +4,7 @@
 // MergeShip cannot positively confirm two orders are safe to combine, they are
 // not eligible.
 
-import { parseShopMoney } from "./money";
+import { getCurrencyPrecision, parseShopMoney } from "./money";
 
 /** Tag MergeShip adds to orders whose merge it could not confirm. Shared with
  *  the dashboard, so it lives outside the .server modules. */
@@ -179,6 +179,9 @@ export function orderStateIneligibility(order: OrderState): string | null {
   if (order.closed) return `Order ${order.name} is closed.`;
   if (order.displayFinancialStatus !== "PAID") {
     return `Order ${order.name} is not fully paid (${order.displayFinancialStatus ?? "unknown"}).`;
+  }
+  if (getCurrencyPrecision(order.currencyCode) === null) {
+    return `Order ${order.name} uses currency ${order.currencyCode}, whose monetary precision is unsupported.`;
   }
   // Only a completely untouched order qualifies. PARTIALLY_FULFILLED,
   // IN_PROGRESS (accepted by a fulfillment service), PENDING_FULFILLMENT,

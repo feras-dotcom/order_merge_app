@@ -7,12 +7,16 @@ const currencyPrecisions = new Map<string, number>(
   ] as const).flatMap(([precision, codes]) => codes.split(" ").map((code) => [code, precision] as const)),
 );
 
+export function getCurrencyPrecision(currencyCode: unknown): number | null {
+  return typeof currencyCode === "string" ? currencyPrecisions.get(currencyCode) ?? null : null;
+}
+
 export function parseShopMoney(value: unknown): { currencyCode: string; minorUnits: bigint } | null {
   if (!value || typeof value !== "object") return null;
   const { amount, currencyCode } = value as { amount?: unknown; currencyCode?: unknown };
   if (typeof currencyCode !== "string" || typeof amount !== "string" || amount.length > 128) return null;
-  const precision = currencyPrecisions.get(currencyCode);
-  if (precision === undefined || !/^\d+(?:\.\d+)?$/.test(amount)) return null;
+  const precision = getCurrencyPrecision(currencyCode);
+  if (precision === null || !/^\d+(?:\.\d+)?$/.test(amount)) return null;
   const [whole, fraction = ""] = amount.split(".");
   if (/[1-9]/.test(fraction.slice(precision))) return null;
   return {

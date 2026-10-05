@@ -50,6 +50,16 @@ function setup(orders = [makeOrder(1), makeOrder(2)], overrides: Partial<MergeDe
 }
 type Ctx = ReturnType<typeof setup>;
 
+function committedMoneyResponse(ctx: Ctx, currencyCode: string, unit: string, allocated = unit) {
+  ctx.shopify.on("MergeEditCommit", (variables) => {
+    ctx.shopify.applyCommit(variables.id);
+    const transferred = ctx.shopify.order(1).lineItems.at(-1) as any;
+    transferred.originalUnitPriceSet.shopMoney = { amount: unit, currencyCode };
+    transferred.discountAllocations[0].allocatedAmountSet.shopMoney = { amount: allocated, currencyCode };
+    return { data: { orderEditCommit: { order: { id: id(1) }, userErrors: [] } } };
+  });
+}
+
 /** Lease (if expired) + drive one pass. */
 async function drive(ctx: Ctx, op: OperationRecord | string): Promise<OperationRecord | null> {
   const rec = typeof op === "string" ? await ctx.ops.getOperation(op) : op;
@@ -134,32 +144,103 @@ const opInput = (ctx: Ctx, overrides: Partial<NewOperationV2> = {}): NewOperatio
 
 // ── 1. Late commit applies after client timeout ──────────────────────────────
 
-it.each(["USD", "JOD", "JPY"])("hardening: normal %s transfer completes with exact currency-aware discount proof", async (currencyCode) => {
+it.each("BGN HRK JEP KID LTL LVL SLL XXX ANG BYR STD VEF".split(" "))("F1: unsupported %s is terminal before any order-edit mutation", async (currencyCode) => {
   const ctx = setup([makeOrder(1, { currencyCode, presentmentCurrencyCode: currencyCode }), makeOrder(2, { currencyCode, presentmentCurrencyCode: currencyCode })]);
+  const beforeLines = structuredClone(ctx.shopify.order(1).lineItems);
+  const result = await executeMerge(ctx.shopify.admin, SHOP, IDS, ctx.deps);
+  const final = result.operation ? await driveToIdle(ctx, result.operation) : null;
+  console.log("F1 reproduction", currencyCode, { result: result.code, phase: final?.phase ?? null,
+    begin: ctx.shopify.mutationCalls("MergeEditBegin"), commit: ctx.shopify.mutationCalls("MergeEditCommit"),
+    cancel: ctx.shopify.mutationCalls("MergeCancelSecondary"), locks: ctx.ops.locks.size });
+  expect(result).toMatchObject({ outcome: "skipped", code: "ANCHOR_INELIGIBLE", disposition: "terminal",
+    reason: `Order #2 uses currency ${currencyCode}, whose monetary precision is unsupported.` });
+  expect(result.operation).toBeUndefined();
+  expect(ctx.shopify.mutationCalls("MergeEditBegin")).toBe(0);
+  expect(ctx.shopify.mutationCalls("MergeEditAddVariant")).toBe(0);
+  expect(ctx.shopify.mutationCalls("MergeEditCommit")).toBe(0);
+  expect(ctx.shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+  expect(ctx.shopify.order(1).lineItems).toEqual(beforeLines);
+  expect(ctx.shopify.order(2).cancelledAt).toBeNull();
+  expect(ctx.ops.records).toHaveLength(0);
+  expect(ctx.journal.history).toHaveLength(0);
+  expect(ctx.ops.ops.size).toBe(0);
+  expect(ctx.ops.locks.size).toBe(0);
+  expect(ctx.ops.attempts).toHaveLength(0);
+});
+
+it.each([
+  ["USD", "10.00"],
+  ["JOD", "10.125"],
+  ["JPY", "10"],
+])("hardening: normal %s transfer uses raw %s money strings and completes", async (currencyCode, amount) => {
+  const ctx = setup([makeOrder(1, { currencyCode, presentmentCurrencyCode: currencyCode }), makeOrder(2, { currencyCode, presentmentCurrencyCode: currencyCode })]);
+  committedMoneyResponse(ctx, currencyCode, amount);
   const result = await executeMerge(ctx.shopify.admin, SHOP, IDS, ctx.deps);
   const final = await driveToIdle(ctx, result.operation!);
   expect(final?.phase).toBe("COMPLETED");
+  expect(final?.secondaries[0].cancelPhase).toBe("CANCEL_VERIFIED");
   expect(ctx.ops.records).toHaveLength(1);
   expect(ctx.ops.locks.size).toBe(0);
   expect(ctx.shopify.mutationCalls("MergeEditCommit")).toBe(1);
   expect(ctx.shopify.mutationCalls("MergeCancelSecondary")).toBe(1);
+  const transferred = ctx.shopify.order(1).lineItems.at(-1) as any;
+  expect(transferred.originalUnitPriceSet.shopMoney).toEqual({ amount, currencyCode });
+  expect(transferred.discountAllocations[0].allocatedAmountSet.shopMoney).toEqual({ amount, currencyCode });
+  expect(final?.appliedEvidence).toMatchObject({ lines: [{ lineItemId: transferred.id, secondaryId: id(2), variantId: transferred.variant.id, quantity: 1 }] });
 });
 
 it.each([
-  ["duplicate raw node", (data: any) => data.transferred.push(structuredClone(data.transferred[0]))],
-  ["missing node", (data: any) => data.transferred.pop()],
-  ["null node", (data: any) => { data.transferred[0] = null; }],
-  ["missing price", (data: any) => { delete data.transferred[0].originalUnitPriceSet.shopMoney.amount; }],
-  ["malformed amount", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.amount = "NaN"; }],
-  ["three-decimal near miss", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.amount = "9.996"; }],
-  ["currency mismatch", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.currencyCode = "USD"; }],
-  ["null allocation", (data: any) => { data.transferred[0].discountAllocations.push(null); }],
-] as const)("hardening: final snapshot %s parks review with no cancellation or replacement", async (_name, corrupt) => {
+  ["10.000", true],
+  ["9.999", false],
+  ["9.996", false],
+] as const)("F2: production evidence scan compares JOD 10.000 exactly with allocation %s", async (allocation, accepted) => {
   const ctx = setup([makeOrder(1, { currencyCode: "JOD", presentmentCurrencyCode: "JOD" }), makeOrder(2, { currencyCode: "JOD", presentmentCurrencyCode: "JOD" })]);
+  committedMoneyResponse(ctx, "JOD", "10.000", allocation);
+  const result = await executeMerge(ctx.shopify.admin, SHOP, IDS, ctx.deps);
+  const final = await driveToIdle(ctx, result.operation!);
+  const transferred = ctx.shopify.order(1).lineItems.at(-1) as any;
+  expect(transferred.originalUnitPriceSet.shopMoney).toEqual({ amount: "10.000", currencyCode: "JOD" });
+  expect(transferred.discountAllocations[0].allocatedAmountSet.shopMoney).toEqual({ amount: allocation, currencyCode: "JOD" });
+  expect(ctx.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+  if (accepted) {
+    expect(final?.phase).toBe("COMPLETED");
+    expect(final?.secondaries[0].cancelPhase).toBe("CANCEL_VERIFIED");
+    expect(ctx.shopify.mutationCalls("MergeTransferRecheck")).toBe(1);
+    expect(ctx.shopify.mutationCalls("MergeCancelSnapshot")).toBe(1);
+    expect(ctx.shopify.mutationCalls("MergeCancelSecondary")).toBe(1);
+    expect(ctx.ops.records).toHaveLength(1);
+    expect(ctx.ops.locks.size).toBe(0);
+  } else {
+    expect(final?.phase).toBe("REVIEW_REQUIRED");
+    expect(final?.reviewReason).toBe(`Token line ${transferred.id} lacks valid currency-specific full-discount proof.`);
+    expect(final?.appliedEvidence).toBeNull();
+    expect(ctx.shopify.mutationCalls("MergeTransferRecheck")).toBe(0);
+    expect(ctx.shopify.mutationCalls("MergeCancelSnapshot")).toBe(0);
+    expect(ctx.shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+    expect(await ctx.ops.listAttempts(final!.id, "ORDER_CANCEL")).toHaveLength(0);
+    expect(ctx.ops.records).toHaveLength(0);
+    expect(ctx.ops.locks.size).toBe(2);
+    expect(ctx.shopify.order(2).cancelledAt).toBeNull();
+  }
+});
+
+it.each([
+  ["duplicate raw node", (data: any) => data.transferred.push(structuredClone(data.transferred[0])), /^The raw transferred response cardinality/],
+  ["missing node", (data: any) => data.transferred.pop(), /^The raw transferred response cardinality/],
+  ["null node", (data: any) => { data.transferred[0] = null; }, /^A required transferred node is malformed, unexpected or duplicated/],
+  ["missing price", (data: any) => { delete data.transferred[0].originalUnitPriceSet.shopMoney.amount; }, /^Transferred line .* no longer matches the recorded transfer\.$/],
+  ["malformed amount", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.amount = "NaN"; }, /^Transferred line .* no longer matches the recorded transfer\.$/],
+  ["three-decimal near miss", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.amount = "9.996"; }, /^Transferred line .* no longer matches the recorded transfer\.$/],
+  ["currency mismatch", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.currencyCode = "USD"; }, /^Transferred line .* no longer matches the recorded transfer\.$/],
+  ["null allocation", (data: any) => { data.transferred[0].discountAllocations.push(null); }, /^Transferred line .* no longer matches the recorded transfer\.$/],
+] as const)("hardening: final snapshot %s parks review with no cancellation or replacement", async (_name, corrupt, reasonCategory) => {
+  const ctx = setup([makeOrder(1, { currencyCode: "JOD", presentmentCurrencyCode: "JOD" }), makeOrder(2, { currencyCode: "JOD", presentmentCurrencyCode: "JOD" })]);
+  committedMoneyResponse(ctx, "JOD", "10.000");
   await ctx.ops.setControl({ completionEnabled: false });
   const result = await executeMerge(ctx.shopify.admin, SHOP, IDS, ctx.deps);
   const op = await drive(ctx, result.operation!);
   expect(op?.phase).toBe("APPLIED");
+  const evidenceBefore = structuredClone(op?.appliedEvidence);
   const graphql = ctx.shopify.admin.graphql.bind(ctx.shopify.admin);
   ctx.shopify.admin.graphql = async (query, options) => {
     const response = await graphql(query, options);
@@ -172,6 +253,8 @@ it.each([
   advance(ctx.deps, 60_000);
   const final = await driveToIdle(ctx, op!.id);
   expect(final?.phase).toBe("REVIEW_REQUIRED");
+  expect(final?.reviewReason).toMatch(reasonCategory);
+  expect(final?.appliedEvidence).toEqual(evidenceBefore);
   expect(final?.secondaries[0].cancelPhase).toBe("CANCEL_REVIEW");
   expect(ctx.ops.records).toHaveLength(0);
   expect(ctx.ops.locks.size).toBe(2);
