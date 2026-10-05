@@ -29,6 +29,7 @@ async function startHarness() {
   const shopify = new FakeShopify([makeOrder(1), makeOrder(2), makeOrder(3)]);
   shopify.clock = () => new Date(); // real wall clock — children run on it
   const registered = new Set<string>();
+  const readyWork = new Map<string, { orderId: string; leaseToken: string | null }[]>();
   let expectedWorkers: string[] | null = null;
   let goResolve: (() => void) | null = null;
   const released = () =>
@@ -64,6 +65,8 @@ async function startHarness() {
     if (req.method === "POST" && req.url?.startsWith("/ready")) {
       const worker = new URL(req.url, "http://localhost").searchParams.get("worker");
       if (worker) {
+        readyWork.set(worker, await db.$queryRaw<{ orderId: string; leaseToken: string | null }[]>`
+          SELECT "orderId", "leaseToken" FROM "ProcessedWebhook" WHERE "shop" = ${SHOP}`);
         registered.add(worker);
         maybeRelease();
       }
@@ -116,6 +119,7 @@ async function startHarness() {
     shopify,
     db,
     runChild,
+    readyWork,
     // Release once every named worker has posted /ready — event-driven, no
     // timer. Children arriving later (e.g. a post-completion fourth order)
     // poll /go and pass immediately once the expected set has checked in.
@@ -152,6 +156,19 @@ const lockCount = async (db: PrismaClient) =>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 run("two processes sharing real Postgres", () => {
+  it("leased anchor work exists at readiness, before a sweep-only peer can declare startup quiet", async () => {
+    const h = await startHarness();
+    const a = h.runChild({ ANCHOR_ORDER_ID: id(2), WORKER_NAME: "A" });
+    const b = h.runChild({ SWEEP_ONLY: "true", SWEEP_MAX_MS: "90000", WORKER_NAME: "B" });
+    await h.release(["A", "B"]);
+    const observedAtReadiness = h.readyWork.get("A");
+    const [ra, rb] = await Promise.all([a, b]);
+    await h.close();
+    expect(observedAtReadiness).toContainEqual(expect.objectContaining({ orderId: id(2), leaseToken: expect.any(String) }));
+    expect(ra.code, ra.out).toBe(0);
+    expect(rb.code, rb.out).toBe(0);
+  }, 120_000);
+
   it("A anchors #2, B anchors #3: one op, ≤1 commit, exact line multiset, secondaries cancelled once", async () => {
     const h = await startHarness();
     const duplicates: string[] = [];

@@ -100,8 +100,10 @@ const settings = async () => ({
   onboardingCompletedAt: new Date(),
 });
 
-// Start barrier: register with the harness, then wait for /go — the test
-// releases once every expected worker has checked in, never on a timer.
+// Start barrier: lease anchor work before registering, then wait for /go —
+// the test releases once every expected worker has checked in, never on a timer.
+const token = newLeaseToken();
+const item = SWEEP_ONLY ? null : await work.insertLeased(SHOP, ANCHOR!, token, deps.leaseTtlMs, WORK_DEADLINE_MS);
 for (;;) {
   try {
     await fetch(`${FAKE}/ready?worker=${encodeURIComponent(WORKER_NAME)}`, { method: "POST" });
@@ -121,8 +123,6 @@ for (;;) {
 }
 
 if (!SWEEP_ONLY) {
-  const token = newLeaseToken();
-  const item = await work.insertLeased(SHOP, ANCHOR!, token, deps.leaseTtlMs, WORK_DEADLINE_MS);
   if (item) {
     try {
       await processOrderWork({
