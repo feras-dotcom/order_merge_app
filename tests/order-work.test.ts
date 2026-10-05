@@ -13,6 +13,8 @@ import {
 import {
   makeHarness,
   makeOrder,
+  LOC_A,
+  LOC_B,
   MemoryWorkStore,
   topLevelError,
 } from "./fake-shopify";
@@ -32,6 +34,26 @@ function gate() {
 }
 
 describe("order work items (spec §9)", () => {
+  it("location mismatch retries only inside index grace, then settles NO_PARTNER without accumulating active work", async () => {
+    const h = makeHarness([makeOrder(1, { location: LOC_A }), makeOrder(2, { location: LOC_B })]);
+    h.shopify.fulfillmentOrdersScope = true;
+    h.shopify.locationsScope = true;
+    await h.webhook(id(2));
+    expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "PENDING", attempts: 1, operationId: null });
+    expect(await h.webhook(id(2))).toBeNull();
+    h.advance(INDEX_LAG_GRACE_MS + 1);
+    await h.sweep();
+    expect(await h.work.find(h.SHOP, id(2))).toMatchObject({ status: "DONE", outcome: "NO_PARTNER", attempts: 2, operationId: null });
+    expect((await h.work.find(h.SHOP, id(2)))?.lastReason).toContain("different location");
+    expect(h.shopify.mutationCalls("MergeEditCommit")).toBe(0);
+    expect(h.shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+    const reads = h.shopify.calls.length;
+    h.advance(INDEX_LAG_GRACE_MS);
+    await h.sweep();
+    expect(h.shopify.calls.length).toBe(reads);
+    expect([...h.work.items.values()]).toHaveLength(1);
+  });
+
   it("#1 duplicate webhook delivery: the second insert returns null and nothing is processed twice", async () => {
     const h = makeHarness([makeOrder(1), makeOrder(2)]);
     expect(await h.webhook(id(2))).not.toBeNull();

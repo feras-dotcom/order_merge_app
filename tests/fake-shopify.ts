@@ -553,7 +553,7 @@ export class FakeShopify {
     // documents when evidencePageSize is set (cursors are opaque "cursor-N").
     MergeOrderEvidenceLines: ({ id, after }) => {
       const o = this.orders.get(id);
-      return { data: { order: o && { lineItems: this.evidencePage(o.lineItems, after) } } };
+      return { data: { order: o && { currencyCode: o.currencyCode, lineItems: this.evidencePage(o.lineItems, after) } } };
     },
     MergeOrderEvidenceAgreements: ({ id, after }) => {
       const o = this.orders.get(id);
@@ -650,10 +650,10 @@ export class FakeShopify {
         unfulfilledQuantity: added.quantity,
       });
       // originalUnitPriceSet is the UNIT price; the allocation covers it fully.
-      item.originalUnitPriceSet = { shopMoney: { amount: "10.00" } };
+      item.originalUnitPriceSet = { shopMoney: { amount: "10.00", currencyCode: order.currencyCode } };
       item.discountAllocations = [
         {
-          allocatedAmountSet: { shopMoney: { amount: (10 * added.quantity).toFixed(2) } },
+          allocatedAmountSet: { shopMoney: { amount: (10 * added.quantity).toFixed(2), currencyCode: order.currencyCode } },
           discountApplication: {
             __typename: "ManualDiscountApplication",
             title: added.description,
@@ -715,7 +715,7 @@ export class FakeShopify {
       currentQuantity: quantity,
       unfulfilledQuantity: quantity,
     });
-    item.originalUnitPriceSet = { shopMoney: { amount: "10.00" } };
+    item.originalUnitPriceSet = { shopMoney: { amount: "10.00", currencyCode: o.currencyCode } };
     item.discountAllocations = [];
     o.lineItems.push(item);
     (o.agreements ??= []).push({

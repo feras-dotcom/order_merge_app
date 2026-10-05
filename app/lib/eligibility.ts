@@ -4,6 +4,8 @@
 // MergeShip cannot positively confirm two orders are safe to combine, they are
 // not eligible.
 
+import { parseShopMoney } from "./money";
+
 /** Tag MergeShip adds to orders whose merge it could not confirm. Shared with
  *  the dashboard, so it lives outside the .server modules. */
 export const REVIEW_TAG = "MergeShip-Review";
@@ -117,10 +119,9 @@ export function shippingSignature(line: ShippingLineInfo): string | null {
   const title = norm(line.title);
   if (!title || typeof line.custom !== "boolean") return null;
   if (line.custom) {
-    const money = line.originalPriceSet?.shopMoney;
-    const amount = Number(money?.amount);
-    if (!money?.currencyCode || money.amount == null || !Number.isFinite(amount)) return null;
-    return ["custom", title, `${amount} ${money.currencyCode}`].join(SEP);
+    const money = parseShopMoney(line.originalPriceSet?.shopMoney);
+    if (!money) return null;
+    return ["custom", title, `${money.minorUnits} ${money.currencyCode}`].join(SEP);
   }
   return ["rate", title, norm(line.code), norm(line.source), norm(line.carrierIdentifier)].join(SEP);
 }

@@ -134,6 +134,98 @@ const opInput = (ctx: Ctx, overrides: Partial<NewOperationV2> = {}): NewOperatio
 
 // ── 1. Late commit applies after client timeout ──────────────────────────────
 
+it.each(["USD", "JOD", "JPY"])("hardening: normal %s transfer completes with exact currency-aware discount proof", async (currencyCode) => {
+  const ctx = setup([makeOrder(1, { currencyCode, presentmentCurrencyCode: currencyCode }), makeOrder(2, { currencyCode, presentmentCurrencyCode: currencyCode })]);
+  const result = await executeMerge(ctx.shopify.admin, SHOP, IDS, ctx.deps);
+  const final = await driveToIdle(ctx, result.operation!);
+  expect(final?.phase).toBe("COMPLETED");
+  expect(ctx.ops.records).toHaveLength(1);
+  expect(ctx.ops.locks.size).toBe(0);
+  expect(ctx.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+  expect(ctx.shopify.mutationCalls("MergeCancelSecondary")).toBe(1);
+});
+
+it.each([
+  ["duplicate raw node", (data: any) => data.transferred.push(structuredClone(data.transferred[0]))],
+  ["missing node", (data: any) => data.transferred.pop()],
+  ["null node", (data: any) => { data.transferred[0] = null; }],
+  ["missing price", (data: any) => { delete data.transferred[0].originalUnitPriceSet.shopMoney.amount; }],
+  ["malformed amount", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.amount = "NaN"; }],
+  ["three-decimal near miss", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.amount = "9.996"; }],
+  ["currency mismatch", (data: any) => { data.transferred[0].discountAllocations[0].allocatedAmountSet.shopMoney.currencyCode = "USD"; }],
+  ["null allocation", (data: any) => { data.transferred[0].discountAllocations.push(null); }],
+] as const)("hardening: final snapshot %s parks review with no cancellation or replacement", async (_name, corrupt) => {
+  const ctx = setup([makeOrder(1, { currencyCode: "JOD", presentmentCurrencyCode: "JOD" }), makeOrder(2, { currencyCode: "JOD", presentmentCurrencyCode: "JOD" })]);
+  await ctx.ops.setControl({ completionEnabled: false });
+  const result = await executeMerge(ctx.shopify.admin, SHOP, IDS, ctx.deps);
+  const op = await drive(ctx, result.operation!);
+  expect(op?.phase).toBe("APPLIED");
+  const graphql = ctx.shopify.admin.graphql.bind(ctx.shopify.admin);
+  ctx.shopify.admin.graphql = async (query, options) => {
+    const response = await graphql(query, options);
+    if (!query.includes("query MergeCancelSnapshot")) return response;
+    const body = await response.json();
+    corrupt(body.data);
+    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  };
+  await ctx.ops.setControl({ completionEnabled: true });
+  advance(ctx.deps, 60_000);
+  const final = await driveToIdle(ctx, op!.id);
+  expect(final?.phase).toBe("REVIEW_REQUIRED");
+  expect(final?.secondaries[0].cancelPhase).toBe("CANCEL_REVIEW");
+  expect(ctx.ops.records).toHaveLength(0);
+  expect(ctx.ops.locks.size).toBe(2);
+  expect(ctx.shopify.mutationCalls("MergeCancelSecondary")).toBe(0);
+  expect(ctx.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+  expect(await ctx.ops.listAttempts(op!.id, "ORDER_CANCEL")).toHaveLength(0);
+  expect((await executeMerge(ctx.shopify.admin, SHOP, IDS, ctx.deps)).code).toBe("LOCKED");
+});
+
+it("hardening: partial multi-secondary completion preserves A history and all locks after B refusal", async () => {
+  const ctx = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
+  ctx.shopify.on("MergeCancelSnapshot", (v) => {
+    if (v.secondaryId === id(3)) ctx.shopify.order(3).shippingAddress!.address1 = "Unsafe changed address";
+    return undefined;
+  });
+  const result = await executeMerge(ctx.shopify.admin, SHOP, [id(3), id(2), id(1)], ctx.deps);
+  const final = await driveToIdle(ctx, result.operation!);
+  expect(final?.phase).toBe("REVIEW_REQUIRED");
+  expect(final?.secondaries.map((s) => s.cancelPhase)).toEqual(["CANCEL_VERIFIED", "CANCEL_REVIEW"]);
+  expect(ctx.ops.records).toHaveLength(1);
+  expect(ctx.ops.records[0].mergedOrderId).toBe(id(2));
+  expect(ctx.ops.locks.size).toBe(3);
+  expect(ctx.shopify.order(2).cancelCount).toBe(1);
+  expect(ctx.shopify.order(3).cancelCount).toBe(0);
+  expect(ctx.shopify.order(1).lineItems).toHaveLength(3);
+  await drive(ctx, final!);
+  expect(ctx.ops.records).toHaveLength(1);
+  expect(ctx.shopify.order(2).cancelCount).toBe(1);
+  expect(ctx.shopify.mutationCalls("MergeEditCommit")).toBe(1);
+});
+
+it("hardening: completed primary reuse retains old tokened lines while fourth/fifth use new evidence", async () => {
+  const ctx = setup([makeOrder(1), makeOrder(2), makeOrder(3)]);
+  const first = await executeMerge(ctx.shopify.admin, SHOP, [id(3), id(2), id(1)], ctx.deps);
+  const completed = await driveToIdle(ctx, first.operation!);
+  expect(completed?.phase).toBe("COMPLETED");
+  const oldLines = structuredClone(ctx.shopify.order(1).lineItems);
+  ctx.shopify.orders.set(id(4), makeOrder(4));
+  ctx.shopify.orders.set(id(5), makeOrder(5));
+  const second = await executeMerge(ctx.shopify.admin, SHOP, [id(5), id(4), id(1)], ctx.deps);
+  const final = await driveToIdle(ctx, second.operation!);
+  expect(final?.phase).toBe("COMPLETED");
+  expect(final?.primaryOrderId).toBe(id(1));
+  expect(final?.opToken).not.toBe(completed?.opToken);
+  expect(final?.appliedEvidence).not.toEqual(completed?.appliedEvidence);
+  expect(ctx.shopify.order(1).lineItems.slice(0, 3)).toEqual(oldLines);
+  expect(ctx.shopify.order(1).lineItems).toHaveLength(5);
+  expect(new Set(ctx.shopify.order(1).lineItems.map((l) => l.id)).size).toBe(5);
+  expect(ctx.ops.records).toHaveLength(4);
+  expect(ctx.ops.locks.size).toBe(0);
+  expect(ctx.shopify.mutationCalls("MergeEditCommit")).toBe(2);
+  for (const source of [2, 3, 4, 5]) expect(ctx.shopify.order(source).cancelCount).toBe(1);
+});
+
 it("1. lose-apply-later: ladder checks, delivery at +3m, APPLIED at +5m, one commit ever", async () => {
   const ctx = setup();
   const { shopify, deps, ops, journal } = ctx;

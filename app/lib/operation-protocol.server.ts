@@ -930,6 +930,7 @@ export async function driveOperation(
       snap.transferred,
       current.opToken,
       s.id,
+      snap.primary.currencyCode,
     );
   }
 

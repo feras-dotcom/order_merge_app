@@ -17,6 +17,7 @@ import {
 } from "./graphql.server";
 import { MERGE_LINE_ITEM_FIELDS, ORDER_STATE_FIELDS } from "./merge.server";
 import type { OrderState } from "./eligibility";
+import { isFullyDiscounted } from "./money";
 import type { ExpectedTransferEntry, OperationRecord } from "./operation-store.server";
 
 // The two evidence connections paginate independently — a connection that
@@ -25,15 +26,16 @@ import type { ExpectedTransferEntry, OperationRecord } from "./operation-store.s
 const EVIDENCE_LINES_QUERY = `#graphql
   query MergeOrderEvidenceLines($id: ID!, $after: String) {
     order(id: $id) {
+      currencyCode
       lineItems(first: 100, after: $after) {
         nodes {
           id
           quantity
           currentQuantity
           variant { id }
-          originalUnitPriceSet { shopMoney { amount } }
+          originalUnitPriceSet { shopMoney { amount currencyCode } }
           discountAllocations {
-            allocatedAmountSet { shopMoney { amount } }
+            allocatedAmountSet { shopMoney { amount currencyCode } }
             discountApplication {
               __typename
               ... on ManualDiscountApplication { title description }
@@ -87,9 +89,9 @@ export const TRANSFER_RECHECK_QUERY = `#graphql
         currentQuantity
         unfulfilledQuantity
         variant { id }
-        originalUnitPriceSet { shopMoney { amount } }
+        originalUnitPriceSet { shopMoney { amount currencyCode } }
         discountAllocations {
-          allocatedAmountSet { shopMoney { amount } }
+          allocatedAmountSet { shopMoney { amount currencyCode } }
           discountApplication {
             __typename
             ... on ManualDiscountApplication {
@@ -161,10 +163,32 @@ export type TransferEvidence =
 /** How far back before firstDispatchAt an agreement still counts as ours —
  *  covers clock skew between dispatch record and Shopify's happenedAt. */
 export const AGREEMENT_GRACE_MS = 2 * 60_000;
-/** A token line must be discounted to zero: |allocated - unit*qty| <= this. */
-const FULL_DISCOUNT_TOLERANCE = 0.005;
+/** Validate raw cardinality, required fields and unique expected ids before indexing. */
+function transferredNodeMap(ids: string[], nodes: unknown): Map<string, any> | string {
+  const expected = new Set(ids);
+  if (!ids.length || expected.size !== ids.length || ids.some((id) => typeof id !== "string" || !id)) {
+    return "The recorded transferred ids are missing or duplicated.";
+  }
+  if (!Array.isArray(nodes) || nodes.length !== ids.length) {
+    return `The raw transferred response cardinality does not match ${ids.join(", ")}.`;
+  }
+  const fresh = new Map<string, any>();
+  for (const node of nodes) {
+    if (node?.__typename !== "LineItem" || typeof node.id !== "string" || !expected.has(node.id) || fresh.has(node.id) ||
+      typeof node.variant?.id !== "string" || !node.variant.id ||
+      !Number.isSafeInteger(node.quantity) || node.quantity <= 0 || node.quantity > 2147483647 ||
+      !Number.isSafeInteger(node.currentQuantity) || node.currentQuantity < 0 ||
+      !Number.isSafeInteger(node.unfulfilledQuantity) || node.unfulfilledQuantity < 0 || node.unfulfilledQuantity > node.quantity ||
+      !Array.isArray(node.discountAllocations)) {
+      return `A required transferred node is malformed, unexpected or duplicated (${ids.join(", ")}).`;
+    }
+    fresh.set(node.id, node);
+  }
+  return fresh;
+}
 
 const tokenIndex = (description: string | null | undefined, opToken: string) => {
+  if (typeof description !== "string") return null;
   const match = new RegExp(`(?:^|[^0-9A-Z])MS-${opToken}-(\\d+)(?!\\d)`).exec(
     description ?? "",
   );
@@ -190,6 +214,7 @@ export async function verifyTransferEvidence(
   // agreement set would make "no MergeShip agreement in window" unprovable,
   // and a page that cannot prove its own completeness fails the scan.
   const items = new Map<string, any>();
+  let currencyCode: unknown;
   const agreementsById = new Map<string, any>();
   try {
     const itemsSeen = new Set<string>();
@@ -205,7 +230,14 @@ export async function verifyTransferEvidence(
       if (!order) {
         return { kind: "ANOMALY", reason: "The primary order could not be loaded." };
       }
-      for (const n of order.lineItems?.nodes ?? []) if (n?.id) items.set(n.id, n);
+      currencyCode = order.currencyCode;
+      if (!Array.isArray(order.lineItems?.nodes)) return { kind: "ANOMALY", reason: "The evidence line response is malformed." };
+      for (const n of order.lineItems.nodes) {
+        if (typeof n?.id !== "string" || !n.id || items.has(n.id)) {
+          return { kind: "ANOMALY", reason: "The evidence line response has missing or duplicate ids." };
+        }
+        items.set(n.id, n);
+      }
       after = nextPageCursor(order.lineItems, itemsSeen, "the primary's line items");
     } while (after);
 
@@ -259,12 +291,14 @@ export async function verifyTransferEvidence(
   const tokenLines: { item: any; secondaryIndex: number }[] = [];
   for (const item of items.values()) {
     if (beforeIds.has(item.id)) continue;
-    for (const alloc of item.discountAllocations ?? []) {
-      const app_ = alloc.discountApplication;
+    if (!Array.isArray(item.discountAllocations)) return { kind: "ANOMALY", reason: "The evidence discount response is malformed." };
+    for (const alloc of item.discountAllocations) {
+      const app_ = alloc?.discountApplication;
       if (app_?.__typename !== "ManualDiscountApplication") continue;
       const idx = tokenIndex(app_.description, op.opToken ?? "");
       if (idx !== null) {
-        if (item.currentQuantity != null && item.currentQuantity !== item.quantity) {
+        if (!Number.isSafeInteger(item.quantity) || item.quantity <= 0 ||
+          typeof item.variant?.id !== "string" || !item.variant.id || item.currentQuantity !== item.quantity) {
           return {
             kind: "ANOMALY",
             reason: `Token line ${item.id} was edited after the merge.`,
@@ -309,15 +343,10 @@ export async function verifyTransferEvidence(
 
   // Fully discounted: the token discount must cover the line's full price.
   for (const { item } of tokenLines) {
-    const allocated = (item.discountAllocations ?? []).reduce(
-      (sum: number, a: any) => sum + Number(a.allocatedAmountSet?.shopMoney?.amount ?? 0),
-      0,
-    );
-    const full = Number(item.originalUnitPriceSet?.shopMoney?.amount ?? 0) * item.quantity;
-    if (Math.abs(allocated - full) > FULL_DISCOUNT_TOLERANCE) {
+    if (!isFullyDiscounted(item, currencyCode)) {
       return {
         kind: "ANOMALY",
-        reason: `Token line ${item.id} is not fully discounted (${allocated} of ${full}).`,
+        reason: `Token line ${item.id} lacks valid currency-specific full-discount proof.`,
       };
     }
   }
@@ -392,32 +421,25 @@ async function recheckTransfer(
     { primaryId: op.primaryOrderId, lineIds: tokenLines.map((t) => t.item.id) },
   );
   if (!data?.order) return "The primary order could not be loaded.";
-  const fresh = new Map<string, any>(
-    (data.nodes ?? [])
-      .filter((n) => n?.__typename === "LineItem" && n.id)
-      .map((n) => [n.id as string, n]),
-  );
+  const fresh = transferredNodeMap(tokenLines.map(({ item }) => item.id), data.nodes);
+  if (typeof fresh === "string") return fresh;
   for (const { item, secondaryIndex } of tokenLines) {
     const line = fresh.get(item.id);
     if (!line) return `transferred line ${item.id} no longer exists`;
     let index: number | null = null;
     for (const alloc of line.discountAllocations ?? []) {
-      const app_ = alloc.discountApplication;
+      const app_ = alloc?.discountApplication;
       if (app_?.__typename !== "ManualDiscountApplication") continue;
       index = tokenIndex(app_.description, op.opToken ?? "");
       if (index !== null) break;
     }
-    const allocated = (line.discountAllocations ?? []).reduce(
-      (sum: number, a: any) => sum + Number(a.allocatedAmountSet?.shopMoney?.amount ?? 0),
-      0,
-    );
-    const full = Number(line.originalUnitPriceSet?.shopMoney?.amount ?? 0) * (line.quantity ?? 0);
+
     if (
       (line.variant?.id ?? null) !== (item.variant?.id ?? null) ||
       line.quantity !== item.quantity ||
       line.currentQuantity !== line.quantity ||
       index !== secondaryIndex ||
-      Math.abs(allocated - full) > FULL_DISCOUNT_TOLERANCE
+      !isFullyDiscounted(line, data.order.currencyCode)
     ) {
       return `Transferred line ${item.id} changed while evidence was being verified.`;
     }
@@ -468,9 +490,9 @@ export const CANCEL_SNAPSHOT_QUERY = `#graphql
         currentQuantity
         unfulfilledQuantity
         variant { id }
-        originalUnitPriceSet { shopMoney { amount } }
+        originalUnitPriceSet { shopMoney { amount currencyCode } }
         discountAllocations {
-          allocatedAmountSet { shopMoney { amount } }
+          allocatedAmountSet { shopMoney { amount currencyCode } }
           discountApplication {
             __typename
             ... on ManualDiscountApplication {
@@ -515,8 +537,8 @@ export async function fetchCancelSnapshot(
  *  that id; variant.id === stored.variantId; quantity === stored.quantity;
  *  currentQuantity === quantity; a ManualDiscountApplication description
  *  carrying MS-<opToken>-<secondaryIndex of the entry owning
- *  stored.secondaryId>; |allocated − originalUnit×quantity| ≤
- *  FULL_DISCOUNT_TOLERANCE; and the number of non-null LineItem nodes equals
+ *  stored.secondaryId>; allocated equals originalUnit×quantity in the
+ *  currency's exact minor units; and the raw unique LineItem node count equals
  *  stored.length. For lines whose secondaryId === forSecondaryId,
  *  additionally unfulfilledQuantity === quantity. A reason string or null. */
 export function transferredLinesMismatch(
@@ -525,37 +547,31 @@ export function transferredLinesMismatch(
   transferred: (any | null)[],
   opToken: string | null,
   forSecondaryId: string,
+  currencyCode: string,
 ): string | null {
   if (opToken == null) {
     return "The operation has no token; the transferred lines cannot be verified.";
   }
   const indexOf = new Map(expected.map((e) => [e.secondaryId, e.secondaryIndex]));
-  const fresh = new Map<string, any>(
-    (transferred ?? [])
-      .filter((n) => n?.__typename === "LineItem" && n.id)
-      .map((n) => [n.id as string, n]),
-  );
+  const fresh = transferredNodeMap(stored.map((line) => line.lineItemId), transferred);
+  if (typeof fresh === "string") return fresh;
   for (const l of stored) {
     const line = fresh.get(l.lineItemId);
     if (!line) return `Transferred line ${l.lineItemId} no longer exists on the primary.`;
     let index: number | null = null;
     for (const alloc of line.discountAllocations ?? []) {
-      const app_ = alloc.discountApplication;
+      const app_ = alloc?.discountApplication;
       if (app_?.__typename !== "ManualDiscountApplication") continue;
       index = tokenIndex(app_.description, opToken);
       if (index !== null) break;
     }
-    const allocated = (line.discountAllocations ?? []).reduce(
-      (sum: number, a: any) => sum + Number(a.allocatedAmountSet?.shopMoney?.amount ?? 0),
-      0,
-    );
-    const full = Number(line.originalUnitPriceSet?.shopMoney?.amount ?? 0) * (line.quantity ?? 0);
+
     if (
       (line.variant?.id ?? null) !== l.variantId ||
       line.quantity !== l.quantity ||
       line.currentQuantity !== line.quantity ||
       index !== indexOf.get(l.secondaryId) ||
-      Math.abs(allocated - full) > FULL_DISCOUNT_TOLERANCE
+      !isFullyDiscounted(line, currencyCode)
     ) {
       return `Transferred line ${l.lineItemId} no longer matches the recorded transfer.`;
     }
