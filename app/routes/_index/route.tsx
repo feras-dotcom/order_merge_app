@@ -3,6 +3,7 @@ import { redirect } from "@remix-run/node";
 import { Form, useLoaderData } from "@remix-run/react";
 
 import { login } from "../../shopify.server";
+import { MergeShipLogo } from "../../components/MergeShipLogo";
 
 import styles from "./styles.module.css";
 
@@ -22,6 +23,7 @@ export default function App() {
   return (
     <div className={styles.index}>
       <div className={styles.content}>
+        <MergeShipLogo size={96} centered />
         <h1 className={styles.heading}>Repeat orders shouldn&apos;t mean more manual work.</h1>
         <p className={styles.text}>
           MergeShip automatically catches eligible repeat orders and combines

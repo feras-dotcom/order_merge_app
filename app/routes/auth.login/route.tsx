@@ -14,6 +14,7 @@ import polarisTranslations from "@shopify/polaris/locales/en.json";
 import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
 
 import { login } from "../../shopify.server";
+import { MergeShipLogo } from "../../components/MergeShipLogo";
 
 import { loginErrorMessage } from "./error.server";
 
@@ -43,6 +44,9 @@ export default function Auth() {
     <PolarisAppProvider i18n={loaderData.polarisTranslations}>
       <Page>
         <Card>
+          <div style={{ marginBottom: 16 }}>
+            <MergeShipLogo size={48} />
+          </div>
           <Form method="post">
             <FormLayout>
               <Text variant="headingMd" as="h2">

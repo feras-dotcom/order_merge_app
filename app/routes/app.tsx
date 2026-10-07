@@ -16,6 +16,7 @@ import { getActiveSubscription, planSelectionUrl } from "../lib/billing.server";
 import db from "../db.server";
 import { getSettings } from "../lib/settings.server";
 import { isOnboardingComplete } from "../lib/onboarding";
+import { MergeShipLogo } from "../components/MergeShipLogo";
 
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
@@ -71,6 +72,9 @@ export default function App() {
 
   return (
     <AppProvider isEmbeddedApp apiKey={apiKey}>
+      <div style={{ maxWidth: 998, margin: "0 auto", padding: "16px 24px 0" }}>
+        <MergeShipLogo />
+      </div>
       {/* Navigation appears once setup is complete, so setup has one path. */}
       {setupComplete && (
         <NavMenu>
