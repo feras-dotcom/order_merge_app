@@ -11,7 +11,11 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
 
     location = / {
-        try_files /index.html =404;
+        return 308 https://apps.shopify.com/mergeship$is_args$args;
+    }
+
+    location = /index.html {
+        return 308 https://apps.shopify.com/mergeship$is_args$args;
     }
 
     location = /privacy {
