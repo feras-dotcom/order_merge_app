@@ -7,10 +7,6 @@ server {
         return 200 "ok";
     }
 
-    location = / {
-        return 308 https://apps.shopify.com/mergeship$is_args$args;
-    }
-
     location / {
         return 308 https://mergeship.app$request_uri;
     }

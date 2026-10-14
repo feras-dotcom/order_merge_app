@@ -4,9 +4,7 @@ dockerfilePath = "website-static/Dockerfile"
 watchPatterns = [
   "website-static/**",
   "app/routes/_index/styles.module.css",
-  "public/brand/**",
-  "public/favicon.ico",
-  "public/apple-touch-icon.png"
+  "public/brand/**"
 ]
 
 [deploy]

@@ -10,13 +10,7 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
 
-    location = / {
-        return 308 https://apps.shopify.com/mergeship$is_args$args;
-    }
-
-    location = /index.html {
-        return 308 https://apps.shopify.com/mergeship$is_args$args;
-    }
+    error_page 404 /404.html;
 
     location = /privacy {
         try_files /privacy/index.html =404;
@@ -26,7 +20,7 @@ server {
         try_files $uri $uri/ =404;
     }
 
-    location ~* \.(?:css|ico|png)$ {
+    location ~* \.(?:css|js|ico|png|jpg|jpeg|webp|svg)$ {
         expires 7d;
         add_header Cache-Control "public, max-age=604800, immutable";
         try_files $uri =404;

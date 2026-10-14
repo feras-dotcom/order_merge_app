@@ -1,129 +1,528 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>MergeShip | Automatically combine repeat Shopify orders</title>
-    <meta name="description" content="MergeShip automatically finds eligible repeat Shopify orders and combines them before fulfillment.">
-    <meta name="theme-color" content="#070b14">
-    <meta property="og:title" content="MergeShip | Automatically combine repeat Shopify orders">
-    <meta property="og:description" content="MergeShip automatically finds eligible repeat Shopify orders and combines them before fulfillment.">
-    <meta property="og:type" content="website">
-    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-    <link rel="preconnect" href="https://cdn.shopify.com">
-    <link rel="stylesheet" href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css">
-    <link rel="preload" as="image" href="/brand/mergeship-mark-480.png" imagesrcset="/brand/mergeship-mark-480.png 480w, /brand/mergeship-mark.png 808w" imagesizes="200px">
-    <link rel="stylesheet" href="/site.css">
+    <meta
+      name="description"
+      content="MergeShip automatically combines eligible repeat Shopify orders before fulfillment. Try it free for 30 days, then $19/month."
+    />
+    <meta name="theme-color" content="#f5f7fb" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+    <link rel="canonical" href="https://mergeship.app/" />
+    <meta
+      property="og:title"
+      content="MergeShip | Automatically combine repeat Shopify orders"
+    />
+    <meta
+      property="og:description"
+      content="Turn eligible repeat orders from the same customer into one fulfillment job."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://mergeship.app/" />
+    <meta
+      property="og:image"
+      content="https://mergeship.app/assets/media/combined-order-1440.jpg"
+    />
+    <meta property="og:image:width" content="1440" />
+    <meta property="og:image:height" content="810" />
+    <meta
+      property="og:image:alt"
+      content="MergeShip combines eligible repeat orders before fulfillment"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="MergeShip | Automatically combine repeat Shopify orders"
+    />
+    <meta
+      name="twitter:description"
+      content="Turn eligible repeat orders from the same customer into one fulfillment job."
+    />
+    <meta
+      name="twitter:image"
+      content="https://mergeship.app/assets/media/combined-order-1440.jpg"
+    />
+    <link rel="icon" href="/brand/logo-64.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/brand/logo-180.png" />
+    <link rel="preconnect" href="https://cdn.shopify.com" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css"
+    />
+    <link rel="preload" as="image" href="/brand/logo-64.png" />
+    <link
+      rel="preload"
+      as="image"
+      href="/assets/media/combined-order-960.jpg"
+      imagesrcset="/assets/media/combined-order-960.jpg 960w, /assets/media/combined-order-1440.jpg 1440w"
+      imagesizes="(max-width: 1040px) calc(100vw - 40px), 960px"
+    />
+    <link rel="stylesheet" href="/site.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "MergeShip",
+        "url": "https://mergeship.app/",
+        "applicationCategory": "BusinessApplication",
+        "operatingSystem": "Web",
+        "description": "MergeShip automatically combines eligible repeat Shopify orders before fulfillment.",
+        "offers": {
+          "@type": "Offer",
+          "price": "19.00",
+          "priceCurrency": "USD",
+          "description": "30 day free trial, then $19 per month"
+        }
+      }
+    </script>
   </head>
   <body>
-    <div class="page">
-      <header class="header">
-        <div class="wrap headerInner">
-          <a class="brand" href="/">
-            <img src="/brand/mergeship-mark-96.png" alt="" width="142" height="96">
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" data-header>
+      <div class="shell header-row">
+        <a class="brand" href="/" aria-label="MergeShip home">
+          <img src="/brand/logo-64.png" alt="" width="64" height="64" />
+          <span>MergeShip</span>
+        </a>
+
+        <nav class="primary-nav" aria-label="Primary navigation">
+          <a href="#how-it-works">How it works</a>
+          <a href="#use-cases">Use cases</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#faq">FAQ</a>
+          <a href="/demo">Demo</a>
+        </nav>
+
+        <a
+          class="button button-small"
+          href="https://apps.shopify.com/mergeship"
+          data-analytics-event="shopify_cta"
+          data-analytics-location="header"
+        >
+          Try free for 30 days
+        </a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <div class="shell hero-content">
+          <div class="hero-copy" data-reveal>
+            <p class="eyebrow">Automatic order combining for Shopify</p>
+            <h1>Stop shipping the same customer twice.</h1>
+            <p class="hero-lead">
+              MergeShip automatically combines eligible repeat Shopify orders
+              before fulfillment, so repeat checkouts don't create repeat
+              fulfillment work.
+            </p>
+
+            <div class="hero-action">
+              <a
+                class="button button-hero"
+                href="https://apps.shopify.com/mergeship"
+                data-analytics-event="shopify_cta"
+                data-analytics-location="hero"
+              >
+                Try free for 30 days
+                <span aria-hidden="true">↗</span>
+              </a>
+              <p>Install through Shopify. $19/month after trial.</p>
+            </div>
+          </div>
+
+          <div class="hero-media" data-reveal>
+            <div
+              class="video-frame video-frame-hero"
+              id="hero-trailer"
+              data-video-facade
+            >
+              <img
+                src="/assets/media/combined-order-960.jpg"
+                srcset="
+                  /assets/media/combined-order-960.jpg   960w,
+                  /assets/media/combined-order-1440.jpg 1440w
+                "
+                sizes="(max-width: 1040px) calc(100vw - 40px), 960px"
+                alt="MergeShip combining repeat-order items into one order before fulfillment"
+                width="960"
+                height="540"
+                decoding="async"
+                fetchpriority="high"
+              />
+              <div class="video-shade"></div>
+              <button
+                class="video-play"
+                type="button"
+                aria-label="Watch the 24 second MergeShip product trailer"
+                data-video-id="vRSQ-8cZmcg"
+                data-video-title="MergeShip 24 second product trailer"
+              >
+                <span aria-hidden="true">▶</span>
+                <strong>Watch the 24 second trailer</strong>
+              </button>
+              <span class="video-duration">0:24</span>
+            </div>
+            <a class="hero-demo-link" href="/demo">
+              Prefer the full walkthrough? Watch the 4 minute demo
+              <span aria-hidden="true">→</span>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <aside class="offer-strip" aria-label="MergeShip plan facts">
+        <div class="shell">
+          <ul>
+            <li><strong>30 days</strong><span>Free trial</span></li>
+            <li><strong>$19/mo</strong><span>After trial</span></li>
+            <li><strong>Unlimited</strong><span>Automatic combines</span></li>
+            <li><strong>$0</strong><span>Per combine</span></li>
+          </ul>
+        </div>
+      </aside>
+
+      <section
+        class="use-cases section-pad"
+        id="use-cases"
+        aria-labelledby="use-cases-title"
+      >
+        <div class="shell compact-split">
+          <div class="section-heading" data-reveal>
+            <p class="eyebrow">Where repeat orders happen</p>
+            <h2 id="use-cases-title">
+              Built for the moments customers order twice.
+            </h2>
+            <p>
+              When excitement brings a shopper back to checkout, MergeShip helps
+              keep fulfillment simple.
+            </p>
+          </div>
+
+          <ul class="use-case-list" data-reveal>
+            <li>Product drops</li>
+            <li>Preorders</li>
+            <li>Live sales</li>
+            <li>Limited releases</li>
+            <li>Launches</li>
+            <li>Restocks</li>
+          </ul>
+        </div>
+      </section>
+
+      <section
+        class="how-it-works section-pad"
+        id="how-it-works"
+        aria-labelledby="how-title"
+      >
+        <div class="shell">
+          <div class="section-heading centered" data-reveal>
+            <p class="eyebrow">How it works</p>
+            <h2 id="how-title">
+              Repeat orders are checked before anything changes.
+            </h2>
+            <p>
+              Eligible orders are combined. Anything MergeShip cannot verify
+              stays unchanged.
+            </p>
+          </div>
+
+          <div class="workflow-surface" data-reveal>
+            <ol class="workflow-main">
+              <li class="workflow-stage workflow-detect">
+                <div class="workflow-title">
+                  <span>01</span>
+                  <h3>Detect</h3>
+                </div>
+                <picture class="workflow-art">
+                  <source
+                    srcset="
+                      /assets/media/image1-720.png  720w,
+                      /assets/media/image1.png     1448w
+                    "
+                    sizes="(max-width: 960px) calc(100vw - 112px), 340px"
+                  />
+                  <img
+                    src="/assets/media/image1-720.png"
+                    alt="Two repeat Shopify orders from the same customer"
+                    width="1448"
+                    height="1086"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
+                <p>Find repeat orders from the same customer.</p>
+              </li>
+
+              <li class="workflow-stage workflow-check">
+                <div class="workflow-title">
+                  <span>02</span>
+                  <h3>Check</h3>
+                </div>
+                <picture class="workflow-art">
+                  <source
+                    srcset="
+                      /assets/media/image2-720.png  720w,
+                      /assets/media/image2.png     1448w
+                    "
+                    sizes="(max-width: 960px) calc(100vw - 112px), 340px"
+                  />
+                  <img
+                    src="/assets/media/image2-720.png"
+                    alt="MergeShip checking customer, shipping, and order eligibility"
+                    width="1448"
+                    height="1086"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
+                <p>Verify eligibility before either order is changed.</p>
+              </li>
+
+              <li class="workflow-stage workflow-combined">
+                <div class="workflow-title">
+                  <span>03</span>
+                  <h3>Combined</h3>
+                  <strong>Checks pass</strong>
+                </div>
+                <picture class="workflow-art">
+                  <source
+                    srcset="
+                      /assets/media/image3-720.png  720w,
+                      /assets/media/image3.png     1448w
+                    "
+                    sizes="(max-width: 960px) calc(100vw - 112px), 360px"
+                  />
+                  <img
+                    src="/assets/media/image3-720.png"
+                    alt="Two Shopify orders combined into one primary fulfillment order"
+                    width="1448"
+                    height="1086"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
+                <p>Move the items into one primary order ready to fulfill.</p>
+              </li>
+            </ol>
+
+            <aside class="workflow-safety" aria-labelledby="safety-title">
+              <div class="workflow-safety-copy">
+                <span>If a check does not pass</span>
+                <h3 id="safety-title">Left untouched</h3>
+                <p>
+                  If MergeShip cannot verify the pair, both orders stay
+                  unchanged.
+                </p>
+              </div>
+              <picture class="workflow-safety-art">
+                <source
+                  srcset="
+                    /assets/media/image5-720.png   720w,
+                    /assets/media/image5-1200.png 1200w,
+                    /assets/media/image5.png      1672w
+                  "
+                  sizes="(max-width: 680px) calc(100vw - 112px), (max-width: 960px) calc(100vw - 160px), 430px"
+                />
+                <img
+                  src="/assets/media/image5-720.png"
+                  alt="Orders that fail a safety check remain separate and unchanged"
+                  width="1672"
+                  height="941"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </picture>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="pricing section-pad"
+        id="pricing"
+        aria-labelledby="pricing-title"
+      >
+        <div class="shell pricing-panel" data-reveal>
+          <div class="section-heading">
+            <p class="eyebrow">Simple pricing</p>
+            <h2 class="pricing-price" id="pricing-title">$19/month</h2>
+            <p class="pricing-trial">30 day free trial</p>
+            <p>No usage tiers and no fees per combine.</p>
+          </div>
+
+          <ul class="pricing-features">
+            <li>
+              <span aria-hidden="true">✓</span>Unlimited automatic combines
+            </li>
+            <li><span aria-hidden="true">✓</span>No fees per combine</li>
+            <li>
+              <span aria-hidden="true">✓</span>Safety checks before every
+              combine
+            </li>
+            <li><span aria-hidden="true">✓</span>Flexible combine windows</li>
+            <li><span aria-hidden="true">✓</span>Combine history</li>
+          </ul>
+
+          <div class="pricing-action">
+            <a
+              class="button button-large"
+              href="https://apps.shopify.com/mergeship"
+              data-analytics-event="shopify_cta"
+              data-analytics-location="pricing"
+            >
+              Try free for 30 days
+              <span aria-hidden="true">↗</span>
+            </a>
+            <p>Install through Shopify. $19/month after trial.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="faq section-pad" id="faq" aria-labelledby="faq-title">
+        <div class="shell">
+          <div class="section-heading faq-heading" data-reveal>
+            <p class="eyebrow">Frequently asked questions</p>
+            <h2 id="faq-title">Questions before you install?</h2>
+            <p>
+              Clear answers about what MergeShip changes and what it leaves
+              alone.
+            </p>
+          </div>
+
+          <div class="faq-list" data-reveal>
+            <details>
+              <summary>
+                What orders can MergeShip combine?<span aria-hidden="true"
+                  >+</span
+                >
+              </summary>
+              <p>
+                MergeShip looks for paid, open, unfulfilled repeat orders from
+                the same customer within the combine window. The customer,
+                shipping address and method, currencies, and transferable item
+                checks must pass. If a required check does not pass, the orders
+                remain unchanged.
+              </p>
+            </details>
+            <details>
+              <summary>
+                What happens to the second order?<span aria-hidden="true"
+                  >+</span
+                >
+              </summary>
+              <p>
+                Its items are added to the oldest eligible order. When the
+                combine completes, the extra order is cancelled and closed so
+                the primary order is the one left to fulfill.
+              </p>
+            </details>
+            <details>
+              <summary>
+                Does MergeShip automatically refund duplicate shipping
+                charges?<span aria-hidden="true">+</span>
+              </summary>
+              <p>
+                No. MergeShip does not automatically issue a refund when it
+                cancels the extra order, including a refund for duplicate
+                shipping charges. Any customer refund should be handled
+                separately by the merchant.
+              </p>
+            </details>
+            <details>
+              <summary>
+                What happens when MergeShip can't verify that a combine is
+                safe?<span aria-hidden="true">+</span>
+              </summary>
+              <p>
+                Nothing changes. MergeShip leaves the orders alone for the
+                merchant to review or fulfill separately.
+              </p>
+            </details>
+            <details>
+              <summary>
+                Can merchants control when automatic combining is enabled?<span
+                  aria-hidden="true"
+                  >+</span
+                >
+              </summary>
+              <p>
+                Yes. Automatic combining can be turned on or off, and merchants
+                can set the combine window that fits their workflow.
+              </p>
+            </details>
+            <details>
+              <summary>
+                Is MergeShip useful for product drops and preorders?<span
+                  aria-hidden="true"
+                  >+</span
+                >
+              </summary>
+              <p>
+                Yes. These concentrated buying windows often lead the same
+                customer to place more than one order before fulfillment, which
+                is exactly the repeat order pattern MergeShip is built to check.
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta">
+        <div class="shell final-cta-card" data-reveal>
+          <div>
+            <p class="eyebrow">Simpler fulfillment starts here</p>
+            <h2>One customer. One shipment. Less work.</h2>
+          </div>
+          <div class="final-action">
+            <a
+              class="button button-light button-large"
+              href="https://apps.shopify.com/mergeship"
+              data-analytics-event="shopify_cta"
+              data-analytics-location="final"
+            >
+              Try free for 30 days
+              <span aria-hidden="true">↗</span>
+            </a>
+            <p>Install through Shopify. $19/month after trial.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-row">
+        <div>
+          <a class="brand" href="/" aria-label="MergeShip home">
+            <img
+              src="/brand/logo-64.png"
+              alt=""
+              width="64"
+              height="64"
+              loading="lazy"
+            />
             <span>MergeShip</span>
           </a>
-          <a class="navLink" href="mailto:support@mergeship.app">Contact us</a>
+          <p>Automatic order combining for Shopify merchants.</p>
         </div>
-      </header>
-
-      <main>
-        <section class="wrap split hero">
-          <div class="heroCopy">
-            <p class="eyebrow">Built for Shopify merchants</p>
-            <h1>Stop shipping the same customer twice.</h1>
-            <p class="lead">MergeShip automatically finds eligible repeat Shopify orders and combines them before fulfillment.</p>
-            <div class="actions">
-              <a class="button" href="https://apps.shopify.com/mergeship">Try It Now! <span aria-hidden="true">→</span></a>
-            </div>
-          </div>
-
-          <figure class="flow" aria-label="Two eligible orders from the same customer are combined into one shipment">
-            <p class="flowLabel">Before fulfillment</p>
-            <div class="flowBody">
-              <div class="orders">
-                <div class="order violet">
-                  <div class="orderTop"><strong>Order #1842</strong><span>Paid</span></div>
-                  <span class="orderMeta">Sam Carter</span>
-                  <span class="orderMeta">Standard shipping</span>
-                </div>
-                <div class="order blue">
-                  <div class="orderTop"><strong>Order #1847</strong><span>Paid</span></div>
-                  <span class="orderMeta">Sam Carter</span>
-                  <span class="orderMeta">Standard shipping</span>
-                </div>
-              </div>
-
-              <svg class="connector connectorH" viewBox="0 0 56 176" preserveAspectRatio="none" aria-hidden="true">
-                <defs><linearGradient id="flowH" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7a52f0"></stop><stop offset="1" stop-color="#2a9df4"></stop></linearGradient></defs>
-                <path d="M0 40 C28 40 28 88 56 88 M0 136 C28 136 28 88 56 88" fill="none" stroke="url(#flowH)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path>
-              </svg>
-              <svg class="connector connectorV" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
-                <defs><linearGradient id="flowV" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7a52f0"></stop><stop offset="1" stop-color="#2a9df4"></stop></linearGradient></defs>
-                <path d="M25 0 C25 20 50 20 50 40 M75 0 C75 20 50 20 50 40" fill="none" stroke="url(#flowV)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path>
-              </svg>
-
-              <div class="result">
-                <img class="mark" src="/brand/mergeship-mark-480.png" srcset="/brand/mergeship-mark-480.png 480w, /brand/mergeship-mark.png 808w" sizes="200px" width="808" height="545" alt="">
-                <strong>One shipment</strong>
-                <span>#1842 + #1847</span>
-              </div>
-            </div>
-          </figure>
-        </section>
-
-        <section class="section">
-          <div class="wrap split">
-            <div class="intro">
-              <p class="eyebrow">Made for repeat-order moments</p>
-              <h2>Built for stores where customers order more than once</h2>
-              <p class="body">Product drops, preorders, live sales and limited releases can lead the same customer to check out multiple times before anything ships. MergeShip helps reduce the manual work of finding and combining those orders.</p>
-            </div>
-            <ul class="useCases">
-              <li><h3>Product drops</h3><p>Customers come back for another item minutes later.</p></li>
-              <li><h3>Preorders</h3><p>Separate orders placed long before anything ships.</p></li>
-              <li><h3>Live sales</h3><p>Repeat checkouts during a single stream.</p></li>
-              <li><h3>Limited releases</h3><p>Quick second purchases in a short window.</p></li>
-            </ul>
-          </div>
-        </section>
-
-        <section class="section">
-          <div class="wrap split">
-            <div class="intro">
-              <p class="eyebrow">How it works</p>
-              <h2>Three steps, before fulfillment.</h2>
-            </div>
-            <ol class="steps">
-              <li class="step"><span class="stepNode">1</span><div><h3>Detect</h3><p>MergeShip looks for eligible orders from the same customer.</p></div></li>
-              <li class="step"><span class="stepNode">2</span><div><h3>Check</h3><p>Only orders that meet your merge rules are selected.</p></div></li>
-              <li class="step"><span class="stepNode">3</span><div><h3>Combine</h3><p>Eligible orders are combined before fulfillment.</p></div></li>
-            </ol>
-          </div>
-        </section>
-
-        <section class="wrap">
-          <div class="cta">
-            <div>
-              <h2>Spend less time finding repeat orders.</h2>
-              <p>Questions? Email <a href="mailto:support@mergeship.app">support@mergeship.app</a></p>
-            </div>
-            <a class="button" href="mailto:support@mergeship.app">Contact us <span aria-hidden="true">→</span></a>
-          </div>
-        </section>
-      </main>
-
-      <footer class="wrap footer">
-        <div class="footerBrand">
-          <img src="/brand/mergeship-mark-96.png" alt="" width="142" height="96">
-          <span>MergeShip</span>
-        </div>
-        <nav class="footerLinks" aria-label="Footer">
-          <a href="mailto:support@mergeship.app">support@mergeship.app</a>
+        <nav class="footer-nav" aria-label="Footer navigation">
+          <a href="#how-it-works">How it works</a>
+          <a href="#use-cases">Use cases</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#faq">FAQ</a>
+          <a href="/demo">Demo</a>
           <a href="/privacy">Privacy</a>
+          <a href="mailto:support@mergeship.app">Contact</a>
         </nav>
-      </footer>
-    </div>
+      </div>
+      <div class="shell footer-bottom">
+        <span>© <span data-year>2026</span> MergeShip</span>
+        <span>Built for Shopify merchants</span>
+      </div>
+    </footer>
+
+    <script src="/site.js" defer></script>
   </body>
 </html>
