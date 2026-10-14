@@ -37,21 +37,38 @@ document.querySelectorAll("[data-analytics-event]").forEach((link) => {
   });
 });
 
-document.querySelectorAll("[data-video-id]").forEach((button) => {
-  button.addEventListener("click", () => {
-    const facade = button.closest("[data-video-facade]");
-    if (!facade) return;
+document
+  .querySelectorAll("[data-video-id], [data-video-src]")
+  .forEach((button) => {
+    button.addEventListener("click", () => {
+      const facade = button.closest("[data-video-facade]");
+      if (!facade) return;
 
-    const iframe = document.createElement("iframe");
-    iframe.src = `https://www.youtube-nocookie.com/embed/${button.dataset.videoId}?autoplay=1&rel=0`;
-    iframe.title = button.dataset.videoTitle || "MergeShip video";
-    iframe.allow =
-      "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
-    iframe.allowFullscreen = true;
-    facade.replaceChildren(iframe);
-    dispatchAnalyticsEvent("video_play", { videoId: button.dataset.videoId });
+      if (button.dataset.videoSrc) {
+        const video = document.createElement("video");
+        video.src = button.dataset.videoSrc;
+        video.poster = facade.querySelector("img")?.src || "";
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = "none";
+        facade.replaceChildren(video);
+        video.play();
+        dispatchAnalyticsEvent("video_play", {
+          videoSrc: button.dataset.videoSrc,
+        });
+        return;
+      }
+
+      const iframe = document.createElement("iframe");
+      iframe.src = `https://www.youtube-nocookie.com/embed/${button.dataset.videoId}?autoplay=1&rel=0`;
+      iframe.title = button.dataset.videoTitle || "MergeShip video";
+      iframe.allow =
+        "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+      iframe.allowFullscreen = true;
+      facade.replaceChildren(iframe);
+      dispatchAnalyticsEvent("video_play", { videoId: button.dataset.videoId });
+    });
   });
-});
 
 document.querySelectorAll("[data-year]").forEach((year) => {
   year.textContent = String(new Date().getFullYear());
