@@ -5,6 +5,7 @@ server {
 
     root /usr/share/nginx/html;
     index index.html;
+    absolute_redirect off;
 
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -14,6 +15,10 @@ server {
 
     location = /privacy {
         try_files /privacy/index.html =404;
+    }
+
+    location = /demo {
+        try_files /demo/index.html =404;
     }
 
     location / {
