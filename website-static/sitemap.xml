@@ -9,6 +9,10 @@
     <priority>0.7</priority>
   </url>
   <url>
+    <loc>https://mergeship.app/guides/how-to-combine-shopify-orders</loc>
+    <priority>0.6</priority>
+  </url>
+  <url>
     <loc>https://mergeship.app/privacy</loc>
     <priority>0.3</priority>
   </url>

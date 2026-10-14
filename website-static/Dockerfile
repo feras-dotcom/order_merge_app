@@ -10,6 +10,7 @@ COPY website-static/robots.txt /usr/share/nginx/html/robots.txt
 COPY website-static/sitemap.xml /usr/share/nginx/html/sitemap.xml
 COPY website-static/assets /usr/share/nginx/html/assets
 COPY website-static/demo /usr/share/nginx/html/demo
+COPY website-static/guides /usr/share/nginx/html/guides
 COPY website-static/privacy /usr/share/nginx/html/privacy
 COPY public/brand /usr/share/nginx/html/brand
 
