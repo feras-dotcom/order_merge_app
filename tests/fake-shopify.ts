@@ -1757,6 +1757,11 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
     autoMergeAcknowledgedAt: new Date(now),
     onboardingStartedAt: new Date(now),
     onboardingCompletedAt: new Date(now),
+    shippingAdjustmentEnabled: false,
+    shippingAdjustmentEnabledAt: null,
+    shippingPolicy: "REFUND_ALL",
+    shippingRetainedMinor: null,
+    shippingRetainedCurrency: null,
     ...opts.settings,
   };
   const getSettings = async () => settings;

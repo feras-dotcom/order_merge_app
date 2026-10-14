@@ -98,6 +98,11 @@ const settings = async () => ({
   autoMergeAcknowledgedAt: new Date(),
   onboardingStartedAt: new Date(),
   onboardingCompletedAt: new Date(),
+  shippingAdjustmentEnabled: false,
+  shippingAdjustmentEnabledAt: null,
+  shippingPolicy: "REFUND_ALL",
+  shippingRetainedMinor: null,
+  shippingRetainedCurrency: null,
 });
 
 // Start barrier: lease anchor work before registering, then wait for /go —

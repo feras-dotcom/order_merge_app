@@ -1220,6 +1220,11 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     autoMergeAcknowledgedAt: new Date(),
     onboardingStartedAt: new Date(),
     onboardingCompletedAt: new Date(),
+    shippingAdjustmentEnabled: false,
+    shippingAdjustmentEnabledAt: null,
+    shippingPolicy: "REFUND_ALL",
+    shippingRetainedMinor: null,
+    shippingRetainedCurrency: null,
   });
 
   /** insertLeased + processOrderWork, exactly like the webhook path. */

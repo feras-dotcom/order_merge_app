@@ -13,6 +13,12 @@ export interface MergeSettings {
   autoMergeAcknowledgedAt: Date | null;
   onboardingStartedAt: Date | null;
   onboardingCompletedAt: Date | null;
+  /** Shipping v0 foundation only: no execution path is implemented. */
+  shippingAdjustmentEnabled: boolean;
+  shippingAdjustmentEnabledAt: Date | null;
+  shippingPolicy: string;
+  shippingRetainedMinor: string | null;
+  shippingRetainedCurrency: string | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
@@ -23,6 +29,11 @@ export const DEFAULT_SETTINGS: MergeSettings = {
   autoMergeAcknowledgedAt: null,
   onboardingStartedAt: null,
   onboardingCompletedAt: null,
+  shippingAdjustmentEnabled: false,
+  shippingAdjustmentEnabledAt: null,
+  shippingPolicy: "REFUND_ALL",
+  shippingRetainedMinor: null,
+  shippingRetainedCurrency: null,
 };
 
 /**

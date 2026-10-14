@@ -28,6 +28,18 @@ model Settings {
   mergeWindowHours    Int     @default(24)
   shippingCostSavings Float   @default(8.5)
   shopifyShopGid      String?
+
+  // ── Shipping adjustments (v0 foundation; no execution path exists yet) ──
+  // Off until the merchant explicitly opts in AND the feature is verified.
+  shippingAdjustmentEnabled   Boolean   @default(false)
+  // Enable-epoch: only combines completed on/after this timestamp may produce
+  // an adjustment intent, so enabling never refunds historical combines.
+  shippingAdjustmentEnabledAt DateTime?
+  // REFUND_ALL | RETAIN_FIXED (RETAIN_FIXED is modeled, never merchant-set yet)
+  shippingPolicy              String    @default("REFUND_ALL")
+  // Exact minor-unit integer when RETAIN_FIXED; no Float.
+  shippingRetainedMinor       String?
+  shippingRetainedCurrency    String?
 }
 
 // The durable work item for an ORDERS_CREATE event: PENDING until a terminal
@@ -204,6 +216,37 @@ model WorkerInstance {
   startedAt           DateTime
   heartbeatAt         DateTime
   version             String?
+}
+
+// Shipping v0 intent record (foundation only — the worker that creates and
+// executes these is not implemented). One immutable intent per source order;
+// the policy snapshot is frozen at intent creation so later Settings changes
+// can never rewrite a queued refund target.
+model ShippingAdjustment {
+  id                    String    @id @default(cuid())
+  shop                  String
+  mergeOperationId      String
+  sourceOrderId         String
+  // REFUND_ALL | RETAIN_FIXED (policy snapshot at enqueue time)
+  policyKind            String
+  policyRetainedMinor   String?
+  policyCurrencyCode    String?
+  sourceShippingMinor   String?
+  plannedRefundMinor    String?
+  currencyCode          String?
+  // PENDING | DISPATCHING | REFUND_RECORDED | VERIFIED | SKIPPED | REVIEW_REQUIRED
+  status                String    @default("PENDING")
+  idempotencyKey        String    @unique
+  refundId              String?
+  attemptRecordedAt     DateTime?
+  verifiedAt            DateTime?
+  reviewReason          String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([shop, sourceOrderId])
+  @@index([status, createdAt])
+  @@index([mergeOperationId])
 }
 
 model Session {
