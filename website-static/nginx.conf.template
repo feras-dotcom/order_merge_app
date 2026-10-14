@@ -21,8 +21,17 @@ server {
         try_files /demo/index.html =404;
     }
 
+    location = /guides {
+        try_files /guides/index.html =404;
+    }
+
     location = /guides/how-to-combine-shopify-orders {
         try_files /guides/how-to-combine-shopify-orders/index.html =404;
+    }
+
+    location = /site.css {
+        expires -1;
+        try_files /site.css =404;
     }
 
     location / {

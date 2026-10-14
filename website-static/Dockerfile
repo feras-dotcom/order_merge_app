@@ -14,4 +14,6 @@ COPY website-static/guides /usr/share/nginx/html/guides
 COPY website-static/privacy /usr/share/nginx/html/privacy
 COPY public/brand /usr/share/nginx/html/brand
 
+RUN PORT=8080 envsubst '$PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -t
+
 EXPOSE 8080
