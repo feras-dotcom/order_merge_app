@@ -116,7 +116,11 @@ export interface ControlRow {
   id: string;
   newMergesEnabled: boolean;
   completionEnabled: boolean;
-  allowShops: string[];
+  allowShops: string[]; // empty = all shops
+  // Shipping v0 controls — separate kill switch and rollout allowlist.
+  // INVERTED semantics: empty shippingAllowShops = NO shops.
+  shippingAdjustmentsEnabled: boolean;
+  shippingAllowShops: string[];
   note: string | null;
 }
 
@@ -264,6 +268,10 @@ export interface OperationStore {
   setControl(patch: Partial<Omit<ControlRow, "id">>): Promise<void>;
   /** Read-side helper for entry points (the gate SQL is the enforcement). */
   isEnabled(shop: string, sw: ControlSwitch): Promise<boolean>;
+  /** Read-side helper for the shipping subsystem (the future shipping gate
+   *  SQL is the enforcement). INVERTED vs isEnabled: an empty
+   *  shippingAllowShops means NO shops, never all. */
+  isShippingAdjustmentEnabled(shop: string): Promise<boolean>;
   /** WorkerInstance heartbeat upsert (sweeper liveness). */
   heartbeat(instanceId: string, deploymentId: string | null, version: string | null): Promise<void>;
   listRecentInstances(): Promise<any[]>;
@@ -770,6 +778,10 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       if (patch.completionEnabled !== undefined)
         sets.push(Prisma.sql`"completionEnabled" = ${patch.completionEnabled}`);
       if (patch.allowShops !== undefined) sets.push(Prisma.sql`"allowShops" = ${patch.allowShops}`);
+      if (patch.shippingAdjustmentsEnabled !== undefined)
+        sets.push(Prisma.sql`"shippingAdjustmentsEnabled" = ${patch.shippingAdjustmentsEnabled}`);
+      if (patch.shippingAllowShops !== undefined)
+        sets.push(Prisma.sql`"shippingAllowShops" = ${patch.shippingAllowShops}`);
       if (patch.note !== undefined) sets.push(Prisma.sql`"note" = ${patch.note}`);
       if (!sets.length) return;
       sets.push(Prisma.sql`"updatedAt" = ${DB_WALL}`);
@@ -789,6 +801,16 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       const row = rows[0];
       if (!row?.enabled) return false;
       return row.allowShops.length === 0 || row.allowShops.includes(shop);
+    },
+
+    async isShippingAdjustmentEnabled(shop) {
+      const rows = await db.$queryRaw<{ shippingAdjustmentsEnabled: boolean; shippingAllowShops: string[] }[]>`
+        SELECT "shippingAdjustmentsEnabled", "shippingAllowShops"
+        FROM "AppControl" WHERE id = 'control'`;
+      const row = rows[0];
+      if (!row?.shippingAdjustmentsEnabled) return false;
+      // Empty shipping allowlist = NO shops (deliberately inverted vs isEnabled).
+      return row.shippingAllowShops.includes(shop);
     },
 
     async heartbeat(instanceId, deploymentId, version) {

@@ -1250,6 +1250,8 @@ export class MemoryOperationStore implements OperationStore {
     newMergesEnabled: true,
     completionEnabled: true,
     allowShops: [],
+    shippingAdjustmentsEnabled: false,
+    shippingAllowShops: [],
     note: null,
   };
   /** Mirrors the MERGESHIP_MUTATIONS env precheck. */
@@ -1690,6 +1692,12 @@ export class MemoryOperationStore implements OperationStore {
   async isEnabled(shop: string, sw: "newMergesEnabled" | "completionEnabled") {
     if (!this.control[sw]) return false;
     return this.control.allowShops.length === 0 || this.control.allowShops.includes(shop);
+  }
+
+  async isShippingAdjustmentEnabled(shop: string) {
+    if (!this.control.shippingAdjustmentsEnabled) return false;
+    // Empty shipping allowlist = NO shops (inverted vs isEnabled).
+    return this.control.shippingAllowShops.includes(shop);
   }
 
   async heartbeat(instanceId: string, railwayDeploymentId: string | null, version: string | null) {

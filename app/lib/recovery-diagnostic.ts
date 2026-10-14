@@ -14,7 +14,7 @@ export interface RecoverySnapshot {
   durableLocks: Array<{ orderId: string }>;
 }
 export interface RecoveryAssessment {
-  status: "DIAGNOSTIC_EVIDENCE_PRESENT" | "INCOMPLETE_REQUIRES_REVIEW";
+  status: "EVIDENCE_COMPLETE" | "INCOMPLETE_REQUIRES_REVIEW";
   issues: string[];
   /** Explicitly never elevated by this function. */
   automaticRecoveryAuthorized: false;
@@ -50,7 +50,7 @@ export function assessRecoveryEvidence(s: RecoverySnapshot): RecoveryAssessment 
     }
   }
   return {
-    status: issues.length ? "INCOMPLETE_REQUIRES_REVIEW" : "DIAGNOSTIC_EVIDENCE_PRESENT",
+    status: issues.length ? "INCOMPLETE_REQUIRES_REVIEW" : "EVIDENCE_COMPLETE",
     issues,
     automaticRecoveryAuthorized: false,
   };

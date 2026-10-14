@@ -50,6 +50,10 @@ import {
   newOpToken,
   OwnershipLostError,
 } from "../app/lib/ownership.server";
+import {
+  resetAutomationForUninstall,
+  setShippingAdjustmentEnabled,
+} from "../app/lib/settings.server";
 
 const URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const SHOP = "pg-test.myshopify.com";
@@ -102,14 +106,16 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
   beforeEach(async () => {
     await db.$executeRawUnsafe(
       `TRUNCATE "MergeClaim", "ProcessedWebhook", "MergeOperation", "MergeOrderLock",
-       "MergeMutationAttempt", "MergeRecord", "WorkerInstance" RESTART IDENTITY CASCADE`,
+       "MergeMutationAttempt", "MergeRecord", "WorkerInstance",
+       "ShippingAdjustment", "Settings" RESTART IDENTITY CASCADE`,
     );
     // The singleton kill-switch row is seeded by the migration; re-seed it
     // disabled after every truncate (tests flip it via setControl).
     await db.$executeRawUnsafe(
-      `INSERT INTO "AppControl" ("id","newMergesEnabled","completionEnabled","allowShops","updatedAt")
-       VALUES ('control', false, false, ARRAY[]::TEXT[], (clock_timestamp() AT TIME ZONE 'UTC'))
-       ON CONFLICT (id) DO UPDATE SET "newMergesEnabled" = false, "completionEnabled" = false, "allowShops" = ARRAY[]::TEXT[]`,
+      `INSERT INTO "AppControl" ("id","newMergesEnabled","completionEnabled","allowShops","shippingAdjustmentsEnabled","shippingAllowShops","updatedAt")
+       VALUES ('control', false, false, ARRAY[]::TEXT[], false, ARRAY[]::TEXT[], (clock_timestamp() AT TIME ZONE 'UTC'))
+       ON CONFLICT (id) DO UPDATE SET "newMergesEnabled" = false, "completionEnabled" = false, "allowShops" = ARRAY[]::TEXT[],
+         "shippingAdjustmentsEnabled" = false, "shippingAllowShops" = ARRAY[]::TEXT[]`,
     );
   });
 
@@ -2334,5 +2340,86 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     expect(after.excludedLocked.map((c) => c.orderId)).toEqual([oid(2)]);
     expect(after.requeued).toBe(0);
     expect(await backfillWorkItem(db, SHOP, oid(2))).toBe(0);
+  });
+
+  // ── Shipping v0 foundation (no execution path; controls + settings only) ──
+  describe("shipping v0 controls and settings", () => {
+    const SHIP_SHOP = "pg-shipping.myshopify.com";
+
+    it("shipping controls default OFF and the empty allowlist means NO shops", async () => {
+      const control = await ops.getControl();
+      expect(control!.shippingAdjustmentsEnabled).toBe(false);
+      expect(control!.shippingAllowShops).toEqual([]);
+      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+
+      // Switch on with empty allowlist: still nobody — inverted vs allowShops.
+      await ops.setControl({ shippingAdjustmentsEnabled: true });
+      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+
+      await ops.setControl({ shippingAllowShops: ["other.myshopify.com"] });
+      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+
+      await ops.setControl({ shippingAllowShops: [SHIP_SHOP] });
+      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(true);
+
+      // Clearing returns to NOBODY (never "all shops").
+      await ops.setControl({ shippingAllowShops: [] });
+      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+    });
+
+    it("shipping stays OFF while the merge switches are ON", async () => {
+      await ops.setControl({ newMergesEnabled: true, completionEnabled: true, allowShops: [] });
+      expect(await ops.isEnabled(SHIP_SHOP, "newMergesEnabled")).toBe(true);
+      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+    });
+
+    it("setShippingAdjustmentEnabled manages the enable-epoch on the DB clock", async () => {
+      await setShippingAdjustmentEnabled(SHIP_SHOP, true, db);
+      let row = await db.settings.findUnique({ where: { shop: SHIP_SHOP } });
+      expect(row?.shippingAdjustmentEnabled).toBe(true);
+      const epoch1 = row?.shippingAdjustmentEnabledAt;
+      expect(epoch1).toBeInstanceOf(Date);
+      // Stamped on the DB wall clock, not the JS Date of the caller.
+      const [{ now }] = await db.$queryRaw<{ now: Date }[]>`SELECT ${DB_WALL} AS now`;
+      expect(Math.abs(now.getTime() - epoch1!.getTime())).toBeLessThan(10_000);
+
+      // Idempotent while already enabled: the epoch is kept, not widened.
+      await setShippingAdjustmentEnabled(SHIP_SHOP, true, db);
+      row = await db.settings.findUnique({ where: { shop: SHIP_SHOP } });
+      expect(row?.shippingAdjustmentEnabledAt?.getTime()).toBe(epoch1!.getTime());
+
+      // Disable clears the epoch.
+      await setShippingAdjustmentEnabled(SHIP_SHOP, false, db);
+      row = await db.settings.findUnique({ where: { shop: SHIP_SHOP } });
+      expect(row?.shippingAdjustmentEnabled).toBe(false);
+      expect(row?.shippingAdjustmentEnabledAt).toBeNull();
+
+      // Re-enable stamps a NEW epoch — combines inside the gap never qualify.
+      await new Promise((r) => setTimeout(r, 20));
+      await setShippingAdjustmentEnabled(SHIP_SHOP, true, db);
+      row = await db.settings.findUnique({ where: { shop: SHIP_SHOP } });
+      expect(row?.shippingAdjustmentEnabled).toBe(true);
+      expect(row!.shippingAdjustmentEnabledAt!.getTime()).toBeGreaterThan(epoch1!.getTime());
+    });
+
+    it("uninstall clears the shipping opt-in AND epoch; a fresh row defaults OFF", async () => {
+      await setShippingAdjustmentEnabled(SHIP_SHOP, true, db);
+      await db.settings.update({ where: { shop: SHIP_SHOP }, data: { autoMergeEnabled: true } });
+
+      await resetAutomationForUninstall(SHIP_SHOP, db);
+      const cleared = await db.settings.findUnique({ where: { shop: SHIP_SHOP } });
+      expect(cleared?.shippingAdjustmentEnabled).toBe(false);
+      expect(cleared?.shippingAdjustmentEnabledAt).toBeNull();
+      expect(cleared?.autoMergeEnabled).toBe(false);
+      expect(cleared?.onboardingStartedAt).toBeNull();
+      expect(cleared?.onboardingCompletedAt).toBeNull();
+
+      // A reinstall creates a fresh row with shipping disabled — it can never
+      // silently resume adjustments.
+      await db.settings.delete({ where: { shop: SHIP_SHOP } });
+      const fresh = await db.settings.create({ data: { shop: SHIP_SHOP } });
+      expect(fresh.shippingAdjustmentEnabled).toBe(false);
+      expect(fresh.shippingAdjustmentEnabledAt).toBeNull();
+    });
   });
 });

@@ -205,6 +205,10 @@ model AppControl {
   newMergesEnabled  Boolean  @default(false)
   completionEnabled Boolean  @default(false)
   allowShops        String[] @default([]) // empty = all shops
+  // ── Shipping v0 controls — separate from the merge switches above. ──
+  // INVERTED allowlist semantics: empty shippingAllowShops = NO shops.
+  shippingAdjustmentsEnabled Boolean  @default(false)
+  shippingAllowShops         String[] @default([]) // empty = NO shops
   note              String?
   updatedAt         DateTime @updatedAt
 }
@@ -220,13 +224,21 @@ model WorkerInstance {
 
 // Shipping v0 intent record (foundation only — the worker that creates and
 // executes these is not implemented). One immutable intent per source order;
-// the policy snapshot is frozen at intent creation so later Settings changes
-// can never rewrite a queued refund target.
+// the policy snapshot and the operation's creation time are frozen at intent
+// creation so later Settings changes can never rewrite a queued refund target
+// or smuggle a pre-epoch combine past the activation epoch.
+//
+// The dispatch contract (requestPayload/requestHash/marker/idempotencyKey) is
+// frozen before the single allowed refund dispatch — v0 has no resend path.
+// Lease columns give the future worker liveness and stale-write fencing only.
 model ShippingAdjustment {
   id                    String    @id @default(cuid())
   shop                  String
   mergeOperationId      String
   sourceOrderId         String
+  // MergeOperation.createdAt, snapshotted so the activation-epoch check never
+  // depends on mutable join state.
+  operationCreatedAt    DateTime
   // REFUND_ALL | RETAIN_FIXED (policy snapshot at enqueue time)
   policyKind            String
   policyRetainedMinor   String?
@@ -234,18 +246,42 @@ model ShippingAdjustment {
   sourceShippingMinor   String?
   plannedRefundMinor    String?
   currencyCode          String?
-  // PENDING | DISPATCHING | REFUND_RECORDED | VERIFIED | SKIPPED | REVIEW_REQUIRED
+  // PENDING | READY | DISPATCHING | IN_DOUBT | REFUND_RECORDED | VERIFIED |
+  // SKIPPED | REVIEW_REQUIRED — enforced by a CHECK constraint in SQL.
   status                String    @default("PENDING")
   idempotencyKey        String    @unique
-  refundId              String?
-  attemptRecordedAt     DateTime?
+  // ── Immutable dispatch evidence (frozen before dispatch; never rewritten
+  // after dispatchedAt) ──
+  // Canonical note marker that proves a Shopify refund belongs to this intent.
+  marker                String?   @unique
+  // The exact RefundInput sent to Shopify, serialized.
+  requestPayload        Json?
+  // sha256 hex of the canonical requestPayload — tamper/drift detection.
+  requestHash           String?
+  // The suggestedRefund preview the amounts were validated against.
+  previewEvidence       Json?
+  verifiedEvidence      Json?
+  // ── Dispatch bookkeeping (a refund is dispatched at most once) ──
+  preparedAt            DateTime?
+  dispatchToken         String?
+  dispatchedAt          DateTime?
+  respondedAt           DateTime?
+  responseSummary       String?
+  // A Shopify refund id may be recorded on at most one intent.
+  refundId              String?   @unique
+  // ── Worker ownership (liveness + stale-write fencing only) ──
+  leaseToken            String?
+  leasedUntil           DateTime?
+  nextCheckAt           DateTime?
+  attempts              Int       @default(0)
+  reasonCode            String?
   verifiedAt            DateTime?
   reviewReason          String?
   createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
+  updatedAt             DateTime  @default(now()) @updatedAt
 
   @@unique([shop, sourceOrderId])
-  @@index([status, createdAt])
+  @@index([status, nextCheckAt])
   @@index([mergeOperationId])
 }
 

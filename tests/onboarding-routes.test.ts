@@ -351,7 +351,14 @@ describe("app/uninstalled webhook", () => {
     await route.action({ request: new Request("https://x", { method: "POST" }), params: {}, context: {} } as any);
     expect(updateMany).toHaveBeenCalledWith({
       where: { shop: SHOP },
-      data: { autoMergeEnabled: false, onboardingStartedAt: null, onboardingCompletedAt: null },
+      data: {
+        autoMergeEnabled: false,
+        onboardingStartedAt: null,
+        onboardingCompletedAt: null,
+        // Shipping opt-in must not silently resume on reinstall (F7).
+        shippingAdjustmentEnabled: false,
+        shippingAdjustmentEnabledAt: null,
+      },
     });
   });
 });

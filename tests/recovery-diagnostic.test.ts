@@ -17,7 +17,7 @@ const snapshot = (): RecoverySnapshot => ({
 describe("Recovery v0 evidence diagnosis", () => {
   it("never authorizes automated undo even with all evidence", () => {
     expect(assessRecoveryEvidence(snapshot())).toEqual({
-      status: "DIAGNOSTIC_EVIDENCE_PRESENT", issues: [], automaticRecoveryAuthorized: false,
+      status: "EVIDENCE_COMPLETE", issues: [], automaticRecoveryAuthorized: false,
     });
   });
   it("fails review if an operation has not completed", () => {

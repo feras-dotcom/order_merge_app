@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import { cancelSubscription, resolveShopGidByDomain } from "../lib/billing.server";
+import { resetAutomationForUninstall } from "../lib/settings.server";
 import db from "../db.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -30,13 +31,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await cancelSubscription(shopGid);
   }
 
-  // A reinstall is a new install: automation must not silently resume, and
-  // the merchant goes through setup (plan, locations, acknowledgement) again.
-  // The merge window and combine history are kept.
-  await db.settings.updateMany({
-    where: { shop },
-    data: { autoMergeEnabled: false, onboardingStartedAt: null, onboardingCompletedAt: null },
-  });
+  // A reinstall is a new install: automation and the shipping-refund opt-in
+  // (flag AND enable-epoch) must not silently resume, and the merchant goes
+  // through setup (plan, locations, acknowledgement) again. The merge window
+  // and combine history are kept.
+  await resetAutomationForUninstall(shop, db);
 
   return new Response();
 };

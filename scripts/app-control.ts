@@ -3,9 +3,14 @@
 //   npx vite-node scripts/app-control.ts
 //   npx vite-node scripts/app-control.ts --new-merges on --completion off
 //   npx vite-node scripts/app-control.ts --new-merges on --allow a.myshopify.com,b.myshopify.com
+//   npx vite-node scripts/app-control.ts --shipping on --shipping-allow a.myshopify.com
 //
 // MERGESHIP_MUTATIONS=enabled is ALSO required for any dispatch — these
 // switches alone do not enable mutations.
+//
+// Shipping v0 controls are SEPARATE from the merge switches and the allowlist
+// semantics are INVERTED: an EMPTY shippingAllowShops means NO shops (whereas
+// an empty --allow list means ALL shops — hence the --allow-all-shops guard).
 
 import "./require-database-url";
 import { prismaOperationStore } from "../app/lib/operation-store.server";
@@ -13,7 +18,7 @@ import { isTransientDbError } from "../app/lib/ownership.server";
 
 const usage = () => {
   console.error(
-    "usage: npx vite-node scripts/app-control.ts [--new-merges on|off] [--completion on|off] [--allow shop,...] [--allow-all-shops]",
+    "usage: npx vite-node scripts/app-control.ts [--new-merges on|off] [--completion on|off] [--allow shop,...] [--allow-all-shops] [--shipping on|off] [--shipping-allow shop,...]",
   );
   process.exit(2);
 };
@@ -40,7 +45,10 @@ const onOff = (flag: string): boolean | undefined => {
 const show = (c: any) =>
   console.log(
     `newMergesEnabled=${c?.newMergesEnabled}  completionEnabled=${c?.completionEnabled}  ` +
-      `allowShops=[${(c?.allowShops ?? []).join(", ")}]  note=${c?.note ?? ""}  updatedAt=${c?.updatedAt}`,
+      `allowShops=[${(c?.allowShops ?? []).join(", ")}] (empty=ALL)\n` +
+      `  shippingAdjustmentsEnabled=${c?.shippingAdjustmentsEnabled}  ` +
+      `shippingAllowShops=[${(c?.shippingAllowShops ?? []).join(", ")}] (empty=NONE)  ` +
+      `note=${c?.note ?? ""}  updatedAt=${c?.updatedAt}`,
   );
 
 const before = await prismaOperationStore.getControl();
@@ -50,10 +58,16 @@ if (before) show(before);
 const patch: Record<string, unknown> = {};
 const newMerges = onOff("--new-merges");
 const completion = onOff("--completion");
+const shipping = onOff("--shipping");
 if (newMerges !== undefined) patch.newMergesEnabled = newMerges;
 if (completion !== undefined) patch.completionEnabled = completion;
+if (shipping !== undefined) patch.shippingAdjustmentsEnabled = shipping;
 if (flags.has("--allow")) {
   patch.allowShops = flags.get("--allow")!.split(",").map((s) => s.trim()).filter(Boolean);
+}
+if (flags.has("--shipping-allow")) {
+  // Empty = NO shops — clearing is the safe direction, no confirmation guard.
+  patch.shippingAllowShops = flags.get("--shipping-allow")!.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 // An empty allowlist means the switches apply to EVERY shop — clearing a
