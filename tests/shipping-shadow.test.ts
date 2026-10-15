@@ -15,6 +15,7 @@ import {
   GateChangedError,
   minorToDecimal,
   readOnlyAdmin,
+  requestHashOf,
   runShadowScan,
   type ShippingShadowRow,
   type ShippingShadowStore,
@@ -473,16 +474,57 @@ describe("shipping shadow evaluator (Phase 1.1)", () => {
     expect(row.marker).toMatch(/^MS-SHIP-/);
     expect(row.activationCutoffAt?.getTime()).toBe(EPOCH.getTime());
     const payload = row.requestPayload as any;
-    expect(payload.shipping).toEqual({
-      shippingRefundAmount: { amount: "8.00", currencyCode: "USD" },
-      fullRefund: false,
-    });
+    expect(payload.shipping).toEqual({ amount: "8.00", fullRefund: false });
     expect(payload.transactions).toHaveLength(1);
     expect(payload.transactions[0].parentId).toBe("txn-cap");
     expect(payload.transactions[0].kind).toBe("REFUND");
     expect(payload.transactions[0].amount).toBe("8.00");
     expect(String(payload.note)).toContain(row.marker);
     expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("READY");
+  });
+
+  it("the frozen RefundInput exactly matches the verified 2026-04 schema shape", async () => {
+    // Verified by schema introspection on ordermergetest2 (API 2026-04) and
+    // by the E1/E2 live shipping-only refunds:
+    //   RefundInput: { currency, orderId!, note, notify, shipping,
+    //                  transactions: [OrderTransactionInput!], ... }
+    //   ShippingRefundInput: { amount: Money, fullRefund: Boolean }
+    //   OrderTransactionInput: { amount: Money!, gateway: String!,
+    //                            kind: OrderTransactionKind!, orderId: ID!,
+    //                            parentId: ID }
+    // The Money amounts are plain scalars — RefundShippingInput's
+    // `shippingRefundAmount` (a MoneyInput, returns API) must NOT appear.
+    const { deps, store } = makeDeps({});
+    await runShadowScan(deps, { apply: true });
+    const row = store.rowFor(oid(200))!;
+    expect(row.status).toBe("READY");
+    // Deep equality on the WHOLE payload — an extra or missing key fails.
+    expect(row.requestPayload).toEqual({
+      orderId: oid(200),
+      notify: false,
+      note: `MergeShip shipping adjustment ${row.marker} — shipping refunded for order merged into #1000.`,
+      currency: "USD",
+      shipping: { amount: "8.00", fullRefund: false },
+      transactions: [
+        {
+          orderId: oid(200),
+          parentId: "txn-cap",
+          gateway: "bogus",
+          kind: "REFUND",
+          amount: "8.00",
+        },
+      ],
+    });
+    // The hash is over exactly this payload — the dispatch gate reproduces it.
+    expect(row.requestHash).toBe(requestHashOf(row.requestPayload));
+    // Preview evidence carries the suggested transaction it was validated
+    // against, so a dispatcher can re-derive the allocation.
+    const ev = row.previewEvidence as any;
+    expect(ev.allocation.parentTransactionId).toBe("txn-cap");
+    expect(ev.allocation.gateway).toBe("bogus");
+    expect(ev.preview.suggestedTransactionMinor).toBe("800");
+    expect(ev.preview.shippingMinor).toBe("800");
+    expect(ev.order.currencyCode).toBe("USD");
   });
 
   it("requests a preview for exactly the policy amount — variables are asserted", async () => {

@@ -853,20 +853,21 @@ export async function evaluateShadowSource(
     return review("Transaction test flags are inconsistent with a test order.");
   }
 
-  // Frozen RefundInput — field names verified against the 2026-04 schema via
-  // introspection: RefundInput.shipping is a ShippingRefundInput carrying a
-  // MoneyInput `shippingRefundAmount`; transactions are OrderTransactionInput
-  // (amount is a Money scalar; kind must be REFUND).
+  // Frozen RefundInput — verified against the 2026-04 schema by introspection
+  // and by the E1/E2 live shipping-only refunds on ordermergetest2:
+  //   RefundInput.shipping    → ShippingRefundInput { amount: Money, fullRefund }
+  //   RefundInput.transactions → [OrderTransactionInput!] { orderId, parentId,
+  //                             gateway, kind: REFUND, amount: Money }
+  // `amount` is a plain Money scalar in both places — NOT a MoneyInput. The
+  // similarly named RefundShippingInput.shippingRefundAmount belongs to the
+  // returns API, not refundCreate; using it here would produce an invalid input.
   const requestPayload = {
     orderId: input.sourceOrderId,
     notify: false,
     note: `MergeShip shipping adjustment ${input.marker} — shipping refunded for order merged into ${input.primaryOrderName}.`,
     currency: currencyCode,
     shipping: {
-      shippingRefundAmount: {
-        amount: minorToDecimal(decision.shippingMinor, precision),
-        currencyCode,
-      },
+      amount: minorToDecimal(decision.shippingMinor, precision),
       fullRefund: false,
     },
     transactions: [
