@@ -47,6 +47,7 @@ const show = (c: any) =>
     `newMergesEnabled=${c?.newMergesEnabled}  completionEnabled=${c?.completionEnabled}  ` +
       `allowShops=[${(c?.allowShops ?? []).join(", ")}] (empty=ALL)\n` +
       `  shippingAdjustmentsEnabled=${c?.shippingAdjustmentsEnabled}  ` +
+      `shippingEnabledAt=${c?.shippingEnabledAt ?? "none"}  ` +
       `shippingAllowShops=[${(c?.shippingAllowShops ?? []).join(", ")}] (empty=NONE)  ` +
       `note=${c?.note ?? ""}  updatedAt=${c?.updatedAt}`,
   );

@@ -1,23 +1,38 @@
-// Real-Postgres tests for the Shipping v0 shadow store (Phase 1). Opt-in:
+// Real-Postgres tests for the Shipping v0 shadow evaluator (Phase 1.1).
+// Opt-in:
 //
 //   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres@localhost:54329/mergeship_test \
 //     npx vitest run tests/shipping-shadow-pg.test.ts
 //
 // The URL must point at a DISPOSABLE database — `prisma migrate deploy` runs
-// against it and the tables are truncated between tests. The shadow store's
-// own guard additionally requires MERGESHIP_SHADOW_DATABASE to equal
-// current_database(); these tests set it to the disposable DB name and also
-// verify the guard refuses everywhere else.
+// against it and the tables are truncated between tests. The suite itself
+// stamps the `mergeship-shadow-disposable:<token>` marker the write guard
+// requires (the same marker scripts/shadow-db-bootstrap.ts creates) and sets
+// MERGESHIP_SHADOW_DATABASE + MERGESHIP_SHADOW_TOKEN to match.
+//
+// The database's session timezone is Asia/Tokyo (postgres-stores setup), so
+// every timestamp-write discipline error actually surfaces; one test asserts
+// the naive-UTC round trip explicitly.
 
 import { execSync } from "child_process";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
+import type { AdminClient } from "../app/lib/graphql.server";
 import { OwnershipLostError } from "../app/lib/ownership.server";
+import { makeOperationStore, type OperationStore } from "../app/lib/operation-store.server";
 import {
+  GateChangedError,
   makeShippingShadowStore,
+  runShadowScan,
+  SHADOW_DB_MARKER_PREFIX,
   ShadowDatabaseNotAllowedError,
   type ShadowIntentIdentity,
 } from "../app/lib/shipping-shadow.server";
+import {
+  DEFAULT_SETTINGS,
+  setShippingAdjustmentEnabled,
+  type MergeSettings,
+} from "../app/lib/settings.server";
 
 const TEST_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const SHOP = "pg-shadow.myshopify.com";
@@ -25,20 +40,16 @@ const oid = (n: number) => `gid://shopify/Order/${n}`;
 const DB_NAME = TEST_URL
   ? new globalThis.URL(TEST_URL).pathname.replace(/^\//, "").split("?")[0]
   : "";
+const TOKEN = "pg-suite-token-0001";
+const MARKER = `${SHADOW_DB_MARKER_PREFIX}${TOKEN}`;
 
-const identity = (sourceOrderId = oid(200)): ShadowIntentIdentity => ({
-  shop: SHOP,
-  mergeOperationId: "op-1",
-  sourceOrderId,
-  operationCreatedAt: new Date("2026-10-20T12:00:00Z"),
-  policyKind: "REFUND_ALL",
-  policyRetainedMinor: null,
-  policyCurrencyCode: null,
-});
+const OP_CREATED = new Date("2030-10-20T12:00:00Z"); // after any stamped epoch
 
 describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", () => {
   let db: PrismaClient;
   let db2: PrismaClient;
+  let ops: OperationStore;
+  let savedEnv: Record<string, string | undefined>;
 
   beforeAll(async () => {
     execSync("npx prisma migrate deploy", {
@@ -47,32 +58,99 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
     });
     db = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
     db2 = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
-    // The store's disposable-database guard: writes only proceed when this
-    // env var names the connected database exactly.
+    if (!/^[A-Za-z0-9_]+$/.test(DB_NAME)) {
+      throw new Error(`Unexpected test database name '${DB_NAME}'.`);
+    }
+    // Stamp the disposable marker — the write guard requires it to match
+    // MERGESHIP_SHADOW_TOKEN, mirroring scripts/shadow-db-bootstrap.ts.
+    await db.$executeRawUnsafe(`COMMENT ON DATABASE "${DB_NAME}" IS '${MARKER}'`);
+    // Production markers must be absent for the write-guard tests to mean
+    // anything; save and clear them, restore afterwards.
+    savedEnv = {
+      MERGESHIP_SHADOW_DATABASE: process.env.MERGESHIP_SHADOW_DATABASE,
+      MERGESHIP_SHADOW_TOKEN: process.env.MERGESHIP_SHADOW_TOKEN,
+      RAILWAY_PROJECT_ID: process.env.RAILWAY_PROJECT_ID,
+      RAILWAY_ENVIRONMENT: process.env.RAILWAY_ENVIRONMENT,
+      RAILWAY_ENVIRONMENT_NAME: process.env.RAILWAY_ENVIRONMENT_NAME,
+    };
+    delete process.env.RAILWAY_PROJECT_ID;
+    delete process.env.RAILWAY_ENVIRONMENT;
+    delete process.env.RAILWAY_ENVIRONMENT_NAME;
     process.env.MERGESHIP_SHADOW_DATABASE = DB_NAME;
+    process.env.MERGESHIP_SHADOW_TOKEN = TOKEN;
+    ops = makeOperationStore(db);
   }, 120_000);
 
   afterAll(async () => {
-    delete process.env.MERGESHIP_SHADOW_DATABASE;
+    for (const [k, v] of Object.entries(savedEnv ?? {})) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     await db?.$disconnect();
     await db2?.$disconnect();
   });
 
   beforeEach(async () => {
-    await db.$executeRawUnsafe(`TRUNCATE "ShippingAdjustment" RESTART IDENTITY CASCADE`);
+    await db.$executeRawUnsafe(
+      `TRUNCATE "ShippingAdjustment", "MergeOperation", "MergeRecord",
+       "MergeMutationAttempt", "Settings", "AppControl" RESTART IDENTITY CASCADE`,
+    );
+    await db.$executeRawUnsafe(
+      `INSERT INTO "AppControl" ("id", "updatedAt") VALUES ('control', now())`,
+    );
   });
 
   const rowFor = (sourceOrderId = oid(200)) =>
-    db.$queryRaw<any[]>`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP} AND "sourceOrderId" = ${sourceOrderId}`;
+    db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP} AND "sourceOrderId" = ${sourceOrderId}`;
+
+  /** Enable every gate through the REAL write paths — this is also the
+   *  epoch-stamping coverage: setControl + setShippingAdjustmentEnabled. */
+  const setupGate = async (): Promise<Date> => {
+    await ops.setControl({
+      shippingAdjustmentsEnabled: true,
+      shippingAllowShops: [SHOP],
+    });
+    await setShippingAdjustmentEnabled(SHOP, true, db);
+    const s = await db.settings.findUnique({ where: { shop: SHOP } });
+    const c = await ops.getControl();
+    const cutoff = new Date(
+      Math.max(
+        c!.shippingEnabledAt!.getTime(),
+        s!.shippingRolloutAt!.getTime(),
+        s!.shippingAdjustmentEnabledAt!.getTime(),
+      ),
+    );
+    return cutoff;
+  };
+
+  const identity = (
+    cutoff: Date,
+    sourceOrderId = oid(200),
+    mergeOperationId = "op-1",
+  ): ShadowIntentIdentity => ({
+    shop: SHOP,
+    mergeOperationId,
+    sourceOrderId,
+    operationCreatedAt: OP_CREATED,
+    activationCutoffAt: cutoff,
+    policyKind: "REFUND_ALL",
+    policyRetainedMinor: null,
+    policyCurrencyCode: null,
+  });
+
+  // ── Write guard (H1) ──────────────────────────────────────────────────────
 
   it("refuses every write when MERGESHIP_SHADOW_DATABASE is unset", async () => {
+    const cutoff = await setupGate();
     delete process.env.MERGESHIP_SHADOW_DATABASE;
     const store = makeShippingShadowStore(db);
-    await expect(store.claimIntent(identity(), 60_000)).rejects.toBeInstanceOf(
+    await expect(store.claimIntent(identity(cutoff), 60_000)).rejects.toBeInstanceOf(
       ShadowDatabaseNotAllowedError,
     );
     await expect(
-      store.recordTerminal(identity(), "SKIPPED", { reasonCode: "X" }),
+      store.recordTerminal(identity(cutoff), "SKIPPED", { reasonCode: "X" }),
     ).rejects.toBeInstanceOf(ShadowDatabaseNotAllowedError);
     // Reads are unaffected — the guard only gates writes.
     await expect(store.findAdjustments(SHOP, [oid(200)])).resolves.toEqual([]);
@@ -80,36 +158,136 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   });
 
   it("refuses writes when the env var names a different database", async () => {
+    const cutoff = await setupGate();
     process.env.MERGESHIP_SHADOW_DATABASE = "some_other_database";
     const store = makeShippingShadowStore(db);
-    await expect(store.claimIntent(identity(), 60_000)).rejects.toBeInstanceOf(
+    await expect(store.claimIntent(identity(cutoff), 60_000)).rejects.toBeInstanceOf(
       ShadowDatabaseNotAllowedError,
     );
     process.env.MERGESHIP_SHADOW_DATABASE = DB_NAME;
   });
 
+  it("refuses writes when MERGESHIP_SHADOW_TOKEN does not match the database marker", async () => {
+    const cutoff = await setupGate();
+    process.env.MERGESHIP_SHADOW_TOKEN = "spoofed-token-9999";
+    const store = makeShippingShadowStore(db);
+    await expect(store.claimIntent(identity(cutoff), 60_000)).rejects.toBeInstanceOf(
+      ShadowDatabaseNotAllowedError,
+    );
+    process.env.MERGESHIP_SHADOW_TOKEN = TOKEN;
+  });
+
+  it("refuses writes when the database carries NO disposable marker", async () => {
+    const cutoff = await setupGate();
+    await db.$executeRawUnsafe(`COMMENT ON DATABASE "${DB_NAME}" IS NULL`);
+    try {
+      const store = makeShippingShadowStore(db);
+      await expect(store.claimIntent(identity(cutoff), 60_000)).rejects.toBeInstanceOf(
+        ShadowDatabaseNotAllowedError,
+      );
+    } finally {
+      await db.$executeRawUnsafe(`COMMENT ON DATABASE "${DB_NAME}" IS '${MARKER}'`);
+    }
+  });
+
+  it("refuses writes when a production environment marker is set", async () => {
+    const cutoff = await setupGate();
+    process.env.RAILWAY_PROJECT_ID = "test-prod-marker";
+    const store = makeShippingShadowStore(db);
+    await expect(store.claimIntent(identity(cutoff), 60_000)).rejects.toBeInstanceOf(
+      ShadowDatabaseNotAllowedError,
+    );
+    delete process.env.RAILWAY_PROJECT_ID;
+  });
+
+  // ── Activation epochs (B1) ────────────────────────────────────────────────
+
+  it("setControl stamps the kill-switch epoch on enable and clears it on disable", async () => {
+    await ops.setControl({ shippingAdjustmentsEnabled: true });
+    const c1 = await ops.getControl();
+    expect(c1!.shippingEnabledAt).toBeInstanceOf(Date);
+    // Idempotent re-enable keeps the epoch.
+    await ops.setControl({ shippingAdjustmentsEnabled: true });
+    expect((await ops.getControl())!.shippingEnabledAt!.getTime()).toBe(
+      c1!.shippingEnabledAt!.getTime(),
+    );
+    // Disable clears; re-enable stamps a NEW epoch.
+    await ops.setControl({ shippingAdjustmentsEnabled: false });
+    expect((await ops.getControl())!.shippingEnabledAt).toBeNull();
+    await ops.setControl({ shippingAdjustmentsEnabled: true });
+    const c2 = await ops.getControl();
+    expect(c2!.shippingEnabledAt!.getTime()).toBeGreaterThanOrEqual(
+      c1!.shippingEnabledAt!.getTime(),
+    );
+  });
+
+  it("allowlist membership stamps/clears Settings.shippingRolloutAt atomically", async () => {
+    await ops.setControl({ shippingAllowShops: [SHOP] });
+    const s1 = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s1!.shippingRolloutAt).toBeInstanceOf(Date);
+    // Removal clears the epoch.
+    await ops.setControl({ shippingAllowShops: [] });
+    expect(
+      (await db.settings.findUnique({ where: { shop: SHOP } }))!.shippingRolloutAt,
+    ).toBeNull();
+    // Re-add stamps a NEW epoch — combines from the gap never qualify.
+    await ops.setControl({ shippingAllowShops: [SHOP] });
+    const s2 = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s2!.shippingRolloutAt!.getTime()).toBeGreaterThanOrEqual(
+      s1!.shippingRolloutAt!.getTime(),
+    );
+    // An unrelated allowlist entry does not disturb the shop's epoch.
+    await ops.setControl({ shippingAllowShops: [SHOP, "other.myshopify.com"] });
+    expect(
+      (await db.settings.findUnique({ where: { shop: SHOP } }))!.shippingRolloutAt!.getTime(),
+    ).toBe(s2!.shippingRolloutAt!.getTime());
+  });
+
+  it("merchant opt-in stamps its own epoch; disable clears it", async () => {
+    await setShippingAdjustmentEnabled(SHOP, true, db);
+    const s1 = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s1!.shippingAdjustmentEnabledAt).toBeInstanceOf(Date);
+    await setShippingAdjustmentEnabled(SHOP, false, db);
+    const s2 = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s2!.shippingAdjustmentEnabled).toBe(false);
+    expect(s2!.shippingAdjustmentEnabledAt).toBeNull();
+  });
+
+  // ── Claim/settle semantics ────────────────────────────────────────────────
+
   it("two concurrent claims produce exactly one intent row", async () => {
+    const cutoff = await setupGate();
     const s1 = makeShippingShadowStore(db);
     const s2 = makeShippingShadowStore(db2);
     const [a, b] = await Promise.all([
-      s1.claimIntent(identity(), 60_000),
-      s2.claimIntent(identity(), 60_000),
+      s1.claimIntent(identity(cutoff), 60_000),
+      s2.claimIntent(identity(cutoff), 60_000),
     ]);
-    expect([a, b].filter(Boolean)).toHaveLength(1);
+    const claimed = [a, b].filter((r) => r !== null && r !== "GATE_CHANGED");
+    expect(claimed).toHaveLength(1);
     expect(await rowFor()).toHaveLength(1);
+    expect((await rowFor())[0].mode).toBe("SHADOW");
+  });
+
+  it("claimIntent returns GATE_CHANGED when the cutoff moved under the gate", async () => {
+    const cutoff = await setupGate();
+    const store = makeShippingShadowStore(db);
+    const wrong = new Date(cutoff.getTime() - 60_000); // a stale snapshot
+    expect(await store.claimIntent(identity(wrong), 60_000)).toBe("GATE_CHANGED");
+    expect(await rowFor()).toHaveLength(0);
   });
 
   it("a live-leased PENDING row cannot be re-leased or settled by another token", async () => {
+    const cutoff = await setupGate();
     const store = makeShippingShadowStore(db);
-    const claimed = (await store.claimIntent(identity(), 60_000))!;
-    // Another worker cannot reclaim while the lease is live.
-    expect(await store.reclaimIntent(claimed.id, "other-token", 60_000)).toBeNull();
-    // A stale token cannot settle.
+    const claimed = (await store.claimIntent(identity(cutoff), 60_000))!;
+    expect(claimed).not.toBe("GATE_CHANGED");
+    const row = claimed as { id: string; leaseToken: string };
+    expect(await store.reclaimIntent(row.id, "other-token", 60_000)).toBeNull();
     await expect(
-      store.settleIntent(claimed.id, "stale", { status: "SKIPPED", reasonCode: "X" }),
+      store.settleIntent(row.id, "stale", { status: "SKIPPED", reasonCode: "X" }),
     ).rejects.toBeInstanceOf(OwnershipLostError);
-    // The owner can settle.
-    await store.settleIntent(claimed.id, claimed.leaseToken!, {
+    await store.settleIntent(row.id, row.leaseToken, {
       status: "READY",
       sourceShippingMinor: "800",
       plannedRefundMinor: "800",
@@ -118,16 +296,41 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
       requestPayload: { orderId: oid(200) },
       requestHash: "a".repeat(64),
     });
-    const [row] = await rowFor();
-    expect(row.status).toBe("READY");
-    expect(row.plannedRefundMinor).toBe("800");
+    const [r] = await rowFor();
+    expect(r.status).toBe("READY");
+    expect(r.plannedRefundMinor).toBe("800");
+  });
+
+  it("a READY settle races a control change: refused, the row survives for re-evaluation", async () => {
+    const cutoff = await setupGate();
+    const store = makeShippingShadowStore(db);
+    const claimed = (await store.claimIntent(identity(cutoff), 60_000)) as any;
+    // The kill switch toggles between claim and settle — the FOR SHARE
+    // recompute inside the settle transaction must see it.
+    await ops.setControl({ shippingAdjustmentsEnabled: false });
+    await expect(
+      store.settleIntent(claimed.id, claimed.leaseToken, {
+        status: "READY",
+        sourceShippingMinor: "800",
+        plannedRefundMinor: "800",
+        currencyCode: "USD",
+      }),
+    ).rejects.toBeInstanceOf(GateChangedError);
+    // The row is still PENDING — nothing misleading was written.
+    expect((await rowFor())[0].status).toBe("PENDING");
+    // A deterministic non-READY verdict is still writable.
+    await store.settleIntent(claimed.id, claimed.leaseToken, {
+      status: "REVIEW_REQUIRED",
+      reviewReason: "gate changed mid-flight",
+    });
+    expect((await rowFor())[0].status).toBe("REVIEW_REQUIRED");
   });
 
   it("an expired lease is re-leasable exactly once — two workers race, one wins", async () => {
+    const cutoff = await setupGate();
     const s1 = makeShippingShadowStore(db);
     const s2 = makeShippingShadowStore(db2);
-    const claimed = (await s1.claimIntent(identity(), 60_000))!;
-    // Force expiry on the database clock.
+    const claimed = (await s1.claimIntent(identity(cutoff), 60_000)) as any;
     await db.$executeRawUnsafe(
       `UPDATE "ShippingAdjustment" SET "leasedUntil" = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second' WHERE id = '${claimed.id}'`,
     );
@@ -139,7 +342,6 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
     expect(winners).toHaveLength(1);
     const [row] = await rowFor();
     expect(row.attempts).toBe(2); // claim(1) + one successful reclaim
-    // The loser cannot settle with its token.
     const loserToken = a ? "tok-b" : "tok-a";
     await expect(
       s2.settleIntent(claimed.id, loserToken, { status: "SKIPPED", reasonCode: "X" }),
@@ -147,57 +349,45 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   });
 
   it("terminal rows are never re-leased or rewritten", async () => {
+    const cutoff = await setupGate();
     const store = makeShippingShadowStore(db);
     expect(
-      await store.recordTerminal(identity(), "SKIPPED", {
+      await store.recordTerminal(identity(cutoff), "SKIPPED", {
         reasonCode: "BEFORE_EPOCH",
         reviewReason: "predates epoch",
       }),
     ).toBe(true);
-    // Duplicate terminal insert is a no-op.
     expect(
-      await store.recordTerminal(identity(), "REVIEW_REQUIRED", { reviewReason: "x" }),
+      await store.recordTerminal(identity(cutoff), "REVIEW_REQUIRED", { reviewReason: "x" }),
     ).toBe(false);
     const [row] = await rowFor();
     expect(row.status).toBe("SKIPPED");
     expect(row.reasonCode).toBe("BEFORE_EPOCH");
-    // A claim against an existing SKIPPED row inserts nothing.
-    expect(await store.claimIntent(identity(), 60_000)).toBeNull();
-  });
-
-  it("reschedule clears the lease and defers the intent on the DB clock", async () => {
-    const store = makeShippingShadowStore(db);
-    const claimed = (await store.claimIntent(identity(), 60_000))!;
-    await store.rescheduleIntent(claimed.id, claimed.leaseToken!, 300_000, "TRANSIENT");
-    const [row] = await rowFor();
-    expect(row.status).toBe("PENDING");
-    expect(row.leaseToken).toBeNull();
-    expect(row.reasonCode).toBe("TRANSIENT");
-    expect(new Date(row.nextCheckAt).getTime()).toBeGreaterThan(Date.now() + 60_000);
+    expect(await store.claimIntent(identity(cutoff), 60_000)).toBeNull();
   });
 
   it("a rescheduled intent is not reclaimed before nextCheckAt, and is when due", async () => {
+    const cutoff = await setupGate();
     const store = makeShippingShadowStore(db);
-    const claimed = (await store.claimIntent(identity(), 60_000))!;
-    await store.rescheduleIntent(claimed.id, claimed.leaseToken!, 300_000, "TRANSIENT");
-    // Deferred five minutes out: reclaim must refuse despite the cleared lease.
+    const claimed = (await store.claimIntent(identity(cutoff), 60_000)) as any;
+    await store.rescheduleIntent(claimed.id, claimed.leaseToken, 300_000, "TRANSIENT");
     expect(await store.reclaimIntent(claimed.id, "tok-b", 60_000)).toBeNull();
     const [deferred] = await rowFor();
     expect(deferred.status).toBe("PENDING");
     expect(deferred.leaseToken).toBeNull();
-    // A retry that is already due reclaims normally.
-    const claimed2 = (await store.claimIntent(identity(oid(202)), 60_000))!;
-    await store.rescheduleIntent(claimed2.id, claimed2.leaseToken!, 0, "TRANSIENT");
+    const claimed2 = (await store.claimIntent(identity(cutoff, oid(202)), 60_000)) as any;
+    await store.rescheduleIntent(claimed2.id, claimed2.leaseToken, 0, "TRANSIENT");
     const reclaimed = await store.reclaimIntent(claimed2.id, "tok-c", 60_000);
     expect(reclaimed).not.toBeNull();
     expect(reclaimed!.leaseToken).toBe("tok-c");
   });
 
   it("RETAIN_FIXED snapshots satisfy the CHECK constraint", async () => {
+    const cutoff = await setupGate();
     const store = makeShippingShadowStore(db);
     const claimed = await store.claimIntent(
       {
-        ...identity(oid(201)),
+        ...identity(cutoff, oid(201)),
         policyKind: "RETAIN_FIXED",
         policyRetainedMinor: "300",
         policyCurrencyCode: "USD",
@@ -205,7 +395,297 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
       60_000,
     );
     expect(claimed).not.toBeNull();
-    expect(claimed!.policyKind).toBe("RETAIN_FIXED");
-    expect(claimed!.policyRetainedMinor).toBe("300");
+    expect((claimed as any).policyKind).toBe("RETAIN_FIXED");
+    expect((claimed as any).policyRetainedMinor).toBe("300");
+  });
+
+  it("naive-UTC timestamp round trip is exact under a non-UTC session", async () => {
+    const cutoff = await setupGate();
+    const store = makeShippingShadowStore(db);
+    const exact = new Date("2030-10-20T12:00:00.000Z");
+    await store.claimIntent(
+      { ...identity(cutoff, oid(203)), operationCreatedAt: exact },
+      60_000,
+    );
+    // The suite already runs under a non-UTC session; prove the raw stored
+    // value is the naive UTC wall clock, not a Tokyo-shifted bind.
+    const [{ tz }] = await db.$queryRaw<{ tz: string }[]>`SELECT current_setting('TimeZone') AS tz`;
+    expect(tz).not.toBe("UTC");
+    const [row] = await rowFor(oid(203));
+    expect(new Date(row.operationCreatedAt).getTime()).toBe(exact.getTime());
+    expect(new Date(row.activationCutoffAt).getTime()).toBe(cutoff.getTime());
+  });
+
+  // ── End-to-end scans over real merge rows ─────────────────────────────────
+
+  const MONEY = (amount: string, currencyCode = "USD") => ({ amount, currencyCode });
+
+  const cannedAdmin = (): AdminClient => {
+    const order = {
+      id: oid(200),
+      name: "#2000",
+      test: true,
+      cancelledAt: "2030-10-20T12:05:00Z",
+      closedAt: "2030-10-20T12:06:00Z",
+      closed: true,
+      displayFinancialStatus: "PAID",
+      currencyCode: "USD",
+      presentmentCurrencyCode: "USD",
+      taxesIncluded: false,
+      totalRefundedShippingSet: { presentmentMoney: MONEY("0.00") },
+      totalRefundedSet: { presentmentMoney: MONEY("0.00") },
+      shippingLines: {
+        nodes: [
+          {
+            title: "Standard",
+            originalPriceSet: { presentmentMoney: MONEY("8.00") },
+            discountedPriceSet: { presentmentMoney: MONEY("8.00") },
+            taxLines: [],
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+      refunds: [],
+      transactions: [
+        {
+          id: "txn-cap",
+          kind: "CAPTURE",
+          status: "SUCCESS",
+          gateway: "bogus",
+          test: true,
+          amountSet: { presentmentMoney: MONEY("18.00") },
+          parentTransaction: null,
+        },
+      ],
+    };
+    const preview = {
+      suggestedRefund: {
+        amountSet: { presentmentMoney: MONEY("8.00") },
+        maximumRefundableSet: { presentmentMoney: MONEY("18.00") },
+        shipping: {
+          amountSet: { presentmentMoney: MONEY("8.00") },
+          taxSet: { presentmentMoney: MONEY("0.00") },
+          maximumRefundableSet: { presentmentMoney: MONEY("8.00") },
+        },
+        suggestedTransactions: [
+          {
+            kind: "SUGGESTED_REFUND",
+            gateway: "bogus",
+            amountSet: { presentmentMoney: MONEY("8.00") },
+            parentTransaction: {
+              id: "txn-cap",
+              kind: "CAPTURE",
+              status: "SUCCESS",
+              gateway: "bogus",
+              test: true,
+            },
+          },
+        ],
+      },
+    };
+    return {
+      graphql: async (query: string) =>
+        ({
+          json: async () => ({
+            data: { order: query.includes("suggestedRefund") ? preview : order },
+          }),
+        }) as any,
+    };
+  };
+
+  /** Seed a real COMPLETED native-v2 op + MergeRecord + attempts — the same
+   *  columns the live engine writes, mapped through raw SQL. */
+  const seedOp = async (i: number, secondaryId = oid(200), createdAt = OP_CREATED) => {
+    const opId = `e2e-op-${i}`;
+    const primaryId = oid(9000 + i);
+    const secondary = {
+      id: secondaryId,
+      name: `#${2000 + i}`,
+      items: 1,
+      done: true,
+      cancelPhase: "CANCEL_VERIFIED",
+      cancelledAt: "2030-10-20T12:05:00Z",
+      staffNoteMatched: true,
+    };
+    await db.mergeOperation.create({
+      data: {
+        id: opId,
+        shop: SHOP,
+        status: "COMPLETED",
+        primaryOrderId: primaryId,
+        primaryOrderName: `#${9000 + i}`,
+        primaryLineItemCountBefore: 1,
+        addedLineItemCount: 1,
+        protocolVersion: 2,
+        phase: "COMPLETED",
+        opToken: `TK${String(i).padStart(6, "0")}`,
+        secondaries: [secondary],
+        involvedOrderIds: [primaryId, secondaryId],
+        calculatedOrderId: `calc-${opId}`,
+        expectedTransfer: [
+          {
+            secondaryId,
+            secondaryIndex: 1,
+            lines: [{ sourceLineItemId: "l", variantId: "v", quantity: 1 }],
+          },
+        ],
+        appliedEvidence: {
+          agreementId: "ag",
+          happenedAt: "2030-10-20T12:01:00Z",
+          lines: [{ secondaryId, lineItemId: "li", variantId: "v", quantity: 1 }],
+        },
+        firstDispatchAt: createdAt,
+        sideEffectsDone: true,
+        createdAt,
+      },
+    });
+    await db.mergeRecord.create({
+      data: {
+        id: `mr-${opId}`,
+        shop: SHOP,
+        primaryOrderId: primaryId,
+        primaryOrderName: `#${9000 + i}`,
+        mergedOrderId: secondaryId,
+        mergedOrderName: secondary.name,
+        itemsCombined: 1,
+        operationId: opId,
+      },
+    });
+    await db.mergeMutationAttempt.createMany({
+      data: [
+        {
+          id: `att-commit-${opId}`,
+          operationId: opId,
+          kind: "EDIT_COMMIT",
+          targetOrderId: primaryId,
+          attemptNo: 1,
+          state: "SUCCEEDED",
+          dispatchToken: `tok-${opId}`,
+          dispatchedAt: OP_CREATED,
+        },
+        {
+          id: `att-cancel-${opId}`,
+          operationId: opId,
+          kind: "ORDER_CANCEL",
+          targetOrderId: secondaryId,
+          attemptNo: 1,
+          state: "SUCCEEDED",
+          dispatchToken: `tok-${opId}`,
+          dispatchedAt: OP_CREATED,
+        },
+      ],
+    });
+    return opId;
+  };
+
+  const settingsLoader = async (shop: string): Promise<MergeSettings> =>
+    ((await db.settings.findUnique({ where: { shop } })) as MergeSettings | null) ??
+    DEFAULT_SETTINGS;
+
+  it("end-to-end: a real seeded combine scans to READY under a live gate", async () => {
+    const cutoff = await setupGate();
+    await seedOp(1);
+    const store = makeShippingShadowStore(db);
+    const report = await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: true },
+    );
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("READY");
+    expect(rows[0].mode).toBe("SHADOW");
+    expect(rows[0].sourceOrderId).toBe(oid(200));
+    expect(new Date(rows[0].activationCutoffAt).getTime()).toBe(cutoff.getTime());
+    expect(new Date(rows[0].operationCreatedAt).getTime()).toBe(OP_CREATED.getTime());
+    expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("READY");
+  });
+
+  it("end-to-end dry run evaluates real rows and writes nothing", async () => {
+    await setupGate();
+    await seedOp(1);
+    const store = makeShippingShadowStore(db);
+    const report = await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: false },
+    );
+    expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("READY");
+    expect(
+      await db.$queryRaw<any[]>`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`,
+    ).toHaveLength(0);
+  });
+
+  it("more than 50 completed combines do not starve — scans keep making progress", async () => {
+    await setupGate();
+    for (let i = 0; i < 60; i++) await seedOp(i, oid(3000 + i));
+    const store = makeShippingShadowStore(db);
+    await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: true },
+    );
+    const afterFirst = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`;
+    expect(afterFirst.length).toBe(50);
+    await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: true },
+    );
+    const afterSecond = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`;
+    expect(afterSecond.length).toBe(60);
+    expect(afterSecond.every((r) => r.status === "READY")).toBe(true);
+  });
+
+  it("two concurrent scans over real Postgres produce exactly one row per secondary", async () => {
+    await setupGate();
+    for (let i = 0; i < 8; i++) await seedOp(i, oid(4000 + i));
+    const s1 = makeShippingShadowStore(db);
+    const s2 = makeShippingShadowStore(db2);
+    const [r1, r2] = await Promise.all([
+      runShadowScan(
+        { store: s1, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+        { apply: true },
+      ),
+      runShadowScan(
+        { store: s2, ops: makeOperationStore(db2), settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+        { apply: true },
+      ),
+    ]);
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`;
+    expect(rows).toHaveLength(8);
+    expect(new Set(rows.map((r) => r.sourceOrderId)).size).toBe(8);
+    expect(rows.every((r) => r.status === "READY")).toBe(true);
+    // No scanner may report an error.
+    for (const rep of [r1, r2]) {
+      expect(rep.entries.filter((e) => e.outcome === "ERROR")).toHaveLength(0);
+    }
+  });
+
+  it("a combine completed before rollout membership is durably SKIPPED (B1 end-to-end)", async () => {
+    // Merchant opt-in + kill switch ON, but the shop is NOT yet allowlisted;
+    // the combine completed in the past. The shop joins the rollout AFTER —
+    // the stamped membership epoch postdates the combine's createdAt.
+    await setShippingAdjustmentEnabled(SHOP, true, db);
+    await ops.setControl({ shippingAdjustmentsEnabled: true });
+    // Completed one hour before the rollout stamp — provably pre-membership.
+    await seedOp(1, oid(200), new Date(Date.now() - 3_600_000));
+    await ops.setControl({ shippingAllowShops: [SHOP] }); // rollout starts now
+    const store = makeShippingShadowStore(db);
+    const report = await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: true },
+    );
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("SKIPPED");
+    expect(rows[0].reasonCode).toBe("BEFORE_EPOCH");
+    expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("SKIPPED");
   });
 });

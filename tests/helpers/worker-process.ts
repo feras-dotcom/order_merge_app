@@ -103,6 +103,7 @@ const settings = async () => ({
   shippingPolicy: "REFUND_ALL",
   shippingRetainedMinor: null,
   shippingRetainedCurrency: null,
+  shippingRolloutAt: null,
 });
 
 // Start barrier: lease anchor work before registering, then wait for /go —

@@ -1231,6 +1231,7 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
     shippingPolicy: "REFUND_ALL",
     shippingRetainedMinor: null,
     shippingRetainedCurrency: null,
+    shippingRolloutAt: null,
   });
 
   /** insertLeased + processOrderWork, exactly like the webhook path. */

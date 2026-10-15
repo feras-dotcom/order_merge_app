@@ -24,6 +24,9 @@ export interface MergeSettings {
   shippingPolicy: string;
   shippingRetainedMinor: string | null;
   shippingRetainedCurrency: string | null;
+  /** Rollout-membership epoch — writable ONLY by setControl when the shop is
+   *  added to / removed from AppControl.shippingAllowShops. */
+  shippingRolloutAt: Date | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
@@ -39,6 +42,7 @@ export const DEFAULT_SETTINGS: MergeSettings = {
   shippingPolicy: "REFUND_ALL",
   shippingRetainedMinor: null,
   shippingRetainedCurrency: null,
+  shippingRolloutAt: null,
 };
 
 /**
@@ -58,7 +62,10 @@ export async function getSettings(shop: string): Promise<MergeSettings> {
 export async function upsertSettings(
   shop: string,
   update: Partial<
-    Omit<MergeSettings, "shippingAdjustmentEnabled" | "shippingAdjustmentEnabledAt">
+    Omit<
+      MergeSettings,
+      "shippingAdjustmentEnabled" | "shippingAdjustmentEnabledAt" | "shippingRolloutAt"
+    >
   >,
 ): Promise<MergeSettings> {
   return db.settings.upsert({
@@ -96,7 +103,11 @@ export async function setShippingAdjustmentEnabled(
 /**
  * Uninstall reset: a reinstall is a new install — automation, onboarding and
  * the shipping opt-in (including its epoch) must not silently resume. The
- * merge window and combine history are kept.
+ * rollout-membership epoch is cleared too: even if the shop domain is still
+ * listed in AppControl.shippingAllowShops, a reinstalled shop has no
+ * activation cutoff until the operator re-stamps membership, so stale READY
+ * evidence can never become eligible across a reinstall. The merge window
+ * and combine history are kept.
  */
 export async function resetAutomationForUninstall(
   shop: string,
@@ -110,6 +121,7 @@ export async function resetAutomationForUninstall(
       onboardingCompletedAt: null,
       shippingAdjustmentEnabled: false,
       shippingAdjustmentEnabledAt: null,
+      shippingRolloutAt: null,
     },
   });
 }

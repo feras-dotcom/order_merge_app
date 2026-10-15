@@ -121,6 +121,8 @@ export interface ControlRow {
   // INVERTED semantics: empty shippingAllowShops = NO shops.
   shippingAdjustmentsEnabled: boolean;
   shippingAllowShops: string[];
+  /** Kill-switch epoch: stamped on false→true, cleared on disable. */
+  shippingEnabledAt: Date | null;
   note: string | null;
 }
 
@@ -778,19 +780,57 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       if (patch.completionEnabled !== undefined)
         sets.push(Prisma.sql`"completionEnabled" = ${patch.completionEnabled}`);
       if (patch.allowShops !== undefined) sets.push(Prisma.sql`"allowShops" = ${patch.allowShops}`);
-      if (patch.shippingAdjustmentsEnabled !== undefined)
-        sets.push(Prisma.sql`"shippingAdjustmentsEnabled" = ${patch.shippingAdjustmentsEnabled}`);
       if (patch.shippingAllowShops !== undefined)
         sets.push(Prisma.sql`"shippingAllowShops" = ${patch.shippingAllowShops}`);
       if (patch.note !== undefined) sets.push(Prisma.sql`"note" = ${patch.note}`);
-      if (!sets.length) return;
+      const touchesShipping =
+        patch.shippingAdjustmentsEnabled !== undefined ||
+        patch.shippingAllowShops !== undefined;
+      if (!sets.length && !touchesShipping) return;
       sets.push(Prisma.sql`"updatedAt" = ${DB_WALL}`);
       // FOR UPDATE serializes against the gates' FOR SHARE reads: a disable
       // waits for in-flight gates and every gate that linearizes after this
       // commits sees the new value.
       await withOwnershipTx(db, async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "AppControl" WHERE id = 'control' FOR UPDATE`;
-        await tx.$executeRaw`UPDATE "AppControl" SET ${Prisma.join(sets)} WHERE id = 'control'`;
+        const [before] = await tx.$queryRaw<
+          { shippingAdjustmentsEnabled: boolean; shippingAllowShops: string[] }[]
+        >`SELECT "shippingAdjustmentsEnabled", "shippingAllowShops"
+          FROM "AppControl" WHERE id = 'control' FOR UPDATE`;
+        // Shipping activation epochs are stamped here, atomically with the
+        // control change, on the DB wall clock — combines created before the
+        // CURRENT epochs can never produce shipping intents (Phase 1.1).
+        if (patch.shippingAdjustmentsEnabled !== undefined) {
+          sets.push(
+            Prisma.sql`"shippingAdjustmentsEnabled" = ${patch.shippingAdjustmentsEnabled}`,
+            Prisma.sql`"shippingEnabledAt" = CASE
+              WHEN ${patch.shippingAdjustmentsEnabled} = false THEN NULL
+              WHEN "shippingAdjustmentsEnabled" = true THEN "shippingEnabledAt"
+              ELSE ${DB_WALL} END`,
+          );
+        }
+        if (patch.shippingAllowShops !== undefined && before) {
+          const beforeSet = new Set(before.shippingAllowShops ?? []);
+          const afterSet = new Set(patch.shippingAllowShops);
+          const added = [...afterSet].filter((s) => !beforeSet.has(s));
+          const removed = [...beforeSet].filter((s) => !afterSet.has(s));
+          if (added.length) {
+            // A shop newly entering the rollout gets a fresh membership
+            // epoch; a re-add stamps a NEW epoch, so combines that completed
+            // while the shop was out of the rollout never qualify.
+            await tx.$executeRaw`
+              INSERT INTO "Settings" ("id", "shop", "shippingRolloutAt")
+              SELECT gen_random_uuid()::text, s, ${DB_WALL} FROM UNNEST(${added}::text[]) AS s
+              ON CONFLICT ("shop") DO UPDATE SET "shippingRolloutAt" = ${DB_WALL}`;
+          }
+          if (removed.length) {
+            await tx.$executeRaw`
+              UPDATE "Settings" SET "shippingRolloutAt" = NULL
+              WHERE "shop" = ANY(${removed})`;
+          }
+        }
+        if (sets.length) {
+          await tx.$executeRaw`UPDATE "AppControl" SET ${Prisma.join(sets)} WHERE id = 'control'`;
+        }
       });
     },
 

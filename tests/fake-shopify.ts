@@ -1252,6 +1252,7 @@ export class MemoryOperationStore implements OperationStore {
     allowShops: [],
     shippingAdjustmentsEnabled: false,
     shippingAllowShops: [],
+    shippingEnabledAt: null,
     note: null,
   };
   /** Mirrors the MERGESHIP_MUTATIONS env precheck. */
@@ -1686,6 +1687,17 @@ export class MemoryOperationStore implements OperationStore {
   }
 
   async setControl(patch: Partial<Omit<ControlRow, "id">>) {
+    // Mirror the SQL epoch stamping: a false→true shipping switch stamps a
+    // fresh kill-switch epoch; disable clears it. (Per-shop rollout epochs
+    // live on Settings, which this store does not hold.)
+    if (patch.shippingAdjustmentsEnabled !== undefined) {
+      const next = patch.shippingAdjustmentsEnabled;
+      this.control.shippingEnabledAt = next
+        ? this.control.shippingAdjustmentsEnabled
+          ? this.control.shippingEnabledAt
+          : this.clock()
+        : null;
+    }
     Object.assign(this.control, this.clone(patch));
   }
 
@@ -1770,6 +1782,7 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
     shippingPolicy: "REFUND_ALL",
     shippingRetainedMinor: null,
     shippingRetainedCurrency: null,
+    shippingRolloutAt: null,
     ...opts.settings,
   };
   const getSettings = async () => settings;

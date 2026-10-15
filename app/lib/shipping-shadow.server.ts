@@ -1,4 +1,4 @@
-// ── Shipping v0 shadow evaluator (Phase 1) ────────────────────────────────────
+// ── Shipping v0 shadow evaluator (Phase 1.1) ──────────────────────────────────
 // A READ-ONLY Shopify-path evaluator that records what a shipping refund
 // worker WOULD decide for every eligible secondary of a completed native v2
 // combine — without any refund path existing yet.
@@ -7,27 +7,55 @@
 //   - Shopify access is forced through readOnlyAdmin(), which refuses any
 //     document containing the `mutation` keyword before it reaches the wire.
 //   - The only table it writes is ShippingAdjustment, and only through the
-//     store below, which refuses every write unless the connected database
-//     is the explicitly-named disposable test database
-//     (MERGESHIP_SHADOW_DATABASE === current_database()).
+//     store below, which refuses every write unless ALL of these hold:
+//       * no production markers in the environment (RAILWAY_* / NODE_ENV),
+//       * MERGESHIP_SHADOW_DATABASE === current_database(),
+//       * the database carries a disposable marker comment containing a token
+//         that equals MERGESHIP_SHADOW_TOKEN — a marker only the explicit
+//         local test-database bootstrap creates. A database NAME, a localhost
+//         address or a comment alone never proves a database is disposable.
+//   - Every row it writes carries mode='SHADOW' (CHECK constraint) — shadow
+//     evidence is never executable; a future dispatcher must reject it.
 //   - It never touches MergeOperation/MergeOrderLock/ProcessedWebhook/
 //     MergeRecord/MergeMutationAttempt/MergeClaim — a crashed or wrong
 //     evaluation can never modify, restart, block or reverse a combine.
 //
+// Activation cutoff (B1): an intent may only exist for a combine created
+// on/after the LATEST of three epochs — merchant opt-in
+// (Settings.shippingAdjustmentEnabledAt), rollout membership
+// (Settings.shippingRolloutAt) and the kill switch (AppControl.shippingEnabledAt).
+// The cutoff is snapshotted on the row (activationCutoffAt); claimIntent and
+// READY-settle recompute it inside the same transaction under FOR SHARE locks
+// and refuse when it has changed — so a control change mid-scan can never
+// produce a misleading READY row.
+//
+// Future dispatch gate (DEFINED, NOT IMPLEMENTED — no code path may dispatch):
+//   - Promote a SHADOW row through a separately authorized process only;
+//   - PENDING→DISPATCHING must re-read AppControl FOR SHARE and the Settings
+//     row FOR SHARE in the same transaction and require the recomputed
+//     cutoff to equal activationCutoffAt;
+//   - Re-read the order + full refund/transaction history and reproduce the
+//     frozen preview, requestPayload and requestHash before any dispatch;
+//   - Reject READY evidence older than a bounded age (e.g. 24h);
+//   - Reject on opt-out, uninstall, any control change, policy drift or any
+//     inconsistent financial evidence. Never resend with a new key.
+//
 // Concurrency: intent rows are claimed by INSERT (unique (shop,
 // sourceOrderId)) with a lease; PENDING rows are re-leased only after the
-// lease expires; every outcome write is a token+unexpired-conditional UPDATE
-// on the database wall clock, exactly like the merge stores. Leases give
-// liveness and stale-write fencing only.
+// lease expires AND nextCheckAt is due; every outcome write is a
+// token+unexpired-conditional UPDATE on the database wall clock, exactly
+// like the merge stores. Leases give liveness and stale-write fencing only.
 //
 // Fail-closed rules (all become REVIEW_REQUIRED unless noted):
 //   non-native-v2/incomplete combine evidence, missing/uncancelled/unclosed
 //   secondary, non-PAID financial state, multi-currency orders, unknown
 //   currency precision, tax-bearing shipping (E3 pending), prior shipping
 //   refunds, unbounded/unverifiable refund or transaction histories,
-//   inconsistent Shopify previews, no verifiable capture/sale allocation,
-//   unsupported policy. Terminal verdicts are immutable: READY, SKIPPED and
-//   REVIEW_REQUIRED rows are never rewritten by a later scan.
+//   inconsistent Shopify previews, ambiguous/split suggested transactions,
+//   any gateway other than `bogus` on a proven test order, no verifiable
+//   capture/sale allocation, unsupported policy. Terminal verdicts are
+//   immutable: READY, SKIPPED and REVIEW_REQUIRED rows are never rewritten
+//   by a later scan.
 
 import { createHash } from "crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
@@ -46,7 +74,7 @@ import type {
   OperationSecondary,
   OperationStore,
 } from "./operation-store.server";
-import { isShippingIntentAllowed } from "./shipping-activation";
+import { shippingActivationCutoff } from "./shipping-activation";
 import { assessSecondaryEvidence } from "./shipping-eligibility";
 import { buildShippingAmounts } from "./shipping-evidence";
 import {
@@ -62,9 +90,25 @@ export const SHADOW_MAX_ATTEMPTS = 8;
 /** Refund/transaction lists have no pageInfo — reads are bounded and must
  *  return strictly fewer rows than the bound to count as complete. */
 const LIST_BOUND = 50;
+/** Secondaries evaluated per combine per scan; extras stay unevaluated so the
+ *  scan makes progress next run (the combine keeps qualifying for selection). */
+const SECONDARY_SCAN_CAP = 25;
+/** The marker prefix stamped on a disposable database by the local bootstrap.
+ *  Format: `mergeship-shadow-disposable:<token>`. */
+export const SHADOW_DB_MARKER_PREFIX = "mergeship-shadow-disposable:";
+/** The only gateway a v0 shadow READY payload may allocate to: Bogus Gateway
+ *  on a proven test order. Real gateways stay disabled until a separate
+ *  production-gateway decision; manual/gift_card/cash and every unknown
+ *  gateway are REVIEW. */
+const GATEWAY_BOGUS_TEST = "bogus";
 
 export class ShadowDatabaseNotAllowedError extends Error {
   name = "ShadowDatabaseNotAllowedError";
+}
+/** A control change committed while a claim/READY write was in flight — the
+ *  write is refused; the PENDING row survives for a later re-evaluation. */
+export class GateChangedError extends Error {
+  name = "GateChangedError";
 }
 
 /** Wrap an AdminClient so no mutation can ever be sent by this subsystem. */
@@ -107,7 +151,10 @@ export function canonicalJson(value: unknown): string {
 export const requestHashOf = (payload: unknown): string =>
   createHash("sha256").update(canonicalJson(payload)).digest("hex");
 
-// ── GraphQL (read-only; validated against API 2026-04 during E0) ──────────────
+// ── GraphQL (read-only). Both documents were executed verbatim against the ──
+// pinned 2026-04 API on ordermergetest2 (M5) — including suggestedRefund's
+// shippingAmount variable and the suggestedTransactions/parentTransaction
+// shape — and the RefundInput payload below was validated by introspection.
 
 /** Fresh financial/state evidence for the cancelled+closed secondary. */
 const SHADOW_ORDER_QUERY = `#graphql
@@ -129,6 +176,7 @@ const SHADOW_ORDER_QUERY = `#graphql
         nodes {
           title
           originalPriceSet { presentmentMoney { amount currencyCode } }
+          discountedPriceSet { presentmentMoney { amount currencyCode } }
           taxLines { priceSet { presentmentMoney { amount currencyCode } } }
         }
         pageInfo { hasNextPage }
@@ -171,7 +219,7 @@ const SHADOW_PREVIEW_QUERY = `#graphql
           kind
           gateway
           amountSet { presentmentMoney { amount currencyCode } }
-          parentTransaction { id kind status gateway }
+          parentTransaction { id kind status gateway test }
         }
       }
     }
@@ -185,6 +233,8 @@ export interface ShippingShadowRow {
   mergeOperationId: string;
   sourceOrderId: string;
   operationCreatedAt: Date;
+  activationCutoffAt: Date | null;
+  mode: string;
   policyKind: string;
   policyRetainedMinor: string | null;
   policyCurrencyCode: string | null;
@@ -215,6 +265,9 @@ export interface ShadowIntentIdentity {
   mergeOperationId: string;
   sourceOrderId: string;
   operationCreatedAt: Date;
+  /** The effective activation cutoff at scan time — written into the row and
+   *  re-verified atomically on READY settle. */
+  activationCutoffAt: Date;
   policyKind: ShippingPolicyKind;
   policyRetainedMinor: string | null;
   policyCurrencyCode: string | null;
@@ -233,8 +286,12 @@ export interface ShadowSettlePatch {
 }
 
 export interface ShippingShadowStore {
-  /** Native/v2 COMPLETED ops for a shop, oldest first, capped. Read-only. */
-  findCompletedOps(shop: string, limit: number): Promise<OperationRecord[]>;
+  /** COMPLETED native-v2 ops that still have at least one secondary with no
+   *  ShippingAdjustment row — evaluated combines fall out of the window, so
+   *  the limit can never starve newer combines behind terminal rows. */
+  findUnevaluatedOps(shop: string, limit: number): Promise<OperationRecord[]>;
+  /** PENDING intents whose deferral has elapsed (nextCheckAt due). */
+  findDuePending(shop: string, limit: number): Promise<ShippingShadowRow[]>;
   /** MergeRecord rows written by an operation. Read-only. */
   listMergeRecords(
     shop: string,
@@ -249,13 +306,21 @@ export interface ShippingShadowStore {
     status: "SKIPPED" | "REVIEW_REQUIRED",
     reason: { reasonCode?: string; reviewReason?: string },
   ): Promise<boolean>;
-  /** INSERT a leased PENDING intent carrying the frozen policy snapshot.
+  /** INSERT a leased PENDING intent carrying the frozen policy + cutoff
+   *  snapshot. Recomputes the cutoff under FOR SHARE inside the write
+   *  transaction and returns 'GATE_CHANGED' when it no longer matches;
    *  null on (shop, sourceOrderId) conflict. */
-  claimIntent(identity: ShadowIntentIdentity, ttlMs: number): Promise<ShippingShadowRow | null>;
-  /** Re-lease an expired PENDING intent; null when it is live-leased or no
-   *  longer PENDING. */
+  claimIntent(
+    identity: ShadowIntentIdentity,
+    ttlMs: number,
+  ): Promise<ShippingShadowRow | "GATE_CHANGED" | null>;
+  /** Re-lease an expired, due PENDING intent; null when live-leased,
+   *  not yet due, or no longer PENDING. */
   reclaimIntent(id: string, token: string, ttlMs: number): Promise<ShippingShadowRow | null>;
-  /** Settle a claimed intent. Throws OwnershipLostError on a stale lease. */
+  /** Settle a claimed intent. A READY settle re-verifies the activation
+   *  cutoff under FOR SHARE in the same transaction and throws
+   *  GateChangedError on any control change; throws OwnershipLostError on a
+   *  stale lease. */
   settleIntent(id: string, token: string, patch: ShadowSettlePatch): Promise<void>;
   /** Reschedule a claimed intent for a later retry. Throws OwnershipLostError. */
   rescheduleIntent(id: string, token: string, delayMs: number, reason: string): Promise<void>;
@@ -269,17 +334,90 @@ const policyColumns = (p: ShadowIntentIdentity) => ({
   currency: p.policyKind === "RETAIN_FIXED" ? p.policyCurrencyCode : null,
 });
 
+/** SQL fragment: bind a JS Date into a naive-UTC TIMESTAMP column safely. */
+const utcTs = (d: Date) => Prisma.sql`(${d}::timestamptz AT TIME ZONE 'UTC')`;
+
+/**
+ * Recompute the shop's live activation cutoff inside a transaction under
+ * FOR SHARE reads — the same linearization discipline the merge dispatch
+ * gate uses. Returns null when any prerequisite is inactive.
+ */
+async function liveCutoff(
+  tx: Prisma.TransactionClient,
+  shop: string,
+): Promise<Date | null> {
+  const [control] = await tx.$queryRaw<
+    {
+      shippingAdjustmentsEnabled: boolean;
+      shippingEnabledAt: Date | null;
+      shippingAllowShops: string[];
+    }[]
+  >`SELECT "shippingAdjustmentsEnabled", "shippingEnabledAt", "shippingAllowShops"
+    FROM "AppControl" WHERE id = 'control' FOR SHARE`;
+  const [settings] = await tx.$queryRaw<
+    {
+      shippingAdjustmentEnabled: boolean;
+      shippingAdjustmentEnabledAt: Date | null;
+      shippingRolloutAt: Date | null;
+    }[]
+  >`SELECT "shippingAdjustmentEnabled", "shippingAdjustmentEnabledAt", "shippingRolloutAt"
+    FROM "Settings" WHERE "shop" = ${shop} FOR SHARE`;
+  if (!control) return null;
+  return shippingActivationCutoff({
+    shippingAdjustmentsEnabled: control.shippingAdjustmentsEnabled,
+    shippingEnabledAt: control.shippingEnabledAt,
+    shippingAllowShops: control.shippingAllowShops,
+    shop,
+    shippingRolloutAt: settings?.shippingRolloutAt ?? null,
+    shopEnabled: settings?.shippingAdjustmentEnabled ?? false,
+    enabledAt: settings?.shippingAdjustmentEnabledAt ?? null,
+  });
+}
+
+const sameInstant = (a: Date | null, b: Date | null) =>
+  a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
+
 export function makeShippingShadowStore(db: PrismaClient = defaultDb): ShippingShadowStore {
   let writableChecked = false;
-  /** Hard guard: persistent shadow evidence is allowed ONLY on the
-   *  explicitly-named disposable database. */
+  /**
+   * Hard guard: persistent shadow evidence is allowed ONLY on a database that
+   * proves it is the disposable one. A name match, a localhost address or a
+   * comment alone are never sufficient — the marker comment must carry the
+   * token the operator exported as MERGESHIP_SHADOW_TOKEN, and production
+   * environment markers refuse outright. The marker is created only by the
+   * explicit test-database bootstrap (tests / scripts), never by migrations.
+   */
   const assertWritable = async () => {
     if (writableChecked) return;
-    const expected = process.env.MERGESHIP_SHADOW_DATABASE;
-    const [row] = await db.$queryRaw<{ db: string }[]>`SELECT current_database() AS db`;
-    if (!expected || !row || expected !== row.db) {
+    if (
+      process.env.NODE_ENV === "production" ||
+      process.env.RAILWAY_ENVIRONMENT ||
+      process.env.RAILWAY_ENVIRONMENT_NAME ||
+      process.env.RAILWAY_PROJECT_ID
+    ) {
       throw new ShadowDatabaseNotAllowedError(
-        `Shadow writes refused: MERGESHIP_SHADOW_DATABASE (${expected ?? "unset"}) does not match current_database() (${row?.db ?? "unknown"}).`,
+        "Shadow writes refused: a production environment marker is set.",
+      );
+    }
+    const expectedDb = process.env.MERGESHIP_SHADOW_DATABASE;
+    const expectedToken = process.env.MERGESHIP_SHADOW_TOKEN;
+    const [row] = await db.$queryRaw<{ db: string; marker: string | null }[]>`
+      SELECT current_database() AS db,
+        shobj_description(
+          (SELECT oid FROM pg_database WHERE datname = current_database()),
+          'pg_database'
+        ) AS marker`;
+    if (!expectedDb || !row || expectedDb !== row.db) {
+      throw new ShadowDatabaseNotAllowedError(
+        `Shadow writes refused: MERGESHIP_SHADOW_DATABASE (${expectedDb ?? "unset"}) does not match current_database() (${row?.db ?? "unknown"}).`,
+      );
+    }
+    if (
+      !expectedToken ||
+      row.marker !== `${SHADOW_DB_MARKER_PREFIX}${expectedToken}`
+    ) {
+      throw new ShadowDatabaseNotAllowedError(
+        `Shadow writes refused: database '${row.db}' carries no disposable marker matching MERGESHIP_SHADOW_TOKEN.`,
       );
     }
     writableChecked = true;
@@ -298,12 +436,29 @@ export function makeShippingShadowStore(db: PrismaClient = defaultDb): ShippingS
   };
 
   return {
-    async findCompletedOps(shop, limit) {
+    async findUnevaluatedOps(shop, limit) {
       return db.$queryRaw<OperationRecord[]>`
-        SELECT * FROM "MergeOperation"
-        WHERE "shop" = ${shop} AND "protocolVersion" = 2 AND "phase" = 'COMPLETED'
-        ORDER BY "createdAt" ASC
+        SELECT op.* FROM "MergeOperation" op
+        WHERE op."shop" = ${shop} AND op."protocolVersion" = 2 AND op."phase" = 'COMPLETED'
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(op."secondaries") s
+            WHERE NOT EXISTS (
+              SELECT 1 FROM "ShippingAdjustment" sa
+              WHERE sa."shop" = op."shop" AND sa."sourceOrderId" = (s->>'id')
+            )
+          )
+        ORDER BY op."createdAt" ASC
         LIMIT ${limit}`;
+    },
+
+    async findDuePending(shop, limit) {
+      const rows = await db.$queryRaw<any[]>`
+        SELECT * FROM "ShippingAdjustment"
+        WHERE "shop" = ${shop} AND "status" = 'PENDING'
+          AND ("nextCheckAt" IS NULL OR "nextCheckAt" <= ${DB_WALL})
+        ORDER BY "nextCheckAt" ASC NULLS FIRST
+        LIMIT ${limit}`;
+      return rows.map(toShadowRow);
     },
 
     async listMergeRecords(shop, operationId) {
@@ -328,12 +483,14 @@ export function makeShippingShadowStore(db: PrismaClient = defaultDb): ShippingS
       const rows = await db.$queryRaw<any[]>`
         INSERT INTO "ShippingAdjustment" (
           "id", "shop", "mergeOperationId", "sourceOrderId", "operationCreatedAt",
+          "activationCutoffAt",
           "policyKind", "policyRetainedMinor", "policyCurrencyCode",
           "status", "idempotencyKey", "marker", "reasonCode", "reviewReason",
           "attempts", "createdAt", "updatedAt"
         ) VALUES (
           ${b.id}, ${identity.shop}, ${identity.mergeOperationId}, ${identity.sourceOrderId},
-          ${identity.operationCreatedAt},
+          ${utcTs(identity.operationCreatedAt)},
+          ${utcTs(identity.activationCutoffAt)},
           ${b.kind}, ${b.minor}, ${b.currency},
           ${status}, ${b.idem}, ${b.marker},
           ${reason.reasonCode ?? null}, ${reason.reviewReason ?? null},
@@ -347,24 +504,33 @@ export function makeShippingShadowStore(db: PrismaClient = defaultDb): ShippingS
     async claimIntent(identity, ttlMs) {
       await assertWritable();
       const b = baseInsert(identity);
-      const rows = await db.$queryRaw<any[]>`
-        INSERT INTO "ShippingAdjustment" (
-          "id", "shop", "mergeOperationId", "sourceOrderId", "operationCreatedAt",
-          "policyKind", "policyRetainedMinor", "policyCurrencyCode",
-          "status", "idempotencyKey", "marker",
-          "leaseToken", "leasedUntil", "nextCheckAt", "attempts",
-          "createdAt", "updatedAt"
-        ) VALUES (
-          ${b.id}, ${identity.shop}, ${identity.mergeOperationId}, ${identity.sourceOrderId},
-          ${identity.operationCreatedAt},
-          ${b.kind}, ${b.minor}, ${b.currency},
-          'PENDING', ${b.idem}, ${b.marker},
-          ${crypto.randomUUID()}, ${dbWallPlus(ttlMs)}, ${DB_WALL}, 1,
-          ${DB_WALL}, ${DB_WALL}
-        )
-        ON CONFLICT ("shop", "sourceOrderId") DO NOTHING
-        RETURNING *`;
-      return rows.length ? toShadowRow(rows[0]) : null;
+      return withOwnershipTx(db, async (tx) => {
+        // Atomic gate: the recomputed live cutoff must equal the snapshot the
+        // scan is about to write — a control change committed while this tx
+        // waits on the FOR SHARE locks is always observed.
+        const cutoff = await liveCutoff(tx, identity.shop);
+        if (!sameInstant(cutoff, identity.activationCutoffAt)) return "GATE_CHANGED" as const;
+        const rows = await tx.$queryRaw<any[]>`
+          INSERT INTO "ShippingAdjustment" (
+            "id", "shop", "mergeOperationId", "sourceOrderId", "operationCreatedAt",
+            "activationCutoffAt",
+            "policyKind", "policyRetainedMinor", "policyCurrencyCode",
+            "status", "idempotencyKey", "marker",
+            "leaseToken", "leasedUntil", "nextCheckAt", "attempts",
+            "createdAt", "updatedAt"
+          ) VALUES (
+            ${b.id}, ${identity.shop}, ${identity.mergeOperationId}, ${identity.sourceOrderId},
+            ${utcTs(identity.operationCreatedAt)},
+            ${utcTs(identity.activationCutoffAt)},
+            ${b.kind}, ${b.minor}, ${b.currency},
+            'PENDING', ${b.idem}, ${b.marker},
+            ${crypto.randomUUID()}, ${dbWallPlus(ttlMs)}, ${DB_WALL}, 1,
+            ${DB_WALL}, ${DB_WALL}
+          )
+          ON CONFLICT ("shop", "sourceOrderId") DO NOTHING
+          RETURNING *`;
+        return rows.length ? toShadowRow(rows[0]) : null;
+      });
     },
 
     async reclaimIntent(id, token, ttlMs) {
@@ -372,7 +538,7 @@ export function makeShippingShadowStore(db: PrismaClient = defaultDb): ShippingS
       const rows = await db.$queryRaw<any[]>`
         UPDATE "ShippingAdjustment"
         SET "leaseToken" = ${token}, "leasedUntil" = ${dbWallPlus(ttlMs)},
-            "attempts" = "attempts" + 1, "nextCheckAt" = ${DB_WALL}, "updatedAt" = ${DB_WALL}
+            "attempts" = "attempts" + 1, "updatedAt" = ${DB_WALL}
         WHERE "id" = ${id} AND "status" = 'PENDING'
           AND ("leasedUntil" IS NULL OR "leasedUntil" < ${DB_WALL})
           AND ("nextCheckAt" IS NULL OR "nextCheckAt" <= ${DB_WALL})
@@ -403,7 +569,22 @@ export function makeShippingShadowStore(db: PrismaClient = defaultDb): ShippingS
         );
       }
       await withOwnershipTx(db, async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "ShippingAdjustment" WHERE id = ${id} FOR UPDATE`;
+        const [row] = await tx.$queryRaw<
+          { shop: string; activationCutoffAt: Date | null }[]
+        >`SELECT "shop", "activationCutoffAt" FROM "ShippingAdjustment"
+          WHERE id = ${id} FOR UPDATE`;
+        // READY is the last writable verdict with financial content — the
+        // live cutoff must still equal the row's snapshot. Any control change
+        // committed while this tx waited on the row/FOR SHARE locks is
+        // observed here and refuses the write.
+        if (patch.status === "READY") {
+          const cutoff = await liveCutoff(tx, row?.shop ?? "");
+          if (!row || !sameInstant(cutoff, row.activationCutoffAt)) {
+            throw new GateChangedError(
+              `Shipping intent ${id}: activation cutoff changed since intent creation.`,
+            );
+          }
+        }
         const updated = await tx.$executeRaw`
           UPDATE "ShippingAdjustment" SET ${Prisma.join(sets)}
           WHERE "id" = ${id} AND "leaseToken" = ${token}
@@ -454,11 +635,13 @@ const skip = (reasonCode: string, reason: string): ShadowOutcome => ({
   reason,
 });
 
-const sumMoney = (values: any[]): bigint | null => {
+/** Sum MoneyV2 fragments into minor units; null when any value is
+ *  unparseable or in a different currency than the order's. */
+const sumMoney = (values: any[], currencyCode: string): bigint | null => {
   let total = 0n;
   for (const v of values) {
     const parsed = parseShopMoney(v);
-    if (!parsed) return null;
+    if (!parsed || parsed.currencyCode !== currencyCode) return null;
     total += parsed.minorUnits;
   }
   return total;
@@ -522,13 +705,24 @@ export async function evaluateShadowSource(
     return review("Transaction history exceeds the bounded read; completeness unproven.");
   }
 
+  const currencyCode = order.currencyCode;
   const shippingNodes = order.shippingLines.nodes as any[];
-  const shippingPaid = sumMoney(shippingNodes.map((l) => l?.originalPriceSet?.presentmentMoney));
+  // What the customer actually paid for shipping is the DISCOUNTED price —
+  // originalPriceSet is pre-discount and would overstate the refund target.
+  const shippingPaid = sumMoney(
+    shippingNodes.map((l) => l?.discountedPriceSet?.presentmentMoney),
+    currencyCode,
+  );
+  const shippingOriginal = sumMoney(
+    shippingNodes.map((l) => l?.originalPriceSet?.presentmentMoney),
+    currencyCode,
+  );
   const shippingTax = sumMoney(
     shippingNodes.flatMap((l) => (l?.taxLines ?? []).map((t: any) => t?.priceSet?.presentmentMoney)),
+    currencyCode,
   );
-  if (shippingPaid === null || shippingTax === null) {
-    return review("Shipping price or tax amounts are unparseable.");
+  if (shippingPaid === null || shippingTax === null || shippingOriginal === null) {
+    return review("Shipping price or tax amounts are unparseable or in a foreign currency.");
   }
 
   // Refund history: the bounded refund list's shipping lines must reconcile
@@ -536,12 +730,13 @@ export async function evaluateShadowSource(
   const refundedShippingLines = refunds.flatMap((r: any) => r.refundShippingLines?.nodes ?? []);
   const refundedShipping = sumMoney(
     refundedShippingLines.map((l: any) => l?.subtotalAmountSet?.presentmentMoney),
+    currencyCode,
   );
   if (refundedShipping === null) {
-    return review("Refunded shipping amounts are unparseable.");
+    return review("Refunded shipping amounts are unparseable or in a foreign currency.");
   }
   const aggregateRefunded = parseShopMoney(order.totalRefundedShippingSet?.presentmentMoney);
-  if (!aggregateRefunded) {
+  if (!aggregateRefunded || aggregateRefunded.currencyCode !== currencyCode) {
     return review("Order refunded-shipping aggregate is missing or invalid.");
   }
   if (refundedShipping !== aggregateRefunded.minorUnits) {
@@ -567,7 +762,6 @@ export async function evaluateShadowSource(
     return review("Source shipping was already partially or fully refunded.");
   }
 
-  const currencyCode = order.currencyCode;
   const precision = getCurrencyPrecision(currencyCode);
   if (precision === null) {
     return review(`Currency ${currencyCode} has no supported minor-unit precision.`);
@@ -609,13 +803,31 @@ export async function evaluateShadowSource(
   if (decision.kind === "SKIP") return skip("POLICY_SKIP", decision.reason);
   if (decision.kind === "REVIEW") return review(decision.reason);
 
-  // Explicit transaction allocation: the preview must name a suggested
-  // transaction whose parent is a verifiably successful CAPTURE or SALE on
-  // this same order — never a guessed or default allocation.
+  // Transaction allocation: v0 accepts exactly ONE suggested transaction —
+  // a split refund across parents/gateways is ambiguous and never guessed.
+  // It must be a SUGGESTED_REFUND moving exactly the planned amount whose
+  // parent is a verifiably successful CAPTURE or SALE on this same order.
   const suggested = Array.isArray(preview.suggestedTransactions)
     ? preview.suggestedTransactions
     : [];
-  const parent = suggested[0]?.parentTransaction;
+  if (suggested.length !== 1) {
+    return review(
+      `Refund preview suggests ${suggested.length} transactions; a single exact allocation is required.`,
+    );
+  }
+  const [suggestion] = suggested;
+  if (suggestion?.kind !== "SUGGESTED_REFUND") {
+    return review(`Suggested transaction kind ${suggestion?.kind ?? "unknown"} is not supported.`);
+  }
+  const suggestedAmount = parseShopMoney(suggestion.amountSet?.presentmentMoney);
+  if (
+    !suggestedAmount ||
+    suggestedAmount.currencyCode !== currencyCode ||
+    suggestedAmount.minorUnits !== BigInt(decision.transactionMinor)
+  ) {
+    return review("Suggested transaction amount does not equal the planned refund total.");
+  }
+  const parent = suggestion.parentTransaction;
   const parentTxn =
     parent &&
     transactions.find(
@@ -624,20 +836,39 @@ export async function evaluateShadowSource(
         t?.status === "SUCCESS" &&
         (t?.kind === "CAPTURE" || t?.kind === "SALE"),
     );
-  if (!suggested.length || !parentTxn) {
+  if (!parentTxn) {
     return review("No verifiable capture/sale transaction for the refund allocation.");
   }
-  const gateway = suggested[0].gateway;
+  // Gateway allowlist: only Bogus Gateway, and only on a proven test order.
+  // Production-gateway enablement is a separate decision — manual,
+  // gift_card, cash and every unknown gateway are REVIEW.
+  const gateway = suggestion.gateway;
   if (typeof gateway !== "string" || !gateway || parentTxn.gateway !== gateway) {
     return review("Suggested transaction gateway is missing or inconsistent.");
   }
+  if (gateway !== GATEWAY_BOGUS_TEST) {
+    return review(`Gateway '${gateway}' is not on the shipping-refund allowlist.`);
+  }
+  if (parent.test !== true || parentTxn.test !== true || order.test !== true) {
+    return review("Transaction test flags are inconsistent with a test order.");
+  }
 
+  // Frozen RefundInput — field names verified against the 2026-04 schema via
+  // introspection: RefundInput.shipping is a ShippingRefundInput carrying a
+  // MoneyInput `shippingRefundAmount`; transactions are OrderTransactionInput
+  // (amount is a Money scalar; kind must be REFUND).
   const requestPayload = {
     orderId: input.sourceOrderId,
     notify: false,
     note: `MergeShip shipping adjustment ${input.marker} — shipping refunded for order merged into ${input.primaryOrderName}.`,
     currency: currencyCode,
-    shipping: { amount: minorToDecimal(decision.shippingMinor, precision), fullRefund: false },
+    shipping: {
+      shippingRefundAmount: {
+        amount: minorToDecimal(decision.shippingMinor, precision),
+        currencyCode,
+      },
+      fullRefund: false,
+    },
     transactions: [
       {
         orderId: input.sourceOrderId,
@@ -665,6 +896,7 @@ export async function evaluateShadowSource(
         presentmentCurrencyCode: order.presentmentCurrencyCode,
         taxesIncluded: order.taxesIncluded,
         shippingPaidMinor: shippingPaid.toString(),
+        shippingOriginalMinor: shippingOriginal.toString(),
         shippingTaxMinor: shippingTax.toString(),
         refundedShippingMinor: refundedShipping.toString(),
         refundCount: refunds.length,
@@ -676,11 +908,13 @@ export async function evaluateShadowSource(
         totalMinor: built.amounts.previewTotalMinor,
         maxShippingMinor: built.amounts.maxShippingRefundableMinor,
         maxPaymentMinor: built.amounts.maxPaymentRefundableMinor,
+        suggestedTransactionMinor: suggestedAmount.minorUnits.toString(),
       },
       allocation: {
         parentTransactionId: parentTxn.id,
         parentKind: parentTxn.kind,
         parentStatus: parentTxn.status,
+        parentTest: parentTxn.test === true,
         gateway,
       },
     },
@@ -693,9 +927,11 @@ export async function evaluateShadowSource(
 
 export interface ShadowDeps {
   store: ShippingShadowStore;
-  ops: Pick<OperationStore, "getControl" | "listAttempts">;
+  ops: Pick<OperationStore, "getControl" | "getOperation" | "listAttempts">;
   settings: (shop: string) => Promise<MergeSettings>;
-  /** Offline admin per shop; null = no session. */
+  /** Offline admin per shop; null = no session. Throwing means the session
+   *  lookup itself failed — treated as TRANSIENT (rescheduled), never as a
+   *  financial-review outcome. */
   adminFactory: (shop: string) => Promise<AdminClient | null>;
   leaseTtlMs?: number;
   retryMs?: number;
@@ -711,6 +947,7 @@ export type ShadowEntryOutcome =
   | "PENDING_HELD"
   | "LEASE_LOST"
   | "GATE_CLOSED"
+  | "GATE_CHANGED"
   | "NO_SESSION"
   | "ERROR";
 
@@ -779,7 +1016,7 @@ const isPolicySupported = (settings: MergeSettings) =>
  * One shadow scan over the rollout shops. With `apply: false` nothing is
  * written (dry run — outcomes are still computed with fresh Shopify reads).
  * With `apply: true` outcomes persist via the store, which itself refuses to
- * write outside MERGESHIP_SHADOW_DATABASE.
+ * write unless the connected database proves it is the disposable one.
  */
 export async function runShadowScan(
   deps: ShadowDeps,
@@ -814,6 +1051,7 @@ export async function runShadowScan(
       | "shop"
       | "mergeOperationId"
       | "sourceOrderId"
+      | "activationCutoffAt"
       | "policyKind"
       | "policyRetainedMinor"
       | "policyCurrencyCode"
@@ -821,10 +1059,10 @@ export async function runShadowScan(
       | "attempts"
       | "leaseToken"
     >,
-    op: OperationRecord,
+    op: OperationRecord | null,
     secondaryName: string,
+    liveCutoffNow: Date | null,
   ) => {
-    const policy = reconstructPolicy(row);
     const entryBase = {
       shop: row.shop,
       mergeOperationId: row.mergeOperationId,
@@ -837,6 +1075,21 @@ export async function runShadowScan(
       }
       push({ ...entryBase, outcome, detail });
     };
+    // Activation must be unchanged since the row was created — a toggled
+    // control stamps a NEW epoch, so equality is the re-gate. REVIEW settles
+    // are non-executable evidence and do not need the atomic gate; READY is
+    // additionally re-verified inside settleIntent's transaction.
+    if (!sameInstant(liveCutoffNow, row.activationCutoffAt)) {
+      return settle(
+        {
+          status: "REVIEW_REQUIRED",
+          reviewReason: "Activation state changed since the intent was created.",
+        },
+        "REVIEW_REQUIRED",
+        "activation cutoff changed",
+      );
+    }
+    const policy = reconstructPolicy(row);
     if (!policy) {
       return settle(
         {
@@ -847,7 +1100,8 @@ export async function runShadowScan(
         "unsupported policy snapshot",
       );
     }
-    if (row.attempts >= maxAttempts) {
+    // attempts counts claims+reclaims; a value > cap parks the intent.
+    if (row.attempts > maxAttempts) {
       return settle(
         {
           status: "REVIEW_REQUIRED",
@@ -861,14 +1115,19 @@ export async function runShadowScan(
     try {
       admin = await deps.adminFactory(row.shop);
     } catch (err: any) {
-      return settle(
-        {
-          status: "REVIEW_REQUIRED",
-          reviewReason: `Shop session lookup failed: ${err?.message ?? err}`,
-        },
-        "REVIEW_REQUIRED",
-        "session lookup failed",
-      );
+      // Session/lookup failures are transient infrastructure problems — the
+      // intent is rescheduled, never burned into a permanent REVIEW.
+      const detail = String(err?.message ?? err);
+      if (!opts.apply) {
+        return push({ ...entryBase, outcome: "ERROR", detail });
+      }
+      try {
+        await deps.store.rescheduleIntent(row.id, row.leaseToken!, retryMs, "TRANSIENT");
+      } catch (e2) {
+        if (!(e2 instanceof OwnershipLostError)) throw e2;
+        return push({ ...entryBase, outcome: "LEASE_LOST" });
+      }
+      return push({ ...entryBase, outcome: "RETRY_SCHEDULED", detail });
     }
     if (!admin) {
       return settle(
@@ -882,7 +1141,7 @@ export async function runShadowScan(
         sourceOrderId: row.sourceOrderId,
         policy,
         marker: row.marker ?? `MS-SHIP-${row.id}`,
-        primaryOrderName: op.primaryOrderName,
+        primaryOrderName: op?.primaryOrderName ?? "",
       });
       if (outcome.kind === "READY") {
         return settle(
@@ -924,86 +1183,114 @@ export async function runShadowScan(
 
   for (const shop of shops) {
     const settings = await deps.settings(shop);
-    // The merchant opt-in gate is a precondition for ANY write: without it no
-    // row is created at all (a later opt-in stamps a fresh epoch anyway, so
-    // nothing here could ever qualify retroactively).
-    const optedIn =
-      settings.shippingAdjustmentEnabled === true &&
-      settings.shippingAdjustmentEnabledAt instanceof Date &&
-      !Number.isNaN(settings.shippingAdjustmentEnabledAt.getTime());
-    const ops = await deps.store.findCompletedOps(shop, limit);
-    for (const op of ops) {
+    const cutoff = shippingActivationCutoff({
+      shippingAdjustmentsEnabled: control.shippingAdjustmentsEnabled,
+      shippingEnabledAt: control.shippingEnabledAt,
+      shippingAllowShops: control.shippingAllowShops,
+      shop,
+      shippingRolloutAt: settings.shippingRolloutAt,
+      shopEnabled: settings.shippingAdjustmentEnabled,
+      enabledAt: settings.shippingAdjustmentEnabledAt,
+    });
+
+    // ── A) Due PENDING intents: re-lease and re-evaluate ──
+    for (const row of await deps.store.findDuePending(shop, limit)) {
+      const base = {
+        shop,
+        mergeOperationId: row.mergeOperationId,
+        sourceOrderId: row.sourceOrderId,
+      };
       try {
-      const [records, attempts, existing] = await Promise.all([
-        deps.store.listMergeRecords(shop, op.id),
-        deps.ops.listAttempts(op.id),
-        deps.store.findAdjustments(
-          shop,
-          (op.secondaries ?? []).map((s: OperationSecondary) => s.id),
-        ),
-      ]);
-      const bySource = new Map(existing.map((r) => [r.sourceOrderId, r]));
+        const reclaimed = await deps.store.reclaimIntent(row.id, crypto.randomUUID(), ttl);
+        if (!reclaimed) {
+          push({ ...base, outcome: "PENDING_HELD" });
+          continue;
+        }
+        const op = await deps.ops.getOperation(row.mergeOperationId);
+        const secondary = (op?.secondaries ?? []).find(
+          (s: OperationSecondary) => s.id === row.sourceOrderId,
+        );
+        if (!op || op.phase !== "COMPLETED" || !secondary) {
+          await deps.store.settleIntent(reclaimed.id, reclaimed.leaseToken!, {
+            status: "REVIEW_REQUIRED",
+            reviewReason: "Combine evidence is missing or the operation is no longer COMPLETED.",
+          });
+          push({ ...base, outcome: "REVIEW_REQUIRED", detail: "combine evidence missing" });
+          continue;
+        }
+        await finish(reclaimed, op, secondary.name, cutoff);
+      } catch (err) {
+        if (err instanceof OwnershipLostError) {
+          push({ ...base, outcome: "LEASE_LOST" });
+        } else if (err instanceof GateChangedError) {
+          push({ ...base, outcome: "GATE_CHANGED" });
+        } else {
+          push({ ...base, outcome: "ERROR", detail: String((err as Error)?.message ?? err) });
+        }
+      }
+    }
 
-      for (const secondary of (op.secondaries ?? []) as OperationSecondary[]) {
-        const base = {
-          shop,
-          mergeOperationId: op.id,
-          sourceOrderId: secondary.id,
-          sourceOrderName: secondary.name,
-        };
-        const row = bySource.get(secondary.id);
+    // ── B) Combines with at least one never-evaluated secondary ──
+    for (const op of await deps.store.findUnevaluatedOps(shop, limit)) {
+      try {
+        const [records, attempts, existing] = await Promise.all([
+          deps.store.listMergeRecords(shop, op.id),
+          deps.ops.listAttempts(op.id),
+          deps.store.findAdjustments(
+            shop,
+            (op.secondaries ?? []).map((s: OperationSecondary) => s.id),
+          ),
+        ]);
+        const bySource = new Map(existing.map((r) => [r.sourceOrderId, r]));
 
-        if (row) {
-          // Terminal verdicts are immutable; a live lease is another worker's.
-          if (row.status !== "PENDING") {
-            push({ ...base, outcome: "EXISTS", detail: `status ${row.status}` });
+        for (const secondary of (op.secondaries ?? []).slice(0, SECONDARY_SCAN_CAP) as OperationSecondary[]) {
+          const base = {
+            shop,
+            mergeOperationId: op.id,
+            sourceOrderId: secondary.id,
+            sourceOrderName: secondary.name,
+          };
+          const row = bySource.get(secondary.id);
+
+          if (row) {
+            // Terminal verdicts are immutable; a live lease or a deferred
+            // nextCheckAt belongs to another pass.
+            if (row.status !== "PENDING") {
+              push({ ...base, outcome: "EXISTS", detail: `status ${row.status}` });
+              continue;
+            }
+            if (!opts.apply) {
+              push({ ...base, outcome: "EXISTS", detail: "PENDING (dry run)" });
+              continue;
+            }
+            try {
+              const reclaimed = await deps.store.reclaimIntent(row.id, crypto.randomUUID(), ttl);
+              if (!reclaimed) {
+                push({ ...base, outcome: "PENDING_HELD" });
+                continue;
+              }
+              await finish(reclaimed, op, secondary.name, cutoff);
+            } catch (err) {
+              if (err instanceof OwnershipLostError) {
+                push({ ...base, outcome: "LEASE_LOST" });
+              } else if (err instanceof GateChangedError) {
+                push({ ...base, outcome: "GATE_CHANGED" });
+              } else {
+                throw err;
+              }
+            }
             continue;
           }
-          const gateOpen = isShippingIntentAllowed({
-            shippingAdjustmentsEnabled: control.shippingAdjustmentsEnabled,
-            shippingAllowShops: control.shippingAllowShops,
-            shop,
-            shopEnabled: settings.shippingAdjustmentEnabled,
-            enabledAt: settings.shippingAdjustmentEnabledAt,
-            operationCreatedAt: row.operationCreatedAt,
-          });
-          if (!gateOpen) {
+
+          // No row yet. A combine predating the CURRENT cutoff can never
+          // qualify — record a durable SKIPPED row so it is never re-examined.
+          // cutoff === null means a prerequisite is inactive: nothing is
+          // written, nothing can become eligible retroactively.
+          if (cutoff === null) {
             push({ ...base, outcome: "GATE_CLOSED" });
             continue;
           }
-          if (!opts.apply) {
-            push({ ...base, outcome: "EXISTS", detail: "PENDING (dry run)" });
-            continue;
-          }
-          const reclaimed = await deps.store.reclaimIntent(row.id, crypto.randomUUID(), ttl);
-          if (!reclaimed) {
-            push({ ...base, outcome: "PENDING_HELD" });
-            continue;
-          }
-          try {
-            await finish(reclaimed, op, secondary.name);
-          } catch (err) {
-            if (!(err instanceof OwnershipLostError)) throw err;
-            push({ ...base, outcome: "LEASE_LOST" });
-          }
-          continue;
-        }
-
-        // No row yet. The full activation gate decides whether anything is
-        // allowed; only an epoch-excluded combine gets a durable SKIPPED row.
-        const gateOpen = isShippingIntentAllowed({
-          shippingAdjustmentsEnabled: control.shippingAdjustmentsEnabled,
-          shippingAllowShops: control.shippingAllowShops,
-          shop,
-          shopEnabled: settings.shippingAdjustmentEnabled,
-          enabledAt: settings.shippingAdjustmentEnabledAt,
-          operationCreatedAt: op.createdAt,
-        });
-        if (!gateOpen) {
-          // Everything passed except the epoch: the combine predates the
-          // current activation epoch and can never qualify — record a durable
-          // SKIPPED row so it is never re-examined.
-          if (optedIn && op.createdAt < settings.shippingAdjustmentEnabledAt!) {
+          if (op.createdAt.getTime() < cutoff.getTime()) {
             if (opts.apply) {
               const snap = policySnapshot(settings);
               await deps.store.recordTerminal(
@@ -1012,149 +1299,169 @@ export async function runShadowScan(
                   mergeOperationId: op.id,
                   sourceOrderId: secondary.id,
                   operationCreatedAt: op.createdAt,
+                  activationCutoffAt: cutoff,
                   policyKind: snap.kind,
                   policyRetainedMinor: snap.retainedMinor,
                   policyCurrencyCode: snap.currencyCode,
                 },
                 "SKIPPED",
-                { reasonCode: "BEFORE_EPOCH", reviewReason: "Combine predates the shipping activation epoch." },
+                { reasonCode: "BEFORE_EPOCH", reviewReason: "Combine predates the shipping activation cutoff." },
               );
             }
-            push({ ...base, outcome: "SKIPPED", detail: "before activation epoch" });
-          } else {
-            push({ ...base, outcome: "GATE_CLOSED" });
+            push({ ...base, outcome: "SKIPPED", detail: "before activation cutoff" });
+            continue;
           }
-          continue;
-        }
 
-        if (!isPolicySupported(settings)) {
-          if (opts.apply) {
-            const snap = policySnapshot(settings);
-            await deps.store.recordTerminal(
-              {
-                shop,
-                mergeOperationId: op.id,
+          if (!isPolicySupported(settings)) {
+            if (opts.apply) {
+              const snap = policySnapshot(settings);
+              await deps.store.recordTerminal(
+                {
+                  shop,
+                  mergeOperationId: op.id,
+                  sourceOrderId: secondary.id,
+                  operationCreatedAt: op.createdAt,
+                  activationCutoffAt: cutoff,
+                  policyKind: snap.kind,
+                  policyRetainedMinor: snap.retainedMinor,
+                  policyCurrencyCode: snap.currencyCode,
+                },
+                "REVIEW_REQUIRED",
+                { reviewReason: `Settings.shippingPolicy '${settings.shippingPolicy}' is unsupported or malformed.` },
+              );
+            }
+            push({ ...base, outcome: "REVIEW_REQUIRED", detail: "unsupported settings policy" });
+            continue;
+          }
+
+          // The combine's own evidence must prove this secondary before any
+          // Shopify read happens — a contradiction parks REVIEW_REQUIRED.
+          const verdict = assessSecondaryEvidence({
+            operation: {
+              id: op.id,
+              protocolVersion: op.protocolVersion,
+              phase: op.phase,
+              calculatedOrderId: op.calculatedOrderId,
+              opToken: op.opToken,
+              primaryOrderId: op.primaryOrderId,
+              expectedTransfer: op.expectedTransfer,
+              appliedEvidence: op.appliedEvidence,
+            },
+            secondary,
+            mergeRecords: records,
+            attempts,
+          });
+          if (!verdict.eligible) {
+            if (opts.apply) {
+              const snap = policySnapshot(settings);
+              await deps.store.recordTerminal(
+                {
+                  shop,
+                  mergeOperationId: op.id,
+                  sourceOrderId: secondary.id,
+                  operationCreatedAt: op.createdAt,
+                  activationCutoffAt: cutoff,
+                  policyKind: snap.kind,
+                  policyRetainedMinor: snap.retainedMinor,
+                  policyCurrencyCode: snap.currencyCode,
+                },
+                "REVIEW_REQUIRED",
+                { reviewReason: `Combine evidence incomplete: ${verdict.issues.join(" ")}` },
+              );
+            }
+            push({ ...base, outcome: "REVIEW_REQUIRED", detail: verdict.issues.join(" ") });
+            continue;
+          }
+
+          // A combine whose side effects did not finish is re-considered next
+          // scan instead of being parked on a state that is still changing.
+          if (!op.sideEffectsDone) {
+            push({ ...base, outcome: "EXISTS", detail: "combine side effects unfinished" });
+            continue;
+          }
+
+          const snap = policySnapshot(settings);
+          const identity: ShadowIntentIdentity = {
+            shop,
+            mergeOperationId: op.id,
+            sourceOrderId: secondary.id,
+            operationCreatedAt: op.createdAt,
+            activationCutoffAt: cutoff,
+            policyKind: snap.kind,
+            policyRetainedMinor: snap.retainedMinor,
+            policyCurrencyCode: snap.currencyCode,
+          };
+          if (!opts.apply) {
+            // Dry run: evaluate directly — reads only, no rows.
+            const policy = reconstructPolicy({
+              policyKind: identity.policyKind,
+              policyRetainedMinor: identity.policyRetainedMinor,
+              policyCurrencyCode: identity.policyCurrencyCode,
+            })!;
+            let admin: AdminClient | null = null;
+            try {
+              admin = await deps.adminFactory(shop);
+            } catch (err) {
+              push({
+                ...base,
+                outcome: "ERROR",
+                detail: String((err as Error)?.message ?? err),
+              });
+              continue;
+            }
+            if (!admin) {
+              push({ ...base, outcome: "NO_SESSION" });
+              continue;
+            }
+            try {
+              const outcome = await evaluateShadowSource(readOnlyAdmin(admin), {
                 sourceOrderId: secondary.id,
-                operationCreatedAt: op.createdAt,
-                policyKind: snap.kind,
-                policyRetainedMinor: snap.retainedMinor,
-                policyCurrencyCode: snap.currencyCode,
-              },
-              "REVIEW_REQUIRED",
-              { reviewReason: `Settings.shippingPolicy '${settings.shippingPolicy}' is unsupported or malformed.` },
-            );
+                policy,
+                marker: "MS-SHIP-DRYRUN",
+                primaryOrderName: op.primaryOrderName,
+              });
+              push({
+                ...base,
+                outcome:
+                  outcome.kind === "READY"
+                    ? "READY"
+                    : outcome.kind === "SKIP"
+                      ? "SKIPPED"
+                      : "REVIEW_REQUIRED",
+                detail: outcome.kind === "READY" ? `refund ${outcome.plannedRefundMinor}` : outcome.reason,
+              });
+            } catch (err) {
+              push({
+                ...base,
+                outcome: "ERROR",
+                detail: err instanceof ShopifyGraphqlError ? err.message : String(err),
+              });
+            }
+            continue;
           }
-          push({ ...base, outcome: "REVIEW_REQUIRED", detail: "unsupported settings policy" });
-          continue;
-        }
 
-        // The combine's own evidence must prove this secondary before any
-        // Shopify read happens — a contradiction parks REVIEW_REQUIRED.
-        const verdict = assessSecondaryEvidence({
-          operation: {
-            id: op.id,
-            protocolVersion: op.protocolVersion,
-            phase: op.phase,
-            calculatedOrderId: op.calculatedOrderId,
-            opToken: op.opToken,
-            primaryOrderId: op.primaryOrderId,
-            expectedTransfer: op.expectedTransfer,
-            appliedEvidence: op.appliedEvidence,
-          },
-          secondary,
-          mergeRecords: records,
-          attempts,
-        });
-        if (!verdict.eligible) {
-          if (opts.apply) {
-            const snap = policySnapshot(settings);
-            await deps.store.recordTerminal(
-              {
-                shop,
-                mergeOperationId: op.id,
-                sourceOrderId: secondary.id,
-                operationCreatedAt: op.createdAt,
-                policyKind: snap.kind,
-                policyRetainedMinor: snap.retainedMinor,
-                policyCurrencyCode: snap.currencyCode,
-              },
-              "REVIEW_REQUIRED",
-              { reviewReason: `Combine evidence incomplete: ${verdict.issues.join(" ")}` },
-            );
+          const claimed = await deps.store.claimIntent(identity, ttl);
+          if (claimed === "GATE_CHANGED") {
+            push({ ...base, outcome: "GATE_CHANGED" });
+            continue;
           }
-          push({ ...base, outcome: "REVIEW_REQUIRED", detail: verdict.issues.join(" ") });
-          continue;
-        }
-
-        // A combine whose side effects did not finish is re-considered next
-        // scan instead of being parked on a state that is still changing.
-        if (!op.sideEffectsDone) {
-          push({ ...base, outcome: "EXISTS", detail: "combine side effects unfinished" });
-          continue;
-        }
-
-        const snap = policySnapshot(settings);
-        const identity: ShadowIntentIdentity = {
-          shop,
-          mergeOperationId: op.id,
-          sourceOrderId: secondary.id,
-          operationCreatedAt: op.createdAt,
-          policyKind: snap.kind,
-          policyRetainedMinor: snap.retainedMinor,
-          policyCurrencyCode: snap.currencyCode,
-        };
-        if (!opts.apply) {
-          // Dry run: evaluate directly — reads only, no rows.
-          const policy = reconstructPolicy({
-            policyKind: identity.policyKind,
-            policyRetainedMinor: identity.policyRetainedMinor,
-            policyCurrencyCode: identity.policyCurrencyCode,
-          })!;
-          const admin = await deps.adminFactory(shop);
-          if (!admin) {
-            push({ ...base, outcome: "NO_SESSION" });
+          if (!claimed) {
+            // A concurrent scanner won the insert — its verdict stands.
+            push({ ...base, outcome: "PENDING_HELD" });
             continue;
           }
           try {
-            const outcome = await evaluateShadowSource(readOnlyAdmin(admin), {
-              sourceOrderId: secondary.id,
-              policy,
-              marker: "MS-SHIP-DRYRUN",
-              primaryOrderName: op.primaryOrderName,
-            });
-            push({
-              ...base,
-              outcome:
-                outcome.kind === "READY"
-                  ? "READY"
-                  : outcome.kind === "SKIP"
-                    ? "SKIPPED"
-                    : "REVIEW_REQUIRED",
-              detail: outcome.kind === "READY" ? `refund ${outcome.plannedRefundMinor}` : outcome.reason,
-            });
+            await finish(claimed, op, secondary.name, cutoff);
           } catch (err) {
-            push({
-              ...base,
-              outcome: "ERROR",
-              detail: err instanceof ShopifyGraphqlError ? err.message : String(err),
-            });
+            if (err instanceof OwnershipLostError) {
+              push({ ...base, outcome: "LEASE_LOST" });
+            } else if (err instanceof GateChangedError) {
+              push({ ...base, outcome: "GATE_CHANGED" });
+            } else {
+              throw err;
+            }
           }
-          continue;
         }
-
-        const claimed = await deps.store.claimIntent(identity, ttl);
-        if (!claimed) {
-          // A concurrent scanner won the insert — its verdict stands.
-          push({ ...base, outcome: "PENDING_HELD" });
-          continue;
-        }
-        try {
-          await finish(claimed, op, secondary.name);
-        } catch (err) {
-          if (!(err instanceof OwnershipLostError)) throw err;
-          push({ ...base, outcome: "LEASE_LOST" });
-        }
-      }
       } catch (err) {
         // One failed combine must never stop the scan — and a shadow error
         // can never propagate into the combine engine (it shares nothing).

@@ -110,8 +110,15 @@ export function assessSecondaryEvidence(
   }
 
   const a = input.attempts;
-  if (!a.some((x) => x.kind === "EDIT_COMMIT" && x.state !== "REJECTED")) {
-    issues.push("No potentially dispatched order-edit commit attempt recorded.");
+  if (
+    !a.some(
+      (x) =>
+        x.kind === "EDIT_COMMIT" &&
+        x.targetOrderId === op.primaryOrderId &&
+        x.state !== "REJECTED",
+    )
+  ) {
+    issues.push("No potentially dispatched commit attempt targeting the primary order.");
   }
   if (!a.some((x) => x.kind === "ORDER_CANCEL" && x.targetOrderId === s.id && x.state !== "REJECTED")) {
     issues.push("No potentially dispatched cancellation attempt for this secondary.");

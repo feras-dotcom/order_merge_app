@@ -40,6 +40,11 @@ model Settings {
   // Exact minor-unit integer when RETAIN_FIXED; no Float.
   shippingRetainedMinor       String?
   shippingRetainedCurrency    String?
+  // Rollout epoch: stamped on the DB wall clock when this shop is added to
+  // AppControl.shippingAllowShops, cleared when removed. Combines created
+  // before the CURRENT membership epoch can never produce intents, so
+  // allowlisting a shop never retroactively qualifies its history.
+  shippingRolloutAt           DateTime?
 }
 
 // The durable work item for an ORDERS_CREATE event: PENDING until a terminal
@@ -209,6 +214,10 @@ model AppControl {
   // INVERTED allowlist semantics: empty shippingAllowShops = NO shops.
   shippingAdjustmentsEnabled Boolean  @default(false)
   shippingAllowShops         String[] @default([]) // empty = NO shops
+  // Kill-switch epoch: stamped on the DB wall clock on a false→true
+  // transition, cleared on disable. Combines created before the CURRENT
+  // enabled epoch can never produce intents.
+  shippingEnabledAt DateTime?
   note              String?
   updatedAt         DateTime @updatedAt
 }
@@ -239,6 +248,16 @@ model ShippingAdjustment {
   // MergeOperation.createdAt, snapshotted so the activation-epoch check never
   // depends on mutable join state.
   operationCreatedAt    DateTime
+  // Effective activation cutoff at intent creation: the LATEST of the
+  // merchant opt-in epoch, the shop rollout-membership epoch and the
+  // kill-switch epoch. A future dispatch gate must recompute the cutoff and
+  // require it to equal this value — any control toggle invalidates the row.
+  activationCutoffAt    DateTime?
+  // 'SHADOW' only — enforced by a CHECK constraint. Shadow evidence is never
+  // executable: promoting an intent to a dispatchable refund requires a
+  // separately authorized process and a schema change, so a future
+  // dispatcher can never mistake this table's contents for live work.
+  mode                  String    @default("SHADOW")
   // REFUND_ALL | RETAIN_FIXED (policy snapshot at enqueue time)
   policyKind            String
   policyRetainedMinor   String?

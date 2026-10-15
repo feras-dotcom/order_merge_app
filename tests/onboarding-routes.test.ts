@@ -355,9 +355,12 @@ describe("app/uninstalled webhook", () => {
         autoMergeEnabled: false,
         onboardingStartedAt: null,
         onboardingCompletedAt: null,
-        // Shipping opt-in must not silently resume on reinstall (F7).
+        // Shipping opt-in AND the rollout-membership epoch must not silently
+        // resume on reinstall (F7): a reinstalled shop has no activation
+        // cutoff until the operator re-stamps rollout membership.
         shippingAdjustmentEnabled: false,
         shippingAdjustmentEnabledAt: null,
+        shippingRolloutAt: null,
       },
     });
   });
