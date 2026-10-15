@@ -1,34 +1,38 @@
-// Disposable-database bootstrap for the Shipping v0 shadow evaluator.
+// Operator helper: mark a DISPOSABLE database so the shadow-eval write
+// guard allows durable outcomes on it.
 //
-// This is the ROOT OF TRUST for the shadow write guard: it creates the
-// `mergeship-shadow-disposable:<token>` database marker that
-// makeShippingShadowStore requires before persisting anything. Because a
-// production DATABASE_URL copied into a local shell carries no RAILWAY_*
-// marker, the checks below are layered so that marking a real database
-// requires the operator to get several independent things wrong at once:
+// This is the ONLY function allowed to write the disposable marker, and it
+// proves the target is safe BEFORE writing:
+//   - refuses when NODE_ENV=production or any RAILWAY_* marker is present;
+//   - requires the caller to pass --disposable / MERGESHIP_SHADOW_DISPOSABLE=yes;
+//   - requires the database name to be a strictly-named MergeShip test
+//     database (a Railway production database is named `railway`);
+//   - requires the live fingerprint <db>@<server-addr>:<port> to be retyped
+//     via --confirm-db and the server address to be local/private;
+//   - requires every expected application table to exist in exactly the
+//     schema the app's unqualified queries resolve (current_schema()), and
+//     every user table in every non-system schema to be empty — a wrong
+//     search_path cannot hide rows, a missing table never reads as empty;
+//   - prints no credentials and never returns the marker token.
 //
-//   1. No production environment markers (RAILWAY_* / NODE_ENV=production).
-//   2. MERGESHIP_SHADOW_DISPOSABLE=yes — an explicit, separate assertion
-//      that the connected database is a disposable local test database.
-//   3. --confirm-db must equal the LIVE fingerprint <db>@<addr>:<port>
-//      printed by a dry run — localhost is not proof of safety because a
-//      tunnel to production also appears as localhost.
-//   4. The database must contain NO application rows: a populated database
-//      is real data, not a disposable sandbox.
-//
-// Only after all four does COMMENT ON DATABASE run. There is no bypass.
-// The marker token is never returned, printed or included in errors.
+// There is deliberately no --force. A populated production database cannot
+// be marked disposable through this path.
 
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { SHADOW_DB_MARKER_PREFIX } from "./shipping-shadow.server";
+import db from "../db.server";
 
-export class BootstrapNotAllowedError extends Error {
-  name = "BootstrapNotAllowedError";
-}
+// Any RAILWAY_* variable means the shell came from `railway run` or a
+// Railway session — the whole prefix is refused, not just the known trio.
+const railwayKeys = (env: NodeJS.ProcessEnv) =>
+  Object.keys(env).filter((k) => k.startsWith("RAILWAY_"));
 
-/** Application tables that must all be empty before a database may be
- *  marked disposable. `_prisma_migrations` is deliberately not listed —
- *  a freshly migrated disposable database still qualifies. */
+/** Database names tests may destroy. `railway`/`production` can never match. */
+export const DISPOSABLE_DB_NAME_PATTERN = /^mergeship_[a-z0-9_]*test[a-z0-9_]*$/;
+
+const IDENT = /^[A-Za-z0-9_]+$/;
+
+// Every application table must exist and be empty. `_prisma_migrations` is
+// the only harmless non-application table (handled in the schema scan).
 const APPLICATION_TABLES = [
   "Session",
   "Settings",
@@ -43,94 +47,201 @@ const APPLICATION_TABLES = [
   "ShippingAdjustment",
 ];
 
-/** `<database>@<server-addr>:<port>` — the identity of the connected
- *  database, safe to log (contains no credentials). */
+export class BootstrapNotAllowedError extends Error {
+  name = "BootstrapNotAllowedError";
+}
+
+export interface DatabaseIdentity {
+  db: string;
+  addr: string | null;
+  port: number | null;
+}
+
+/** Live identity of the connected database, for operator confirmation. */
+export async function databaseIdentity(db: PrismaClient): Promise<DatabaseIdentity> {
+  const [row] = await db.$queryRaw<{ db: string; addr: string | null; port: number | null }[]>`
+    SELECT current_database() AS db,
+           host(inet_server_addr()) AS addr,
+           inet_server_port() AS port`;
+  if (!row?.db) throw new Error("could not resolve database identity");
+  return row;
+}
+
 export async function databaseFingerprint(db: PrismaClient): Promise<string> {
-  const [row] = await db.$queryRaw<{ fp: string | null }[]>`
-    SELECT current_database() || '@' ||
-           COALESCE(host(inet_server_addr()), 'unix') || ':' ||
-           COALESCE(inet_server_port()::text, '?') AS fp`;
-  return row?.fp ?? "unknown";
+  const i = await databaseIdentity(db);
+  return `${i.db}@${i.addr ?? "unix"}:${i.port ?? "?"}`;
+}
+
+/** Loopback, unix-socket (NULL) or RFC1918/ULA server address. */
+export function isLocalOrPrivateAddress(addr: string | null): boolean {
+  if (addr === null) return true; // unix socket
+  if (addr === "::1" || addr.startsWith("127.")) return true;
+  if (addr.startsWith("10.") || addr.startsWith("192.168.")) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return true;
+  if (/^(fd|fe80)/i.test(addr)) return true;
+  return false;
+}
+
+/** Refuse to run under any production-like environment markers. */
+export function assertNoProductionEnvironment(env: NodeJS.ProcessEnv): void {
+  if (env.NODE_ENV === "production") {
+    throw new BootstrapNotAllowedError(
+      "refusing: NODE_ENV=production — this operation only runs in disposable test environments.",
+    );
+  }
+  const railway = railwayKeys(env);
+  if (railway.length) {
+    throw new BootstrapNotAllowedError(
+      `refusing: Railway environment detected (${railway.join(", ")}) — never mark a Railway database disposable.`,
+    );
+  }
 }
 
 /**
  * Mark the connected database disposable. Throws BootstrapNotAllowedError
- * unless every layer passes. Returns only the fingerprint — never the token.
+ * unless every check passes; on success returns the fingerprint only.
  */
 export async function bootstrapDisposableDatabase(
-  db: PrismaClient,
+  client: PrismaClient = db,
   opts: {
-    token: string | undefined;
-    /** Must equal the live fingerprint — printed by the eval script's dry run. */
-    confirmDb: string | undefined;
-    /** True only when the operator set MERGESHIP_SHADOW_DISPOSABLE=yes. */
-    disposableConfirmed: boolean;
+    token?: string; // the marker secret — never logged or returned
+    confirmDb?: string; // must equal the live fingerprint
+    disposableConfirmed?: boolean; // --disposable / MERGESHIP_SHADOW_DISPOSABLE=yes
   },
 ): Promise<{ fingerprint: string }> {
-  if (
-    process.env.NODE_ENV === "production" ||
-    process.env.RAILWAY_ENVIRONMENT ||
-    process.env.RAILWAY_ENVIRONMENT_NAME ||
-    process.env.RAILWAY_PROJECT_ID
-  ) {
-    throw new BootstrapNotAllowedError(
-      "production environment marker detected — refusing to mark a database.",
-    );
-  }
+  assertNoProductionEnvironment(process.env);
   if (opts.disposableConfirmed !== true) {
     throw new BootstrapNotAllowedError(
-      "refusing: set MERGESHIP_SHADOW_DISPOSABLE=yes to assert this is a disposable local test database. There is no bypass — marking is permanent until the marker is removed by hand.",
+      "refusing: pass --disposable (MERGESHIP_SHADOW_DISPOSABLE=yes) to confirm this is a disposable test database.",
     );
   }
-  const token = opts.token;
-  if (!token || !/^[A-Za-z0-9_-]{8,128}$/.test(token)) {
+  if (!opts.token || !/^[A-Za-z0-9_-]{8,128}$/.test(opts.token)) {
+    throw new BootstrapNotAllowedError("refusing: marker token missing or invalid (8-128 chars, [A-Za-z0-9_-]).");
+  }
+  const identity = await databaseIdentity(client);
+  const fingerprint = `${identity.db}@${identity.addr ?? "unix"}:${identity.port ?? "?"}`;
+  if (!DISPOSABLE_DB_NAME_PATTERN.test(identity.db)) {
     throw new BootstrapNotAllowedError(
-      "set MERGESHIP_SHADOW_TOKEN to a random token (8-128 of [A-Za-z0-9_-]) before bootstrapping.",
+      `refusing: database name '${identity.db}' is not a MergeShip test database (${DISPOSABLE_DB_NAME_PATTERN}).`,
     );
   }
-  const fingerprint = await databaseFingerprint(db);
+  if (!isLocalOrPrivateAddress(identity.addr)) {
+    throw new BootstrapNotAllowedError(
+      `refusing: database server address '${identity.addr}' is not local or private.`,
+    );
+  }
   if (!opts.confirmDb || opts.confirmDb !== fingerprint) {
     throw new BootstrapNotAllowedError(
-      `--confirm-db must equal the connected database fingerprint "${fingerprint}". ` +
-        "Run the shipping-shadow-eval dry run to print it, and confirm it names the disposable database.",
+      `refusing: --confirm-db must equal the live database fingerprint '${fingerprint}'.`,
     );
   }
 
-  // A database that already contains application rows is not disposable.
-  for (const table of APPLICATION_TABLES) {
-    // Existence and emptiness in one read: to_regclass is NULL when the
-    // table does not exist (a pre-migration database is fine). The name
-    // must be quoted inside the literal — unquoted it folds to lowercase
-    // and a mixed-case "Session" resolves to NULL, silently passing.
-    const [row] = await db.$queryRaw<{ n: bigint | number | null }[]>`
-      SELECT CASE WHEN to_regclass(${`public."${table}"`}) IS NULL THEN NULL
-        ELSE (SELECT count(*) FROM ${Prisma.raw(`"${table}"`)}) END AS n`;
-    if (row?.n != null && BigInt(row.n) > 0n) {
+  // The app issues unqualified table names, so the authoritative schema is
+  // current_schema() — NOT a hardcoded 'public'. If Prisma is configured
+  // with ?schema=, the tables live there and nowhere else.
+  const [schemaRow] = await client.$queryRaw<{ s: string | null }[]>`SELECT current_schema() AS s`;
+  const appSchema = schemaRow?.s;
+  if (!appSchema || !IDENT.test(appSchema)) {
+    throw new BootstrapNotAllowedError(
+      `refusing: could not resolve a sane application schema (got '${appSchema}').`,
+    );
+  }
+  const found = await client.$queryRaw<{ relname: string; nspname: string }[]>`
+    SELECT c.relname, n.nspname
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r','p') AND c.relname = ANY(${APPLICATION_TABLES})`;
+  const missing = APPLICATION_TABLES.filter(
+    (t) => !found.some((o) => o.relname === t && o.nspname === appSchema),
+  );
+  if (missing.length) {
+    throw new BootstrapNotAllowedError(
+      `refusing: application tables missing from schema '${appSchema}': ${missing.join(", ")}. ` +
+        "Provision a fresh test database (scripts/test-db-provision.ts) rather than marking a non-app database.",
+    );
+  }
+  const misplaced = found.filter((o) => o.nspname !== appSchema);
+  if (misplaced.length) {
+    throw new BootstrapNotAllowedError(
+      `refusing: application table names also exist outside schema '${appSchema}' ` +
+        `(${misplaced.map((o) => `${o.nspname}.${o.relname}`).join(", ")}) — inconsistent database.`,
+    );
+  }
+
+  // Every user table in every non-system schema must be empty — the app
+  // tables (already enumerated) plus anything else that exists. A populated
+  // table of ANY name means this is not a disposable database.
+  const userTables = await client.$queryRaw<{ nspname: string; relname: string }[]>`
+    SELECT n.nspname, c.relname
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'r'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')`;
+  for (const t of userTables) {
+    if (t.relname === "_prisma_migrations") continue;
+    const isAppTable = t.nspname === appSchema && APPLICATION_TABLES.includes(t.relname);
+    if (!isAppTable && (!IDENT.test(t.nspname) || !IDENT.test(t.relname))) {
       throw new BootstrapNotAllowedError(
-        `database contains application data (table "${table}" has ${row.n} rows) — refusing to mark it disposable.`,
+        `refusing: non-identifier object ${t.nspname}.${t.relname} — cannot verify emptiness.`,
+      );
+    }
+    const qualified = Prisma.raw(`"${t.nspname}"."${t.relname}"`);
+    // Migrations legitimately seed ONE row: the AppControl 'control'
+    // singleton with every switch off and empty allowlists. Whitelist
+    // exactly that state — any other row, or an enabled switch or stamped
+    // epoch, is real operator state. Never truncate to satisfy this check.
+    if (t.nspname === appSchema && t.relname === "AppControl") {
+      const rows = await client.$queryRaw<
+        {
+          id: string;
+          newMergesEnabled: boolean;
+          completionEnabled: boolean;
+          allowShops: string[];
+          shippingAdjustmentsEnabled: boolean;
+          shippingAllowShops: string[];
+          shippingEnabledAt: unknown;
+        }[]
+      >(
+        Prisma.sql`SELECT "id", "newMergesEnabled", "completionEnabled", "allowShops",
+                   "shippingAdjustmentsEnabled", "shippingAllowShops", "shippingEnabledAt"
+                   FROM ${qualified}`,
+      );
+      const seed =
+        rows.length === 1 &&
+        rows[0].id === "control" &&
+        !rows[0].newMergesEnabled &&
+        !rows[0].completionEnabled &&
+        !rows[0].shippingAdjustmentsEnabled &&
+        (rows[0].allowShops?.length ?? 0) === 0 &&
+        (rows[0].shippingAllowShops?.length ?? 0) === 0 &&
+        rows[0].shippingEnabledAt == null;
+      if (!seed) {
+        throw new BootstrapNotAllowedError(
+          "refusing: AppControl does not hold exactly the fresh migration seed row " +
+            "(id='control', all switches off, empty allowlists) — real operator state present.",
+        );
+      }
+      continue;
+    }
+    const [row] = await client.$queryRaw<{ n: bigint }[]>(Prisma.sql`SELECT count(*) AS n FROM ${qualified}`);
+    if (row.n > 0n) {
+      throw new BootstrapNotAllowedError(
+        `refusing: database is populated — '${t.nspname}.${t.relname}' contains ${row.n} row(s). ` +
+          "Never mark a database containing application or foreign data.",
       );
     }
   }
 
-  const [dbRow] = await db.$queryRaw<{ db: string }[]>`SELECT current_database() AS db`;
-  if (!dbRow?.db || !/^[A-Za-z0-9_]+$/.test(dbRow.db)) {
-    throw new BootstrapNotAllowedError(
-      `unexpected database name '${dbRow?.db}' — refusing.`,
-    );
+  if (!IDENT.test(identity.db)) {
+    throw new BootstrapNotAllowedError(`refusing: database name '${identity.db}' is not a safe SQL identifier.`);
   }
-  // The token charset is restricted above, so this interpolation is safe;
-  // the identifier is validated to a safe charset for the same reason.
-  await db.$executeRawUnsafe(
-    `COMMENT ON DATABASE "${dbRow.db}" IS '${SHADOW_DB_MARKER_PREFIX}${token}'`,
+  await client.$executeRawUnsafe(
+    `COMMENT ON DATABASE "${identity.db}" IS 'mergeship-shadow-disposable:${opts.token}'`,
   );
-  const [check] = await db.$queryRaw<{ marker: string | null }[]>`
+  const [marker] = await client.$queryRaw<{ m: string | null }[]>`
     SELECT shobj_description(
       (SELECT oid FROM pg_database WHERE datname = current_database()),
-      'pg_database') AS marker`;
-  if (check?.marker !== `${SHADOW_DB_MARKER_PREFIX}${token}`) {
-    throw new BootstrapNotAllowedError(
-      "marker write did not verify — the database was NOT marked.",
-    );
+      'pg_database') AS m`;
+  if (marker?.m !== `mergeship-shadow-disposable:${opts.token}`) {
+    throw new Error("marker write did not take effect — refusing to report success.");
   }
   return { fingerprint };
 }

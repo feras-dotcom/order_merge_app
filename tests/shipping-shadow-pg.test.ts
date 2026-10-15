@@ -2,13 +2,15 @@
 // Opt-in:
 //
 //   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres@localhost:54329/mergeship_test \
+//   MERGESHIP_SHADOW_TOKEN=<operator token> \
 //     npx vitest run tests/shipping-shadow-pg.test.ts
 //
-// The URL must point at a DISPOSABLE database — `prisma migrate deploy` runs
-// against it and the tables are truncated between tests. The suite itself
-// stamps the `mergeship-shadow-disposable:<token>` marker the write guard
-// requires (the same marker scripts/shadow-db-bootstrap.ts creates) and sets
-// MERGESHIP_SHADOW_DATABASE + MERGESHIP_SHADOW_TOKEN to match.
+// The URL must point at a DISPOSABLE database provisioned via
+// scripts/test-db-provision.ts — `prisma migrate deploy` runs against it and
+// tables are truncated between tests. `preflightDisposableDatabase` runs
+// BEFORE any write and refuses unless the database already carries the
+// `mergeship-shadow-disposable:<MERGESHIP_SHADOW_TOKEN>` marker; this suite
+// never stamps the marker itself.
 //
 // The database's session timezone is Asia/Tokyo (postgres-stores setup), so
 // every timestamp-write discipline error actually surfaces; one test asserts
@@ -34,6 +36,10 @@ import {
   type MergeSettings,
 } from "../app/lib/settings.server";
 import { bootstrapDisposableDatabase } from "../app/lib/shadow-db-bootstrap.server";
+import {
+  preflightDisposableDatabase,
+  withScratchDatabase,
+} from "./helpers/disposable-db";
 
 const TEST_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const SHOP = "pg-shadow.myshopify.com";
@@ -41,7 +47,10 @@ const oid = (n: number) => `gid://shopify/Order/${n}`;
 const DB_NAME = TEST_URL
   ? new globalThis.URL(TEST_URL).pathname.replace(/^\//, "").split("?")[0]
   : "";
-const TOKEN = "pg-suite-token-0001";
+// The token comes from the operator's shell — the suite never defines or
+// stamps it. preflightDisposableDatabase already verified the marker on the
+// database equals mergeship-shadow-disposable:<this token>.
+const TOKEN = process.env.MERGESHIP_SHADOW_TOKEN ?? "";
 const MARKER = `${SHADOW_DB_MARKER_PREFIX}${TOKEN}`;
 
 const OP_CREATED = new Date("2030-10-20T12:00:00Z"); // after any stamped epoch
@@ -50,9 +59,12 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   let db: PrismaClient;
   let db2: PrismaClient;
   let ops: OperationStore;
-  let savedEnv: Record<string, string | undefined>;
+  let savedShadowDb: string | undefined;
 
   beforeAll(async () => {
+    // FIRST — before migrations, comments or any write. Throws unless the
+    // target is an independently marked disposable database.
+    await preflightDisposableDatabase(TEST_URL!);
     execSync("npx prisma migrate deploy", {
       env: { ...process.env, DATABASE_URL: TEST_URL! },
       stdio: "pipe",
@@ -62,31 +74,14 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
     if (!/^[A-Za-z0-9_]+$/.test(DB_NAME)) {
       throw new Error(`Unexpected test database name '${DB_NAME}'.`);
     }
-    // Stamp the disposable marker — the write guard requires it to match
-    // MERGESHIP_SHADOW_TOKEN, mirroring scripts/shadow-db-bootstrap.ts.
-    await db.$executeRawUnsafe(`COMMENT ON DATABASE "${DB_NAME}" IS '${MARKER}'`);
-    // Production markers must be absent for the write-guard tests to mean
-    // anything; save and clear them, restore afterwards.
-    savedEnv = {
-      MERGESHIP_SHADOW_DATABASE: process.env.MERGESHIP_SHADOW_DATABASE,
-      MERGESHIP_SHADOW_TOKEN: process.env.MERGESHIP_SHADOW_TOKEN,
-      RAILWAY_PROJECT_ID: process.env.RAILWAY_PROJECT_ID,
-      RAILWAY_ENVIRONMENT: process.env.RAILWAY_ENVIRONMENT,
-      RAILWAY_ENVIRONMENT_NAME: process.env.RAILWAY_ENVIRONMENT_NAME,
-    };
-    delete process.env.RAILWAY_PROJECT_ID;
-    delete process.env.RAILWAY_ENVIRONMENT;
-    delete process.env.RAILWAY_ENVIRONMENT_NAME;
+    savedShadowDb = process.env.MERGESHIP_SHADOW_DATABASE;
     process.env.MERGESHIP_SHADOW_DATABASE = DB_NAME;
-    process.env.MERGESHIP_SHADOW_TOKEN = TOKEN;
     ops = makeOperationStore(db);
   }, 120_000);
 
   afterAll(async () => {
-    for (const [k, v] of Object.entries(savedEnv ?? {})) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+    if (savedShadowDb === undefined) delete process.env.MERGESHIP_SHADOW_DATABASE;
+    else process.env.MERGESHIP_SHADOW_DATABASE = savedShadowDb;
     await db?.$disconnect();
     await db2?.$disconnect();
   });
@@ -179,16 +174,26 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   });
 
   it("refuses writes when the database carries NO disposable marker", async () => {
+    // A scratch database (empty by construction, dropped afterwards) — the
+    // suite never un-marks or re-marks the real test database.
     const cutoff = await setupGate();
-    await db.$executeRawUnsafe(`COMMENT ON DATABASE "${DB_NAME}" IS NULL`);
-    try {
-      const store = makeShippingShadowStore(db);
-      await expect(store.claimIntent(identity(cutoff), 60_000)).rejects.toBeInstanceOf(
-        ShadowDatabaseNotAllowedError,
-      );
-    } finally {
-      await db.$executeRawUnsafe(`COMMENT ON DATABASE "${DB_NAME}" IS '${MARKER}'`);
-    }
+    await withScratchDatabase(TEST_URL!, async (scratchUrl, scratchName) => {
+      const saved = process.env.MERGESHIP_SHADOW_DATABASE;
+      process.env.MERGESHIP_SHADOW_DATABASE = scratchName;
+      try {
+        const sdb = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+        try {
+          const store = makeShippingShadowStore(sdb);
+          await expect(store.claimIntent(identity(cutoff), 60_000)).rejects.toBeInstanceOf(
+            ShadowDatabaseNotAllowedError,
+          );
+        } finally {
+          await sdb.$disconnect();
+        }
+      } finally {
+        process.env.MERGESHIP_SHADOW_DATABASE = saved!;
+      }
+    });
   });
 
   it("refuses writes when a production environment marker is set", async () => {
@@ -811,36 +816,41 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
 
   // ── MEDIUM-2: disposable bootstrap must prove the database is disposable ──
 
-  const fingerprint = async () => {
-    const [r] = await db.$queryRaw<{ fp: string }[]>`
+  const fingerprintOf = async (client: PrismaClient) => {
+    const [r] = await client.$queryRaw<{ fp: string }[]>`
       SELECT current_database() || '@' ||
              COALESCE(host(inet_server_addr()), 'unix') || ':' ||
              COALESCE(inet_server_port()::text, '?') AS fp`;
     return r.fp;
   };
+  const fingerprint = () => fingerprintOf(db);
 
   it("bootstrap marks a verified empty database", async () => {
-    // beforeEach seeds the 'control' row the app itself would create, and
-    // other suites sharing this disposable database leave rows behind —
-    // a truly fresh disposable DB has no application rows at all.
-    await db.$executeRawUnsafe(
-      `TRUNCATE "Session", "Settings", "AppControl", "ProcessedWebhook",
-       "MergeClaim", "MergeRecord", "MergeOperation", "MergeOrderLock",
-       "MergeMutationAttempt", "WorkerInstance", "ShippingAdjustment"
-       RESTART IDENTITY CASCADE`,
-    );
-    const fp = await fingerprint();
-    const res = await bootstrapDisposableDatabase(db, {
-      token: TOKEN,
-      confirmDb: fp,
-      disposableConfirmed: true,
+    // A fresh scratch database is empty by construction — the test never
+    // truncates a shared database to satisfy the bootstrap's emptiness check.
+    await withScratchDatabase(TEST_URL!, async (scratchUrl) => {
+      execSync("npx prisma migrate deploy", {
+        env: { ...process.env, DATABASE_URL: scratchUrl },
+        stdio: "pipe",
+      });
+      const sdb = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+      try {
+        const fp = await fingerprintOf(sdb);
+        const res = await bootstrapDisposableDatabase(sdb, {
+          token: TOKEN,
+          confirmDb: fp,
+          disposableConfirmed: true,
+        });
+        expect(res.fingerprint).toBe(fp);
+        const [m] = await sdb.$queryRaw<{ marker: string | null }[]>`
+          SELECT shobj_description(
+            (SELECT oid FROM pg_database WHERE datname = current_database()),
+            'pg_database') AS marker`;
+        expect(m.marker).toBe(MARKER);
+      } finally {
+        await sdb.$disconnect();
+      }
     });
-    expect(res.fingerprint).toBe(fp);
-    const [m] = await db.$queryRaw<{ marker: string | null }[]>`
-      SELECT shobj_description(
-        (SELECT oid FROM pg_database WHERE datname = current_database()),
-        'pg_database') AS marker`;
-    expect(m.marker).toBe(MARKER);
   });
 
   it("bootstrap refuses a wrong or missing fingerprint confirmation", async () => {
@@ -879,20 +889,50 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
           confirmDb: await fingerprint(),
           disposableConfirmed: true,
         }),
-      ).rejects.toThrow(/production/);
+      ).rejects.toThrow(/refusing: Railway environment/);
     } finally {
       delete process.env.RAILWAY_PROJECT_ID;
     }
   });
 
   it("bootstrap refuses a database containing application rows", async () => {
-    await db.settings.create({ data: { shop: "live-shop.myshopify.com" } });
-    await expect(
-      bootstrapDisposableDatabase(db, {
-        token: TOKEN,
-        confirmDb: await fingerprint(),
-        disposableConfirmed: true,
-      }),
-    ).rejects.toThrow(/application data/);
+    await withScratchDatabase(TEST_URL!, async (scratchUrl) => {
+      execSync("npx prisma migrate deploy", {
+        env: { ...process.env, DATABASE_URL: scratchUrl },
+        stdio: "pipe",
+      });
+      const sdb = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+      try {
+        await sdb.settings.create({ data: { shop: "live-shop.myshopify.com" } });
+        await expect(
+          bootstrapDisposableDatabase(sdb, {
+            token: TOKEN,
+            confirmDb: await fingerprintOf(sdb),
+            disposableConfirmed: true,
+          }),
+        ).rejects.toThrow(/populated/);
+      } finally {
+        await sdb.$disconnect();
+      }
+    });
+  });
+
+  it("bootstrap refuses when application tables are missing entirely", async () => {
+    // An unmigrated scratch database has no schema — a missing table must
+    // never read as "empty".
+    await withScratchDatabase(TEST_URL!, async (scratchUrl) => {
+      const sdb = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+      try {
+        await expect(
+          bootstrapDisposableDatabase(sdb, {
+            token: TOKEN,
+            confirmDb: await fingerprintOf(sdb),
+            disposableConfirmed: true,
+          }),
+        ).rejects.toThrow(/missing from schema/);
+      } finally {
+        await sdb.$disconnect();
+      }
+    });
   });
 });

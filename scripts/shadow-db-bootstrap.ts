@@ -13,11 +13,17 @@
  *   - no production environment markers (RAILWAY_* / NODE_ENV=production),
  *   - MERGESHIP_SHADOW_DISPOSABLE=yes explicitly asserts the connected
  *     database is a disposable local test database,
+ *   - the database name is a strictly-named MergeShip test database and the
+ *     server address is local/private,
  *   - --confirm-db equals the live fingerprint printed by a dry run —
  *     localhost is not proof of safety because a tunnel to production also
  *     appears as localhost,
- *   - the database contains NO application rows (a populated database is
- *     real data, not a sandbox).
+ *   - every expected application table exists in the schema the app resolves
+ *     (current_schema()), and EVERY user table in every non-system schema is
+ *     empty — a populated database is real data, not a sandbox.
+ *
+ * For a fresh disposable database prefer scripts/test-db-provision.ts, which
+ * creates, migrates and marks a new test-named database in one procedure.
  *
  * There is no bypass. The token and the marker are never printed.
  */

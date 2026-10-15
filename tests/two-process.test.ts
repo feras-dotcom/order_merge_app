@@ -4,9 +4,12 @@
 // claims, locks, gates and leases race for real.
 //
 // Opt-in: MERGESHIP_TEST_DATABASE_URL=postgresql://... (disposable db — the
-// suite truncates the v2 tables). Postgres must already have the migrations.
+// suite truncates the v2 tables) plus MERGESHIP_SHADOW_TOKEN matching the
+// disposable marker the database was provisioned with. The shared preflight
+// runs before any write; children inherit the same URL.
 //
-//   MERGESHIP_TEST_DATABASE_URL=postgresql://... npx vitest run tests/two-process.test.ts
+//   MERGESHIP_TEST_DATABASE_URL=postgresql://... MERGESHIP_SHADOW_TOKEN=<t> \
+//     npx vitest run tests/two-process.test.ts
 
 import { spawn } from "node:child_process";
 import http from "node:http";
@@ -14,6 +17,7 @@ import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 import { FakeShopify, makeOrder } from "./fake-shopify";
+import { preflightDisposableDatabase } from "./helpers/disposable-db";
 
 const DATABASE_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const SHOP = "two-process.myshopify.com";
@@ -24,8 +28,15 @@ const run = DATABASE_URL ? describe : describe.skip;
 const viteNodeCli = path.resolve(__dirname, "..", "node_modules", "vite-node", "vite-node.mjs");
 const repoRoot = path.resolve(__dirname, "..");
 
+let preflighted = false;
+
 /** One FakeShopify + HTTP server + truncated database per case. */
 async function startHarness() {
+  // FIRST — before the client connects or any TRUNCATE. Memoized per suite.
+  if (!preflighted) {
+    await preflightDisposableDatabase(DATABASE_URL!);
+    preflighted = true;
+  }
   const shopify = new FakeShopify([makeOrder(1), makeOrder(2), makeOrder(3)]);
   shopify.clock = () => new Date(); // real wall clock — children run on it
   const registered = new Set<string>();

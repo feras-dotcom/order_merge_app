@@ -25,6 +25,7 @@ import { makeOperationStore } from "../../app/lib/operation-store.server";
 import { newLeaseToken } from "../../app/lib/ownership.server";
 import { prismaWorkStore, WORK_DEADLINE_MS } from "../../app/lib/order-work.server";
 import { processOrderWork } from "../../app/lib/order-work-processor.server";
+import { assertSafeTestDatabaseUrl } from "./disposable-db";
 
 const FAKE = process.env.FAKE_SHOPIFY_URL;
 const SHOP = process.env.SHOP;
@@ -38,6 +39,9 @@ if (!FAKE || !SHOP || (!ANCHOR && !SWEEP_ONLY) || !process.env.DATABASE_URL) {
   console.error("needs env: DATABASE_URL FAKE_SHOPIFY_URL SHOP ANCHOR_ORDER_ID|SWEEP_ONLY");
   process.exit(2);
 }
+// Children inherit the parent's restrictions: the URL must be a
+// strictly-named local test database (the parent ran the full preflight).
+assertSafeTestDatabaseUrl(process.env.DATABASE_URL);
 
 const admin: AdminClient = {
   graphql: async (query, options) =>

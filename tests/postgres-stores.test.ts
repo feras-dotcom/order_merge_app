@@ -3,8 +3,11 @@
 //   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres@localhost:54329/mergeship_test \
 //     npx vitest run tests/postgres-stores.test.ts
 //
-// The URL must point at a DISPOSABLE database — `prisma migrate deploy` runs
-// against it and the tables are truncated between tests. The database's
+// The URL must point at a DISPOSABLE database provisioned via
+// scripts/test-db-provision.ts — `prisma migrate deploy` runs against it and
+// the tables are truncated between tests. `preflightDisposableDatabase`
+// runs BEFORE any write and requires the operator-token marker plus
+// MERGESHIP_SHADOW_TOKEN in the shell. The database's
 // session timezone is set to Asia/Tokyo (ALTER DATABASE ... SET timezone) so
 // every (now() AT TIME ZONE 'UTC') discipline error would actually surface.
 
@@ -33,6 +36,7 @@ import {
   planLegacyReconciliation,
   type LegacyVerdict,
 } from "../app/lib/legacy-reconcile.server";
+import { preflightDisposableDatabase } from "./helpers/disposable-db";
 import {
   backfillWorkItem,
   ControlsNotFrozenError,
@@ -68,6 +72,9 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
   let ops: OperationStore;
 
   beforeAll(async () => {
+    // FIRST — before migrations or any write. Throws unless the target is
+    // an independently marked disposable database (tests/helpers).
+    await preflightDisposableDatabase(URL!);
     execSync("npx prisma migrate deploy", {
       env: { ...process.env, DATABASE_URL: URL! },
       stdio: "pipe",
