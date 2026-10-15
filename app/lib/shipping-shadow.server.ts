@@ -90,8 +90,9 @@ export const SHADOW_MAX_ATTEMPTS = 8;
 /** Refund/transaction lists have no pageInfo — reads are bounded and must
  *  return strictly fewer rows than the bound to count as complete. */
 const LIST_BOUND = 50;
-/** Secondaries evaluated per combine per scan; extras stay unevaluated so the
- *  scan makes progress next run (the combine keeps qualifying for selection). */
+/** New durable outcomes per combine per scan. Terminal rows and PENDING
+ *  reclaims never consume the allowance, so a combine with up to 50
+ *  secondaries always progresses. */
 const SECONDARY_SCAN_CAP = 25;
 /** The marker prefix stamped on a disposable database by the local bootstrap.
  *  Format: `mergeship-shadow-disposable:<token>`. */
@@ -104,6 +105,23 @@ const GATEWAY_BOGUS_TEST = "bogus";
 
 export class ShadowDatabaseNotAllowedError extends Error {
   name = "ShadowDatabaseNotAllowedError";
+}
+
+/** Dry runs must never trigger an offline-session token refresh: the Shopify
+ *  library rotates the refresh token with Shopify BEFORE attempting the
+ *  Session write, so a failed write can strand the shop's only refresh
+ *  credential. The library's own refresh threshold is 5 minutes
+ *  (WITHIN_MILLISECONDS_OF_EXPIRY); a dry run requires the access token to
+ *  have much more life than that so the two checks can never disagree. */
+export const DRY_RUN_SESSION_MIN_REMAINING_MS = 30 * 60 * 1000;
+export function dryRunSessionUsable(
+  session: { expires: Date | null } | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (!session) return false;
+  // A session with no expiry (non-expiring token) is never refreshed.
+  if (!(session.expires instanceof Date)) return true;
+  return session.expires.getTime() - now.getTime() > DRY_RUN_SESSION_MIN_REMAINING_MS;
 }
 /** A control change committed while a claim/READY write was in flight — the
  *  write is refused; the PENDING row survives for a later re-evaluation. */
@@ -1201,6 +1219,12 @@ export async function runShadowScan(
         mergeOperationId: row.mergeOperationId,
         sourceOrderId: row.sourceOrderId,
       };
+      if (!opts.apply) {
+        // Dry runs are observational only: no reclaim, no lease, no attempt
+        // spent, no ShippingAdjustment write — and no error either.
+        push({ ...base, outcome: "PENDING_HELD", detail: "dry run — intent not reclaimed" });
+        continue;
+      }
       try {
         const reclaimed = await deps.store.reclaimIntent(row.id, crypto.randomUUID(), ttl);
         if (!reclaimed) {
@@ -1221,6 +1245,11 @@ export async function runShadowScan(
         }
         await finish(reclaimed, op, secondary.name, cutoff);
       } catch (err) {
+        if (err instanceof ShadowDatabaseNotAllowedError) {
+          // A guard misconfiguration is global, not per-combine — abort the
+          // scan so the operator sees the actionable error.
+          throw err;
+        }
         if (err instanceof OwnershipLostError) {
           push({ ...base, outcome: "LEASE_LOST" });
         } else if (err instanceof GateChangedError) {
@@ -1243,54 +1272,75 @@ export async function runShadowScan(
           ),
         ]);
         const bySource = new Map(existing.map((r) => [r.sourceOrderId, r]));
+        const allSecondaries = (op.secondaries ?? []) as OperationSecondary[];
+        // The per-scan allowance covers NEW durable outcomes only: up to
+        // SECONDARY_SCAN_CAP secondaries with no row. Terminal rows never
+        // consume the allowance and PENDING reclaims are handled outside it,
+        // so a combine with up to 50 secondaries always progresses.
+        const rowFree = allSecondaries.filter((s) => !bySource.has(s.id));
+        const pendingRows = allSecondaries.filter(
+          (s) => bySource.get(s.id)?.status === "PENDING",
+        );
+        // sideEffectsDone=false + nextCheckAt=null is the permanent give-up
+        // state (the worker cleared the schedule after MAX_SIDE_EFFECT_PASSES).
+        // While nextCheckAt is set, cleanup is still scheduled — defer.
+        const cleanupStopped = !op.sideEffectsDone && op.nextCheckAt == null;
 
-        for (const secondary of (op.secondaries ?? []).slice(0, SECONDARY_SCAN_CAP) as OperationSecondary[]) {
+        for (const secondary of rowFree.slice(0, SECONDARY_SCAN_CAP)) {
           const base = {
             shop,
             mergeOperationId: op.id,
             sourceOrderId: secondary.id,
             sourceOrderName: secondary.name,
           };
-          const row = bySource.get(secondary.id);
 
-          if (row) {
-            // Terminal verdicts are immutable; a live lease or a deferred
-            // nextCheckAt belongs to another pass.
-            if (row.status !== "PENDING") {
-              push({ ...base, outcome: "EXISTS", detail: `status ${row.status}` });
-              continue;
-            }
-            if (!opts.apply) {
-              push({ ...base, outcome: "EXISTS", detail: "PENDING (dry run)" });
-              continue;
-            }
-            try {
-              const reclaimed = await deps.store.reclaimIntent(row.id, crypto.randomUUID(), ttl);
-              if (!reclaimed) {
-                push({ ...base, outcome: "PENDING_HELD" });
-                continue;
-              }
-              await finish(reclaimed, op, secondary.name, cutoff);
-            } catch (err) {
-              if (err instanceof OwnershipLostError) {
-                push({ ...base, outcome: "LEASE_LOST" });
-              } else if (err instanceof GateChangedError) {
-                push({ ...base, outcome: "GATE_CHANGED" });
-              } else {
-                throw err;
-              }
-            }
-            continue;
-          }
-
-          // No row yet. A combine predating the CURRENT cutoff can never
-          // qualify — record a durable SKIPPED row so it is never re-examined.
           // cutoff === null means a prerequisite is inactive: nothing is
           // written, nothing can become eligible retroactively.
           if (cutoff === null) {
             push({ ...base, outcome: "GATE_CLOSED" });
             continue;
           }
+
+          if (!op.sideEffectsDone) {
+            if (cleanupStopped) {
+              // Cleanup permanently stopped: a refund is never authorized on
+              // incomplete combine evidence, and the op must not pin the scan
+              // window — record a durable fail-closed REVIEW.
+              if (opts.apply) {
+                const snap = policySnapshot(settings);
+                await deps.store.recordTerminal(
+                  {
+                    shop,
+                    mergeOperationId: op.id,
+                    sourceOrderId: secondary.id,
+                    operationCreatedAt: op.createdAt,
+                    activationCutoffAt: cutoff,
+                    policyKind: snap.kind,
+                    policyRetainedMinor: snap.retainedMinor,
+                    policyCurrencyCode: snap.currencyCode,
+                  },
+                  "REVIEW_REQUIRED",
+                  {
+                    reasonCode: "CLEANUP_STOPPED",
+                    reviewReason:
+                      "Combine cleanup permanently stopped before side effects completed; shipping evidence is incomplete.",
+                  },
+                );
+              }
+              push({
+                ...base,
+                outcome: "REVIEW_REQUIRED",
+                detail: "combine cleanup permanently stopped",
+              });
+            } else {
+              // Cleanup still scheduled — re-consider next scan.
+              push({ ...base, outcome: "EXISTS", detail: "combine side effects unfinished" });
+            }
+            continue;
+          }
+
+          // No row yet. A combine predating the CURRENT cutoff can never
+          // qualify — record a durable SKIPPED row so it is never re-examined.
           if (op.createdAt.getTime() < cutoff.getTime()) {
             if (opts.apply) {
               const snap = policySnapshot(settings);
@@ -1371,13 +1421,6 @@ export async function runShadowScan(
               );
             }
             push({ ...base, outcome: "REVIEW_REQUIRED", detail: verdict.issues.join(" ") });
-            continue;
-          }
-
-          // A combine whose side effects did not finish is re-considered next
-          // scan instead of being parked on a state that is still changing.
-          if (!op.sideEffectsDone) {
-            push({ ...base, outcome: "EXISTS", detail: "combine side effects unfinished" });
             continue;
           }
 
@@ -1463,7 +1506,44 @@ export async function runShadowScan(
             }
           }
         }
+
+        // PENDING rows: re-lease only when expired and due. Outside the
+        // new-outcome cap — reclaims never consume the allowance.
+        for (const secondary of pendingRows) {
+          const base = {
+            shop,
+            mergeOperationId: op.id,
+            sourceOrderId: secondary.id,
+            sourceOrderName: secondary.name,
+          };
+          const row = bySource.get(secondary.id)!;
+          if (!opts.apply) {
+            push({ ...base, outcome: "PENDING_HELD", detail: "dry run — intent not reclaimed" });
+            continue;
+          }
+          try {
+            const reclaimed = await deps.store.reclaimIntent(row.id, crypto.randomUUID(), ttl);
+            if (!reclaimed) {
+              push({ ...base, outcome: "PENDING_HELD" });
+              continue;
+            }
+            await finish(reclaimed, op, secondary.name, cutoff);
+          } catch (err) {
+            if (err instanceof OwnershipLostError) {
+              push({ ...base, outcome: "LEASE_LOST" });
+            } else if (err instanceof GateChangedError) {
+              push({ ...base, outcome: "GATE_CHANGED" });
+            } else {
+              throw err;
+            }
+          }
+        }
       } catch (err) {
+        if (err instanceof ShadowDatabaseNotAllowedError) {
+          // A guard misconfiguration is global, not per-combine — abort the
+          // scan so the operator sees the actionable error.
+          throw err;
+        }
         // One failed combine must never stop the scan — and a shadow error
         // can never propagate into the combine engine (it shares nothing).
         push({

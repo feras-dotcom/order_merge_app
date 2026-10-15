@@ -33,6 +33,7 @@ import {
   setShippingAdjustmentEnabled,
   type MergeSettings,
 } from "../app/lib/settings.server";
+import { bootstrapDisposableDatabase } from "../app/lib/shadow-db-bootstrap.server";
 
 const TEST_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const SHOP = "pg-shadow.myshopify.com";
@@ -495,7 +496,12 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
 
   /** Seed a real COMPLETED native-v2 op + MergeRecord + attempts — the same
    *  columns the live engine writes, mapped through raw SQL. */
-  const seedOp = async (i: number, secondaryId = oid(200), createdAt = OP_CREATED) => {
+  const seedOp = async (
+  i: number,
+  secondaryId = oid(200),
+  createdAt = OP_CREATED,
+  cleanup: { stopped?: boolean } = {},
+) => {
     const opId = `e2e-op-${i}`;
     const primaryId = oid(9000 + i);
     const secondary = {
@@ -535,7 +541,10 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
           lines: [{ secondaryId, lineItemId: "li", variantId: "v", quantity: 1 }],
         },
         firstDispatchAt: createdAt,
-        sideEffectsDone: true,
+        // stopped=true mirrors the worker give-up state: cleanup unfinished
+        // and the retry schedule cleared — nothing will ever run it again.
+        sideEffectsDone: !cleanup.stopped,
+        nextCheckAt: null,
         createdAt,
       },
     });
@@ -687,5 +696,148 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
     expect(rows[0].status).toBe("SKIPPED");
     expect(rows[0].reasonCode).toBe("BEFORE_EPOCH");
     expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("SKIPPED");
+  });
+
+  // ── MEDIUM-1: cleanup-stopped combines cannot starve the scan window ──
+
+  it("51 cleanup-stopped combines do not starve the one eligible combine", async () => {
+    await setupGate();
+    // 51 combines whose cleanup permanently stopped (sideEffectsDone=false
+    // with nextCheckAt=null — the worker gave up), then one fully eligible
+    // combine. Each stopped op gets a durable fail-closed REVIEW, so the
+    // oldest-50 window keeps moving.
+    for (let i = 0; i < 51; i++) {
+      await seedOp(i, oid(5000 + i), new Date(Date.now() - (60 - i) * 60_000), {
+        stopped: true,
+      });
+    }
+    await seedOp(51, oid(5200), OP_CREATED);
+    const store = makeShippingShadowStore(db);
+    const scan = () =>
+      runShadowScan(
+        { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+        { apply: true },
+      );
+    await scan(); // the oldest 50 stopped ops → REVIEW rows
+    await scan(); // the last stopped op + the eligible combine
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`;
+    expect(rows).toHaveLength(52);
+    expect(
+      rows.filter(
+        (r) => r.status === "REVIEW_REQUIRED" && r.reasonCode === "CLEANUP_STOPPED",
+      ),
+    ).toHaveLength(51);
+    const ready = rows.filter((r) => r.status === "READY");
+    expect(ready).toHaveLength(1);
+    expect(ready[0].sourceOrderId).toBe(oid(5200));
+  });
+
+  // ── Dry run: a due PENDING intent is reported, never reclaimed ──
+
+  it("a dry run never reclaims or mutates a due PENDING intent", async () => {
+    const cutoff = await setupGate();
+    const store = makeShippingShadowStore(db);
+    // ttl 0 → the lease is already expired and nextCheckAt is already due.
+    const claimed = await store.claimIntent(identity(cutoff), 0);
+    const rowId = (claimed as { id: string }).id;
+    const before = await db.shippingAdjustment.findUniqueOrThrow({
+      where: { id: rowId },
+    });
+    const report = await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: false },
+    );
+    const after = await db.shippingAdjustment.findUniqueOrThrow({
+      where: { id: rowId },
+    });
+    expect(after.status).toBe("PENDING");
+    expect(after.attempts).toBe(before.attempts); // reclaim would increment
+    expect(after.leaseToken).toBe(before.leaseToken); // lease untouched
+    expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe(
+      "PENDING_HELD",
+    );
+  });
+
+  // ── MEDIUM-2: disposable bootstrap must prove the database is disposable ──
+
+  const fingerprint = async () => {
+    const [r] = await db.$queryRaw<{ fp: string }[]>`
+      SELECT current_database() || '@' ||
+             COALESCE(host(inet_server_addr()), 'unix') || ':' ||
+             COALESCE(inet_server_port()::text, '?') AS fp`;
+    return r.fp;
+  };
+
+  it("bootstrap marks a verified empty database", async () => {
+    // beforeEach seeds the 'control' row the app itself would create —
+    // a truly fresh disposable database has no application rows at all.
+    await db.$executeRawUnsafe(`DELETE FROM "AppControl"`);
+    const fp = await fingerprint();
+    const res = await bootstrapDisposableDatabase(db, {
+      token: TOKEN,
+      confirmDb: fp,
+      disposableConfirmed: true,
+    });
+    expect(res.fingerprint).toBe(fp);
+    const [m] = await db.$queryRaw<{ marker: string | null }[]>`
+      SELECT shobj_description(
+        (SELECT oid FROM pg_database WHERE datname = current_database()),
+        'pg_database') AS marker`;
+    expect(m.marker).toBe(MARKER);
+  });
+
+  it("bootstrap refuses a wrong or missing fingerprint confirmation", async () => {
+    await expect(
+      bootstrapDisposableDatabase(db, {
+        token: TOKEN,
+        confirmDb: "prod-db@10.0.0.5:5432",
+        disposableConfirmed: true,
+      }),
+    ).rejects.toThrow(/confirm-db/);
+    await expect(
+      bootstrapDisposableDatabase(db, {
+        token: TOKEN,
+        confirmDb: undefined,
+        disposableConfirmed: true,
+      }),
+    ).rejects.toThrow(/confirm-db/);
+  });
+
+  it("bootstrap refuses without the explicit disposable flag", async () => {
+    await expect(
+      bootstrapDisposableDatabase(db, {
+        token: TOKEN,
+        confirmDb: await fingerprint(),
+        disposableConfirmed: false,
+      }),
+    ).rejects.toThrow(/DISPOSABLE/);
+  });
+
+  it("bootstrap refuses under a production environment marker", async () => {
+    process.env.RAILWAY_PROJECT_ID = "proj-x";
+    try {
+      await expect(
+        bootstrapDisposableDatabase(db, {
+          token: TOKEN,
+          confirmDb: await fingerprint(),
+          disposableConfirmed: true,
+        }),
+      ).rejects.toThrow(/production/);
+    } finally {
+      delete process.env.RAILWAY_PROJECT_ID;
+    }
+  });
+
+  it("bootstrap refuses a database containing application rows", async () => {
+    await db.settings.create({ data: { shop: "live-shop.myshopify.com" } });
+    await expect(
+      bootstrapDisposableDatabase(db, {
+        token: TOKEN,
+        confirmDb: await fingerprint(),
+        disposableConfirmed: true,
+      }),
+    ).rejects.toThrow(/application data/);
   });
 });

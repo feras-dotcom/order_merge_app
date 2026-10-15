@@ -64,6 +64,7 @@ const {
   makeShippingShadowStore,
   runShadowScan,
   ShadowDatabaseNotAllowedError,
+  dryRunSessionUsable,
 } = await import("../app/lib/shipping-shadow.server");
 const { getSettings } = await import("../app/lib/settings.server");
 
@@ -97,22 +98,19 @@ if (apply && confirmDb !== fingerprint) {
 
 /**
  * Offline session via unauthenticated.admin; a missing session is null. In
- * dry-run mode the session row is pre-checked: if Shopify would need a token
- * refresh (a database write), we fail closed with an actionable error BEFORE
- * the library attempts it on the read-only connection.
+ * dry-run mode the session row is pre-checked with a margin far beyond the
+ * library's own 5-minute refresh threshold: a refresh rotates the refresh
+ * token with Shopify BEFORE the Session write, so if the write were to fail
+ * (the dry-run connection is read-only) the shop's only refresh credential
+ * could be stranded. We fail closed with an actionable error well before a
+ * refresh could ever be attempted.
  */
 async function sessionAdminFactory(shop: string) {
-  const OFFLINE_REFRESH_WINDOW_MS = 5 * 60 * 1000;
   const session = await db.session.findFirst({ where: { shop, isOnline: false } });
   if (!session) return null;
-  if (
-    !apply &&
-    session.refreshToken &&
-    session.expires instanceof Date &&
-    session.expires.getTime() - Date.now() <= OFFLINE_REFRESH_WINDOW_MS
-  ) {
+  if (!apply && !dryRunSessionUsable(session)) {
     throw new Error(
-      `Offline session for ${shop} needs a token refresh, which writes to the database — refused in dry-run. Refresh the app's session first (open the app), or accept that this intent cannot be evaluated dry.`,
+      `Offline session for ${shop} has expired or expires soon — a dry run never attempts a token refresh. Open the app to refresh the session first, or accept that this intent cannot be evaluated dry.`,
     );
   }
   const { unauthenticated } = await import("../app/shopify.server");

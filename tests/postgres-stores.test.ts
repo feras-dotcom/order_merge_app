@@ -2351,27 +2351,37 @@ describe.skipIf(!URL)("postgres stores (real database, Tokyo session timezone)",
       const control = await ops.getControl();
       expect(control!.shippingAdjustmentsEnabled).toBe(false);
       expect(control!.shippingAllowShops).toEqual([]);
-      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
 
-      // Switch on with empty allowlist: still nobody — inverted vs allowShops.
+      // The full activation gate is the three-epoch cutoff in
+      // shipping-activation.ts — covered by the activation/shadow suites.
+      // Here we only prove the control fields behave as stored.
       await ops.setControl({ shippingAdjustmentsEnabled: true });
-      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+      const c1 = await ops.getControl();
+      expect(c1!.shippingAdjustmentsEnabled).toBe(true);
+      expect(c1!.shippingEnabledAt).toBeInstanceOf(Date);
+      expect(c1!.shippingAllowShops).toEqual([]);
 
       await ops.setControl({ shippingAllowShops: ["other.myshopify.com"] });
-      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+      expect((await ops.getControl())!.shippingAllowShops).toEqual(["other.myshopify.com"]);
 
       await ops.setControl({ shippingAllowShops: [SHIP_SHOP] });
-      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(true);
+      expect((await ops.getControl())!.shippingAllowShops).toEqual([SHIP_SHOP]);
 
       // Clearing returns to NOBODY (never "all shops").
       await ops.setControl({ shippingAllowShops: [] });
-      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+      expect((await ops.getControl())!.shippingAllowShops).toEqual([]);
+
+      // Switch off clears the kill-switch epoch.
+      await ops.setControl({ shippingAdjustmentsEnabled: false });
+      const c2 = await ops.getControl();
+      expect(c2!.shippingAdjustmentsEnabled).toBe(false);
+      expect(c2!.shippingEnabledAt).toBeNull();
     });
 
     it("shipping stays OFF while the merge switches are ON", async () => {
       await ops.setControl({ newMergesEnabled: true, completionEnabled: true, allowShops: [] });
       expect(await ops.isEnabled(SHIP_SHOP, "newMergesEnabled")).toBe(true);
-      expect(await ops.isShippingAdjustmentEnabled(SHIP_SHOP)).toBe(false);
+      expect((await ops.getControl())!.shippingAdjustmentsEnabled).toBe(false);
     });
 
     it("setShippingAdjustmentEnabled manages the enable-epoch on the DB clock", async () => {

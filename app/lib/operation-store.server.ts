@@ -270,10 +270,6 @@ export interface OperationStore {
   setControl(patch: Partial<Omit<ControlRow, "id">>): Promise<void>;
   /** Read-side helper for entry points (the gate SQL is the enforcement). */
   isEnabled(shop: string, sw: ControlSwitch): Promise<boolean>;
-  /** Read-side helper for the shipping subsystem (the future shipping gate
-   *  SQL is the enforcement). INVERTED vs isEnabled: an empty
-   *  shippingAllowShops means NO shops, never all. */
-  isShippingAdjustmentEnabled(shop: string): Promise<boolean>;
   /** WorkerInstance heartbeat upsert (sweeper liveness). */
   heartbeat(instanceId: string, deploymentId: string | null, version: string | null): Promise<void>;
   listRecentInstances(): Promise<any[]>;
@@ -816,10 +812,13 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
           if (added.length) {
             // A shop newly entering the rollout gets a fresh membership
             // epoch; a re-add stamps a NEW epoch, so combines that completed
-            // while the shop was out of the rollout never qualify.
+            // while the shop was out of the rollout never qualify. Ids are
+            // generated in JS — no server-side gen_random_uuid() dependency.
+            const ids = added.map(() => crypto.randomUUID());
             await tx.$executeRaw`
               INSERT INTO "Settings" ("id", "shop", "shippingRolloutAt")
-              SELECT gen_random_uuid()::text, s, ${DB_WALL} FROM UNNEST(${added}::text[]) AS s
+              SELECT u.id, u.shop, ${DB_WALL}
+              FROM UNNEST(${ids}::text[], ${added}::text[]) AS u(id, shop)
               ON CONFLICT ("shop") DO UPDATE SET "shippingRolloutAt" = ${DB_WALL}`;
           }
           if (removed.length) {
@@ -841,16 +840,6 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       const row = rows[0];
       if (!row?.enabled) return false;
       return row.allowShops.length === 0 || row.allowShops.includes(shop);
-    },
-
-    async isShippingAdjustmentEnabled(shop) {
-      const rows = await db.$queryRaw<{ shippingAdjustmentsEnabled: boolean; shippingAllowShops: string[] }[]>`
-        SELECT "shippingAdjustmentsEnabled", "shippingAllowShops"
-        FROM "AppControl" WHERE id = 'control'`;
-      const row = rows[0];
-      if (!row?.shippingAdjustmentsEnabled) return false;
-      // Empty shipping allowlist = NO shops (deliberately inverted vs isEnabled).
-      return row.shippingAllowShops.includes(shop);
     },
 
     async heartbeat(instanceId, deploymentId, version) {

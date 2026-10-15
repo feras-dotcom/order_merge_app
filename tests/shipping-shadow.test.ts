@@ -12,6 +12,8 @@ import type { MutationAttempt, OperationRecord } from "../app/lib/operation-stor
 import { shippingActivationCutoff } from "../app/lib/shipping-activation";
 import { MemoryOperationStore } from "./fake-shopify";
 import {
+  DRY_RUN_SESSION_MIN_REMAINING_MS,
+  dryRunSessionUsable,
   GateChangedError,
   minorToDecimal,
   readOnlyAdmin,
@@ -832,13 +834,37 @@ describe("shipping shadow evaluator (Phase 1.1)", () => {
     expect(store.rowFor(oid(200))?.status).toBe("REVIEW_REQUIRED");
   });
 
-  it("a combine with unfinished side effects is deferred, never parked", async () => {
-    const op = completedOp({ sideEffectsDone: false });
+  it("a combine with in-progress cleanup is deferred, never parked", async () => {
+    // sideEffectsDone=false with nextCheckAt set = cleanup still scheduled.
+    const op = completedOp({
+      sideEffectsDone: false,
+      nextCheckAt: new Date(OP_CREATED.getTime() + 300_000),
+    });
     const store = new MemoryShadowStore([op], mergeRecordsFor(op));
     const { deps } = makeDeps({ store });
     const report = await runShadowScan(deps, { apply: true });
     expect(store.rows.size).toBe(0);
     expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("EXISTS");
+  });
+
+  it("a combine whose cleanup permanently stopped gets a durable fail-closed REVIEW", async () => {
+    // sideEffectsDone=false + nextCheckAt=null = the worker gave up
+    // (attempt cap reached, schedule cleared). The op must not pin the
+    // scan window: every uncovered secondary gets a durable REVIEW row.
+    const op = completedOp({ sideEffectsDone: false, nextCheckAt: null });
+    const store = new MemoryShadowStore([op], mergeRecordsFor(op));
+    const { deps } = makeDeps({ store });
+    const report = await runShadowScan(deps, { apply: true });
+    const row = store.rowFor(oid(200))!;
+    expect(row.status).toBe("REVIEW_REQUIRED");
+    expect(row.reasonCode).toBe("CLEANUP_STOPPED");
+    expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe(
+      "REVIEW_REQUIRED",
+    );
+    // Terminal and durable: the combine leaves the window for good.
+    const rescan = await runShadowScan(deps, { apply: true });
+    expect(rescan.entries.find((e) => e.sourceOrderId === oid(200))).toBeUndefined();
+    expect(store.rows.size).toBe(1);
   });
 
   it("a missing Shopify session is REVIEW", async () => {
@@ -1261,6 +1287,155 @@ describe("shipping shadow evaluator (Phase 1.1)", () => {
     expect([...store.rows.values()].every((r) => r.status === "READY")).toBe(true);
   });
 
+  // ── MEDIUM-1: scan-window starvation fixes ─────────────────────────────────
+
+  /** A completed op with n fully evidenced secondaries. */
+  const multiSecondaryOp = (n: number, opId = "op-multi"): OperationRecord => {
+    const secondaries = Array.from({ length: n }, (_, i) => ({
+      id: oid(2000 + i),
+      name: `#${2000 + i}`,
+      items: 1,
+      done: true,
+      cancelPhase: "CANCEL_VERIFIED" as const,
+      cancelledAt: "2026-10-20T12:05:00Z",
+      staffNoteMatched: true,
+    }));
+    return completedOp({
+      id: opId,
+      secondaries,
+      involvedOrderIds: [oid(100), ...secondaries.map((s) => s.id)],
+      expectedTransfer: secondaries.map((s, i) => ({
+        secondaryId: s.id,
+        secondaryIndex: i + 1,
+        lines: [{ sourceLineItemId: `l-${i}`, variantId: "v", quantity: 1 }],
+      })),
+      appliedEvidence: {
+        agreementId: "ag",
+        happenedAt: "t",
+        lines: secondaries.map((s) => ({
+          secondaryId: s.id,
+          lineItemId: "li",
+          variantId: "v",
+          quantity: 1,
+        })),
+      },
+    });
+  };
+
+  /** ORDER_CANCEL attempts for secondaries beyond the first (makeDeps only
+   *  generates one). */
+  const extraCancelAttempts = (op: OperationRecord): MutationAttempt[] =>
+    op.secondaries.slice(1).map((s, i) => ({
+      id: `a-c-${op.id}-${i}`,
+      operationId: op.id,
+      kind: "ORDER_CANCEL" as const,
+      targetOrderId: s.id,
+      attemptNo: 1,
+      state: "SUCCEEDED" as const,
+      dispatchToken: "t",
+      dispatchedAt: OP_CREATED,
+      respondedAt: OP_CREATED,
+      responseSummary: null,
+      jobId: null,
+    }));
+
+  it("a combine with 30 secondaries evaluates every one across scans", async () => {
+    const op = multiSecondaryOp(30);
+    const { deps, store, ops } = makeDeps({
+      opsList: [op],
+      records: mergeRecordsFor(op),
+    });
+    ops.attempts.push(...extraCancelAttempts(op));
+    // Scan 1 writes the per-scan allowance (25) of new rows.
+    await runShadowScan(deps, { apply: true });
+    expect(store.rows.size).toBe(25);
+    // Scan 2 finishes the remainder — progress is guaranteed, not stalled.
+    await runShadowScan(deps, { apply: true });
+    expect(store.rows.size).toBe(30);
+    expect([...store.rows.values()].every((r) => r.status === "READY")).toBe(true);
+  });
+
+  it("previously evaluated secondaries never consume the per-scan allowance", async () => {
+    const op = multiSecondaryOp(30);
+    const { deps, store, ops } = makeDeps({
+      opsList: [op],
+      records: mergeRecordsFor(op),
+    });
+    ops.attempts.push(...extraCancelAttempts(op));
+    // 25 secondaries already have durable outcomes — the remaining 5 must
+    // ALL be handled in a single scan, not spread across five scans.
+    for (const s of op.secondaries.slice(0, 25)) {
+      await store.recordTerminal(
+        {
+          shop: SHOP,
+          mergeOperationId: op.id,
+          sourceOrderId: s.id,
+          operationCreatedAt: op.createdAt,
+          activationCutoffAt: EPOCH,
+          policyKind: "REFUND_ALL",
+          policyRetainedMinor: null,
+          policyCurrencyCode: null,
+        },
+        "SKIPPED",
+        { reasonCode: "BEFORE_EPOCH" },
+      );
+    }
+    const report = await runShadowScan(deps, { apply: true });
+    expect(store.rows.size).toBe(30);
+    const ready = report.entries.filter(
+      (e) => e.outcome === "READY" && e.mergeOperationId === op.id,
+    );
+    expect(ready).toHaveLength(5);
+    expect([...store.rows.values()].filter((r) => r.status === "READY")).toHaveLength(5);
+  });
+
+  it("duplicate concurrent scans over a 30-secondary combine never double-book", async () => {
+    const op = multiSecondaryOp(30);
+    const { deps, store, ops } = makeDeps({
+      opsList: [op],
+      records: mergeRecordsFor(op),
+    });
+    ops.attempts.push(...extraCancelAttempts(op));
+    await Promise.all([
+      runShadowScan(deps, { apply: true }),
+      runShadowScan(deps, { apply: true }),
+    ]);
+    // No duplicates regardless of how the two scans interleaved.
+    const ids = [...store.rows.values()].map((r) => r.sourceOrderId);
+    expect(new Set(ids).size).toBe(ids.length);
+    // A final scan completes the set.
+    await runShadowScan(deps, { apply: true });
+    expect(store.rows.size).toBe(30);
+  });
+
+  it("a dry run never reclaims, leases or spends attempts on a due PENDING intent", async () => {
+    const now = new Date("2026-10-20T13:00:00Z");
+    const { deps, store } = makeDeps({});
+    store.clock = () => now;
+    const claimed = (await store.claimIntent(
+      {
+        shop: SHOP,
+        mergeOperationId: "op-1",
+        sourceOrderId: oid(200),
+        operationCreatedAt: OP_CREATED,
+        activationCutoffAt: EPOCH,
+        policyKind: "REFUND_ALL",
+        policyRetainedMinor: null,
+        policyCurrencyCode: null,
+      },
+      1_000,
+    )) as any;
+    // Lease expired + nextCheckAt due — the row is reclaimable.
+    now.setTime(now.getTime() + 2_000);
+    const report = await runShadowScan(deps, { apply: false });
+    const entry = report.entries.find((e) => e.sourceOrderId === oid(200));
+    expect(entry?.outcome).toBe("PENDING_HELD");
+    const row = store.rowFor(oid(200))!;
+    expect(row.status).toBe("PENDING");
+    expect(row.attempts).toBe(1); // reclaim would have incremented it
+    expect(row.leaseToken).toBe(claimed.leaseToken); // lease untouched
+  });
+
   it("mixed presentment/shop currencies fail closed", async () => {
     const admin = fakeAdmin({ order: () => shopifyOrder({ presentmentCurrencyCode: "EUR" }) });
     const { deps, store } = makeDeps({ admin });
@@ -1333,5 +1508,20 @@ describe("minorToDecimal", () => {
     expect(minorToDecimal("5", 0)).toBe("5");
     expect(minorToDecimal("12345", 3)).toBe("12.345");
     expect(minorToDecimal("7", 2)).toBe("0.07");
+  });
+});
+
+describe("dryRunSessionUsable (offline-token refresh guard)", () => {
+  const now = new Date("2026-10-20T12:00:00Z");
+  const M = DRY_RUN_SESSION_MIN_REMAINING_MS;
+  it("refuses missing, near-expiry and expired sessions", () => {
+    expect(dryRunSessionUsable(null, now)).toBe(false);
+    expect(dryRunSessionUsable(undefined, now)).toBe(false);
+    // Comfortably beyond the library's own 5-minute refresh threshold.
+    expect(dryRunSessionUsable({ expires: new Date(now.getTime() + M + 1) }, now)).toBe(true);
+    expect(dryRunSessionUsable({ expires: new Date(now.getTime() + M - 1) }, now)).toBe(false);
+    expect(dryRunSessionUsable({ expires: new Date(now.getTime() - 1) }, now)).toBe(false);
+    // A non-expiring token is never refreshed — always usable.
+    expect(dryRunSessionUsable({ expires: null }, now)).toBe(true);
   });
 });

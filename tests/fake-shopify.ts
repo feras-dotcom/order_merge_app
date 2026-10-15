@@ -1706,12 +1706,6 @@ export class MemoryOperationStore implements OperationStore {
     return this.control.allowShops.length === 0 || this.control.allowShops.includes(shop);
   }
 
-  async isShippingAdjustmentEnabled(shop: string) {
-    if (!this.control.shippingAdjustmentsEnabled) return false;
-    // Empty shipping allowlist = NO shops (inverted vs isEnabled).
-    return this.control.shippingAllowShops.includes(shop);
-  }
-
   async heartbeat(instanceId: string, railwayDeploymentId: string | null, version: string | null) {
     this.instances.set(instanceId, {
       instanceId,

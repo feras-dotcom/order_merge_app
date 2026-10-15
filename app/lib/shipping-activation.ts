@@ -19,6 +19,17 @@
  * the shop was outside the rollout, or while the kill switch was off, can
  * never become eligible retroactively.
  *
+ * Two operator-visible edge cases, both fail-closed:
+ *   - If the kill switch was already ON when the Phase 1.1 migration added
+ *     shippingEnabledAt, the epoch stays NULL — the gate is closed for every
+ *     shop until the operator cycles the switch OFF→ON (scripts/app-control.ts
+ *     --shipping off, then --shipping on).
+ *   - After an uninstall, the shop may STILL be listed in
+ *     shippingAllowShops while shippingRolloutAt is NULL (reset clears the
+ *     epoch, not the list). The gate is closed; re-admission requires the
+ *     operator to remove and re-add the shop so setControl stamps a fresh
+ *     membership epoch.
+ *
  * CRITICAL SEMANTICS DIFFERENCE vs the merge controls:
  *   AppControl.allowShops          — empty means ALL shops.
  *   AppControl.shippingAllowShops  — empty means NO shops.
