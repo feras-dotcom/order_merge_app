@@ -458,6 +458,13 @@ export function makeShippingShadowStore(db: PrismaClient = defaultDb): ShippingS
       return db.$queryRaw<OperationRecord[]>`
         SELECT op.* FROM "MergeOperation" op
         WHERE op."shop" = ${shop} AND op."protocolVersion" = 2 AND op."phase" = 'COMPLETED'
+          -- Cleanup-deferred combines (sideEffectsDone=false with a scheduled
+          -- nextCheckAt) are excluded from the bounded window: merge
+          -- completion and shipping are independent switches, so an op may
+          -- await cleanup indefinitely and must never starve newer combines.
+          -- When its state resolves — sideEffectsDone=true, or nextCheckAt
+          -- cleared by the worker give-up — it re-enters the window.
+          AND (op."sideEffectsDone" = true OR op."nextCheckAt" IS NULL)
           AND EXISTS (
             SELECT 1 FROM jsonb_array_elements(op."secondaries") s
             WHERE NOT EXISTS (

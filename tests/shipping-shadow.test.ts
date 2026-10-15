@@ -67,6 +67,9 @@ class MemoryShadowStore implements ShippingShadowStore {
             o.shop === shop &&
             o.protocolVersion === 2 &&
             o.phase === "COMPLETED" &&
+            // Mirrors the SQL store: cleanup-deferred ops (unfinished +
+            // scheduled) stay out of the window until their state resolves.
+            (o.sideEffectsDone || o.nextCheckAt == null) &&
             (o.secondaries ?? []).some(
               (s) => ![...this.rows.values()].some((r) => r.shop === shop && r.sourceOrderId === s.id),
             ),
@@ -834,8 +837,10 @@ describe("shipping shadow evaluator (Phase 1.1)", () => {
     expect(store.rowFor(oid(200))?.status).toBe("REVIEW_REQUIRED");
   });
 
-  it("a combine with in-progress cleanup is deferred, never parked", async () => {
+  it("a combine with in-progress cleanup stays out of the window until cleanup resolves", async () => {
     // sideEffectsDone=false with nextCheckAt set = cleanup still scheduled.
+    // It is excluded from the bounded window — merge completion and shipping
+    // are independent switches, so it could wait indefinitely.
     const op = completedOp({
       sideEffectsDone: false,
       nextCheckAt: new Date(OP_CREATED.getTime() + 300_000),
@@ -844,7 +849,45 @@ describe("shipping shadow evaluator (Phase 1.1)", () => {
     const { deps } = makeDeps({ store });
     const report = await runShadowScan(deps, { apply: true });
     expect(store.rows.size).toBe(0);
-    expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("EXISTS");
+    expect(report.entries.find((e) => e.sourceOrderId === oid(200))).toBeUndefined();
+    // Cleanup finishes → the op re-enters the window and is evaluated.
+    op.sideEffectsDone = true;
+    op.nextCheckAt = null;
+    await runShadowScan(deps, { apply: true });
+    expect(store.rowFor(oid(200))?.status).toBe("READY");
+  });
+
+  it("any number of cleanup-deferred combines never occupy the scan window", async () => {
+    const deferred = Array.from({ length: 51 }, (_, i) =>
+      completedOp({
+        id: `deferred-${i}`,
+        primaryOrderId: oid(3000 + i),
+        secondaries: [
+          {
+            id: oid(4000 + i),
+            name: `#${4000 + i}`,
+            items: 1,
+            done: true,
+            cancelPhase: "CANCEL_VERIFIED" as const,
+            cancelledAt: "2026-10-20T12:05:00Z",
+            staffNoteMatched: true,
+          },
+        ],
+        sideEffectsDone: false,
+        nextCheckAt: new Date(OP_CREATED.getTime() - 60_000),
+        createdAt: new Date(OP_CREATED.getTime() - (60 - i) * 60_000),
+      }),
+    );
+    const eligible = completedOp({ id: "eligible-1" });
+    const opsList = [...deferred, eligible];
+    const store = new MemoryShadowStore(opsList, opsList.flatMap(mergeRecordsFor));
+    const { deps } = makeDeps({ store, opsList });
+    const report = await runShadowScan(deps, { apply: true });
+    // The eligible combine is reached in the first scan — deferred ops are
+    // not in the window at all and hold no rows.
+    expect(store.rows.size).toBe(1);
+    expect(store.rowFor(oid(200))?.status).toBe("READY");
+    expect(report.entries.find((e) => e.sourceOrderId === oid(200))?.outcome).toBe("READY");
   });
 
   it("a combine whose cleanup permanently stopped gets a durable fail-closed REVIEW", async () => {

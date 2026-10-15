@@ -500,7 +500,7 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   i: number,
   secondaryId = oid(200),
   createdAt = OP_CREATED,
-  cleanup: { stopped?: boolean } = {},
+  cleanup: { stopped?: boolean; deferred?: boolean } = {},
 ) => {
     const opId = `e2e-op-${i}`;
     const primaryId = oid(9000 + i);
@@ -541,10 +541,11 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
           lines: [{ secondaryId, lineItemId: "li", variantId: "v", quantity: 1 }],
         },
         firstDispatchAt: createdAt,
-        // stopped=true mirrors the worker give-up state: cleanup unfinished
-        // and the retry schedule cleared — nothing will ever run it again.
-        sideEffectsDone: !cleanup.stopped,
-        nextCheckAt: null,
+        // stopped=true mirrors the worker give-up state (schedule cleared);
+        // deferred=true mirrors cleanup still scheduled — e.g. merge
+        // completion disabled while shipping evaluation is on.
+        sideEffectsDone: !(cleanup.stopped || cleanup.deferred),
+        nextCheckAt: cleanup.deferred ? new Date(Date.now() - 60_000) : null,
         createdAt,
       },
     });
@@ -734,6 +735,54 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
     expect(ready[0].sourceOrderId).toBe(oid(5200));
   });
 
+  it("cleanup-deferred combines (merge completion off, shipping on) do not starve the window", async () => {
+    await setupGate();
+    // Shipping evaluation is fully enabled for this shop while merge
+    // completion is independently disabled — 51 combines sit with
+    // sideEffectsDone=false and a scheduled nextCheckAt that will never run.
+    for (let i = 0; i < 51; i++) {
+      // e2e-op-0 gets a post-cutoff createdAt so that, once cleanup finishes,
+      // it is genuinely eligible (the others would BEFORE_EPOCH-skip anyway).
+      await seedOp(
+        i,
+        oid(5000 + i),
+        i === 0 ? OP_CREATED : new Date(Date.now() - (60 - i) * 60_000),
+        { deferred: true },
+      );
+    }
+    await seedOp(51, oid(5200), OP_CREATED);
+    const store = makeShippingShadowStore(db);
+    const report = await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: true },
+    );
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP}`;
+    // The eligible combine is evaluated NOW — deferred ops neither occupy
+    // the window nor get durable rows while their fate is undecided.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("READY");
+    expect(rows[0].sourceOrderId).toBe(oid(5200));
+    expect(report.entries.find((e) => e.sourceOrderId === oid(5200))?.outcome).toBe(
+      "READY",
+    );
+    // A deferred op that later finishes cleanup becomes discoverable again.
+    await db.mergeOperation.update({
+      where: { id: "e2e-op-0" },
+      data: { sideEffectsDone: true, nextCheckAt: null },
+    });
+    await runShadowScan(
+      { store, ops, settings: settingsLoader, adminFactory: async () => cannedAdmin() },
+      { apply: true },
+    );
+    const after = await db.$queryRaw<
+      any[]
+    >`SELECT * FROM "ShippingAdjustment" WHERE "shop" = ${SHOP} AND "sourceOrderId" = ${oid(5000)}`;
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe("READY");
+  });
+
   // ── Dry run: a due PENDING intent is reported, never reclaimed ──
 
   it("a dry run never reclaims or mutates a due PENDING intent", async () => {
@@ -771,9 +820,15 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   };
 
   it("bootstrap marks a verified empty database", async () => {
-    // beforeEach seeds the 'control' row the app itself would create —
-    // a truly fresh disposable database has no application rows at all.
-    await db.$executeRawUnsafe(`DELETE FROM "AppControl"`);
+    // beforeEach seeds the 'control' row the app itself would create, and
+    // other suites sharing this disposable database leave rows behind —
+    // a truly fresh disposable DB has no application rows at all.
+    await db.$executeRawUnsafe(
+      `TRUNCATE "Session", "Settings", "AppControl", "ProcessedWebhook",
+       "MergeClaim", "MergeRecord", "MergeOperation", "MergeOrderLock",
+       "MergeMutationAttempt", "WorkerInstance", "ShippingAdjustment"
+       RESTART IDENTITY CASCADE`,
+    );
     const fp = await fingerprint();
     const res = await bootstrapDisposableDatabase(db, {
       token: TOKEN,
