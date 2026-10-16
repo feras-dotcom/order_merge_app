@@ -36,14 +36,17 @@
 //
 // Provisioning a fresh disposable database:
 //   docker run -d -p 55432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
-//   MERGESHIP_SHADOW_TOKEN=<random> npx vite-node scripts/test-db-provision.ts \
+//   MERGESHIP_SHADOW_TOKEN=<random> npx vite-node --script scripts/test-db-provision.ts \
 //     --server postgresql://postgres:postgres@localhost:55432/postgres \
 //     --name mergeship_test_x --confirm-db <printed fingerprint>
+// (the --script flag is required — without it vite-node drops the script's
+// argv and main never runs; the CLI fails loudly rather than silently no-op.)
 // then run suites with:
 //   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:55432/mergeship_test_x \
 //   MERGESHIP_SHADOW_TOKEN=<same token> npx vitest run tests/...
 
 import crypto from "node:crypto";
+import net from "node:net";
 import { PrismaClient } from "@prisma/client";
 import {
   DISPOSABLE_DB_NAME_PATTERN,
@@ -64,19 +67,32 @@ export type DbConnector = (url: string) => PrismaClient;
 const realConnector: DbConnector = (url) =>
   new PrismaClient({ datasources: { db: { url } } });
 
-// Module-private issue key: it is never exported, so only code inside this
-// module can mint a PreflightedDatabase. A hand-built object literal is not
-// an instance, and an instance forged via Object.create() lacks the hidden
-// symbol property — both are rejected by assertPreflighted below.
-const PREFLIGHT_ISSUE: unique symbol = Symbol("mergeship.disposable-preflighted");
+/**
+ * The verified connection identity captured by a successful preflight. It is
+ * stored ONLY in the module-private registry below — never on the branded
+ * object — so neither a copied Symbol property nor a mutated field can alter
+ * what withScratchDatabase authorizes.
+ */
+interface VerifiedServerIdentity {
+  readonly url: string;
+  readonly dbName: string;
+  readonly addr: string | null;
+  readonly port: number | null;
+}
+
+// Module-private issuance registry: membership — not object shape — is the
+// credential. A hand-built object literal is not an instance; an instance
+// forged via Object.create(), a stolen Symbol, Reflect.construct or a direct
+// constructor call is simply absent from this map, and mutating a real
+// brand's fields cannot change the stored identity withScratchDatabase uses.
+const PREFLIGHTED = new WeakMap<PreflightedDatabase, VerifiedServerIdentity>();
 
 /**
- * Branded result of a successful disposable-database preflight. The
- * constructor takes the module-private key, so a hand-built instance is
- * impossible and `new PreflightedDatabase(...)` outside this module throws.
- * It carries the verified URL, the verified database name and the server
- * identity observed live during preflight — `withScratchDatabase` checks the
- * maintenance connection against exactly these values.
+ * Branded result of a successful disposable-database preflight. The public
+ * fields are informational only (frozen, and never consulted for
+ * authorization): the authoritative URL, database name and live server
+ * identity are the frozen private registry entry, and `withScratchDatabase`
+ * checks the maintenance connection against exactly those stored values.
  */
 export class PreflightedDatabase {
   readonly url: string;
@@ -85,67 +101,99 @@ export class PreflightedDatabase {
   readonly port: number | null;
   readonly fingerprint: string;
 
-  constructor(
-    issueKey: symbol,
-    url: string,
-    dbName: string,
-    addr: string | null,
-    port: number | null,
-  ) {
-    if (issueKey !== PREFLIGHT_ISSUE) {
-      throw new DisposablePreflightError(
-        "PreflightedDatabase is issued only by preflightDisposableDatabase — " +
-          "a hand-constructed object is not proof that the preflight ran.",
-      );
-    }
+  constructor(url: string, dbName: string, addr: string | null, port: number | null) {
     this.url = url;
     this.dbName = dbName;
     this.addr = addr;
     this.port = port;
     this.fingerprint = `${dbName}@${addr ?? "unix"}:${port ?? "?"}`;
-    Object.defineProperty(this, PREFLIGHT_ISSUE, {
-      value: true,
-      enumerable: false,
-      writable: false,
-    });
+    // A frozen instance can neither be mutated nor carry a forged property.
+    // (Construction alone is NOT authorization — only registry membership is.)
+    Object.freeze(this);
   }
 }
 
-function assertPreflighted(candidate: unknown): asserts candidate is PreflightedDatabase {
-  if (
-    !(candidate instanceof PreflightedDatabase) ||
-    (candidate as unknown as Record<symbol, unknown>)[PREFLIGHT_ISSUE] !== true
-  ) {
+/**
+ * Resolve the verified identity backing `candidate`, or throw. Membership in
+ * the module-private WeakMap is the only credential — it cannot be observed
+ * via Object.getOwnPropertySymbols/Reflect.ownKeys and cannot be granted by
+ * constructing or mutating objects from outside this module.
+ */
+function verifiedIdentity(candidate: unknown): VerifiedServerIdentity {
+  const v = candidate instanceof PreflightedDatabase ? PREFLIGHTED.get(candidate) : undefined;
+  if (!v) {
     throw new DisposablePreflightError(
       "a PreflightedDatabase from preflightDisposableDatabase is required — " +
-        "a bare URL string or hand-built object cannot authorize a scratch database.",
+        "a bare URL string, a hand-built object or a self-constructed instance " +
+        "cannot authorize a scratch database.",
     );
   }
+  return v;
 }
 
-/** Parse and validate the test-database URL. Pure — no connection. */
-export function assertSafeTestDatabaseUrl(url: string): { dbName: string; host: string } {
+/**
+ * Shared loopback-server policy for every disposable-database connection —
+ * the provisioning script and the suites' preflight use the same rules:
+ *
+ *   - scheme must be postgresql:// or postgres://;
+ *   - NO query string and NO fragment: Prisma honours connection-override
+ *     parameters (e.g. `?host=`, socket-directory overrides) that can redirect
+ *     a connection away from the endpoint whose hostname was checked, so the
+ *     whole URL tail is refused rather than parsed. No parameter has a
+ *     documented justification for the disposable workflow;
+ *   - host must be `localhost`, `[::1]` or a strict 127.0.0.0/8 IPv4 literal.
+ *     `net.isIPv4` rejects short forms (127.1), out-of-range octets
+ *     (127.999.0.1) and octal tricks that looser regexes accept; DNS names
+ *     merely beginning with `127.` (127.0.0.1.attacker.example) are refused.
+ *
+ * Pure — opens no connection. The returned URL object shares the caller's
+ * parse, so consumers never re-parse differently.
+ */
+export function assertLoopbackServerUrl(url: string): URL {
   let u: URL;
   try {
     u = new URL(url);
   } catch {
-    throw new DisposablePreflightError(`MERGESHIP_TEST_DATABASE_URL is not a valid URL.`);
+    throw new DisposablePreflightError(`database URL is not a valid URL.`);
   }
   if (u.protocol !== "postgresql:" && u.protocol !== "postgres:") {
-    throw new DisposablePreflightError(`test database URL scheme '${u.protocol}' is not postgresql://.`);
+    throw new DisposablePreflightError(`database URL scheme '${u.protocol}' is not postgresql://.`);
+  }
+  if (u.search || u.hash) {
+    throw new DisposablePreflightError(
+      "database URL carries a query string or fragment — connection-override " +
+        "parameters (e.g. ?host=) could redirect the connection past the host " +
+        "check and are never allowed for disposable databases.",
+    );
   }
   const host = u.hostname.toLowerCase();
   const loopback =
     host === "localhost" ||
     host === "::1" ||
     host === "[::1]" ||
-    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+    (net.isIPv4(host) && host.startsWith("127."));
   if (!loopback) {
     throw new DisposablePreflightError(
-      `test database host '${host}' is not loopback — external endpoints, Railway proxies and remote servers are never disposable.`,
+      `database host '${host}' is not loopback — external endpoints, Railway ` +
+        "proxies, remote servers, DNS names starting with '127.' and malformed " +
+        "IPv4 octets are never disposable.",
     );
   }
-  const dbName = decodeURIComponent(u.pathname.replace(/^\//, "").split("?")[0] ?? "");
+  return u;
+}
+
+/** Parse and validate the test-database URL. Pure — no connection. */
+export function assertSafeTestDatabaseUrl(url: string): { dbName: string; host: string } {
+  const u = assertLoopbackServerUrl(url);
+  const host = u.hostname.toLowerCase();
+  let dbName: string;
+  try {
+    dbName = decodeURIComponent(u.pathname.replace(/^\//, ""));
+  } catch {
+    throw new DisposablePreflightError(
+      `database name in test URL is not valid percent-encoding — refusing.`,
+    );
+  }
   if (!DISPOSABLE_DB_NAME_PATTERN.test(dbName)) {
     throw new DisposablePreflightError(
       `database name '${dbName}' is not a MergeShip test database (expected ${DISPOSABLE_DB_NAME_PATTERN}).`,
@@ -230,16 +278,52 @@ export async function preflightDisposableDatabase(
   const db = connect(url);
   try {
     const { identity } = await verifyDisposableConnection(db, dbName);
-    return new PreflightedDatabase(
-      PREFLIGHT_ISSUE,
-      url,
-      dbName,
-      identity.addr,
-      identity.port,
+    const brand = new PreflightedDatabase(url, dbName, identity.addr, identity.port);
+    // Registry membership is the credential. Store the verified values
+    // frozen — even if a caller mutates the public fields (impossible after
+    // Object.freeze, but defense in depth), authorization uses this entry.
+    PREFLIGHTED.set(
+      brand,
+      Object.freeze({ url, dbName, addr: identity.addr, port: identity.port }),
     );
+    return brand;
   } finally {
     await db.$disconnect();
   }
+}
+
+/** Server identity plus the oid of `datname` on the connected server. */
+export interface DatabaseOidIdentity extends DatabaseIdentity {
+  /** oid of `datname` in pg_database — stable across connections to one server. */
+  oid: bigint;
+}
+
+/**
+ * Who am I connected to, and does `datname` exist there? Used to pin a
+ * freshly created database across connections: the oid distinguishes a real
+ * database from a same-named stand-in on a different cluster, and is checked
+ * together with the server address and port before any migration runs.
+ */
+export async function serverAndDatabaseIdentity(
+  db: PrismaClient,
+  datname: string,
+): Promise<DatabaseOidIdentity> {
+  const [row] = await db.$queryRaw<
+    { db: string; addr: string | null; port: number | null; oid: bigint | null }[]
+  >`
+    SELECT current_database() AS db,
+           host(inet_server_addr()) AS addr,
+           inet_server_port() AS port,
+           (SELECT oid::bigint FROM pg_database WHERE datname = ${datname}) AS oid`;
+  if (!row?.db) {
+    throw new DisposablePreflightError("could not resolve server identity — refusing.");
+  }
+  if (row.oid === null || row.oid === undefined) {
+    throw new DisposablePreflightError(
+      `database '${datname}' does not exist on the connected server — refusing.`,
+    );
+  }
+  return { db: row.db, addr: row.addr, port: row.port, oid: row.oid };
 }
 
 /** The database on the disposable server used for DDL. Not a test target. */
@@ -266,12 +350,16 @@ export async function withScratchDatabase<T>(
   connect: DbConnector = realConnector,
 ): Promise<T> {
   assertNoProductionEnvironment(process.env);
-  assertPreflighted(brand);
-  // The carried URL was validated at preflight; re-validate so a mutated
-  // brand object can never smuggle in a different endpoint.
-  assertSafeTestDatabaseUrl(brand.url);
+  // Authorization uses ONLY the privately stored identity — mutated public
+  // fields on the brand cannot change the URL, database, address or port
+  // that get authorized.
+  const verified = verifiedIdentity(brand);
+  // The carried URL was validated at preflight; re-validate so nothing can
+  // smuggle in a different endpoint.
+  assertSafeTestDatabaseUrl(verified.url);
 
-  const maintenanceUrl = urlWithDatabase(brand.url, MAINTENANCE_DATABASE);
+  const maintenanceUrl = urlWithDatabase(verified.url, MAINTENANCE_DATABASE);
+  assertLoopbackServerUrl(maintenanceUrl);
   const maintenance = connect(maintenanceUrl);
   try {
     // Live re-verification: the maintenance connection must really be the
@@ -283,10 +371,10 @@ export async function withScratchDatabase<T>(
         `maintenance connection reached database '${ident.db}' on '${ident.addr}' — expected '${MAINTENANCE_DATABASE}' on a local or private server.`,
       );
     }
-    if (ident.addr !== brand.addr || ident.port !== brand.port) {
+    if (ident.addr !== verified.addr || ident.port !== verified.port) {
       throw new DisposablePreflightError(
         `maintenance connection identity '${ident.addr ?? "unix"}:${ident.port ?? "?"}' does not match ` +
-          `the preflighted server '${brand.addr ?? "unix"}:${brand.port ?? "?"}' — refusing to create a ` +
+          `the preflighted server '${verified.addr ?? "unix"}:${verified.port ?? "?"}' — refusing to create a ` +
           "database on an unverified server.",
       );
     }
@@ -295,15 +383,15 @@ export async function withScratchDatabase<T>(
     // outlive — or fake — the operator's stamp on the base database.
     const [row] = await maintenance.$queryRaw<{ marker: string | null }[]>`
       SELECT shobj_description(
-        (SELECT oid FROM pg_database WHERE datname = ${brand.dbName}),
+        (SELECT oid FROM pg_database WHERE datname = ${verified.dbName}),
         'pg_database') AS marker`;
-    assertDisposableMarker(row?.marker, brand.dbName);
+    assertDisposableMarker(row?.marker, verified.dbName);
 
     const name = `mergeship_test_scratch_${crypto.randomBytes(5).toString("hex")}`;
     // Re-validate the constructed target URL BEFORE connecting to it or
     // executing statements (URL.pathname construction, never string
     // replacement).
-    const scratchUrl = urlWithDatabase(brand.url, name);
+    const scratchUrl = urlWithDatabase(verified.url, name);
     assertSafeTestDatabaseUrl(scratchUrl);
     await maintenance.$executeRawUnsafe(`CREATE DATABASE "${name}"`);
     try {

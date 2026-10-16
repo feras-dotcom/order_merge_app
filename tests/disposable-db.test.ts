@@ -5,17 +5,20 @@
 // refusal paths never manufacture the marker, and that credentials never
 // reach logs or errors.
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import {
   assertNoProductionEnvironment,
+  BootstrapNotAllowedError,
   bootstrapDisposableDatabase,
   DISPOSABLE_DB_NAME_PATTERN,
   isLocalOrPrivateAddress,
 } from "../app/lib/shadow-db-bootstrap.server";
 import {
+  assertLoopbackServerUrl,
   assertSafeTestDatabaseUrl,
   DisposablePreflightError,
   PreflightedDatabase,
@@ -26,10 +29,11 @@ import {
 } from "./helpers/disposable-db";
 import {
   checkedDatabaseUrl,
+  migrateDeploySanitized,
   provisionDisposableTestDatabase,
   redactUrlPassword,
   scrubCredentials,
-} from "../scripts/test-db-provision";
+} from "../scripts/test-db-provision.impl";
 
 const APP_TABLES = [
   "Session", "Settings", "AppControl", "ProcessedWebhook", "MergeClaim",
@@ -41,8 +45,12 @@ interface FakeCfg {
   db?: string;
   addr?: string | null;
   port?: number | null;
+  /** oid reported for the queried database; `null` simulates "not found". */
+  oid?: bigint | null;
   marker?: string | null;
   exists?: boolean;
+  /** When set, $executeRawUnsafe throws this after recording the write. */
+  failWrite?: RegExp;
   schema?: string | null;
   appObjects?: { relname: string; nspname: string }[];
   userTables?: { nspname: string; relname: string }[];
@@ -60,6 +68,17 @@ function fakeDb(cfg: FakeCfg, seq?: string[]) {
       const sql: string =
         typeof a === "string" ? a : Array.isArray(a) ? a.join("?") : (a.sql ?? "");
       reads.push(sql);
+      if (/oid::bigint FROM pg_database/.test(sql)) {
+        tag("q:oidident");
+        return [
+          {
+            db: cfg.db ?? "mergeship_test_x",
+            addr: cfg.addr ?? "127.0.0.1",
+            port: cfg.port ?? 5432,
+            oid: cfg.oid === undefined ? BigInt(4242) : cfg.oid,
+          },
+        ];
+      }
       if (/current_database\(\) AS db/.test(sql)) {
         tag("q:identity");
         return [{ db: cfg.db ?? "mergeship_test_x", addr: cfg.addr ?? "127.0.0.1", port: cfg.port ?? 5432 }];
@@ -114,6 +133,9 @@ function fakeDb(cfg: FakeCfg, seq?: string[]) {
     $executeRawUnsafe: async (sql: string) => {
       writes.push(sql);
       tag(`x:${sql.split(" ").slice(0, 2).join(" ")}`);
+      if (cfg.failWrite && cfg.failWrite.test(sql)) {
+        throw new Error(`write failed: ${sql.split(" ").slice(0, 3).join(" ")}`);
+      }
       return 0;
     },
     $disconnect: async () => {},
@@ -176,6 +198,53 @@ describe("assertSafeTestDatabaseUrl", () => {
       expect(() => assertSafeTestDatabaseUrl(`postgresql://u@${host}/mergeship_test_x`)).toThrow(
         DisposablePreflightError,
       );
+    }
+  });
+
+  it("strict IPv4: out-of-range octets, short forms and 127.* DNS names are refused", () => {
+    // Invalid IPv4 must not fall through to DNS resolution.
+    for (const host of [
+      "127.999.0.1",
+      "127.256.0.1",
+      "127.0.0.256",
+      "127.1", // short form — not a dotted quad
+      "127.0.0.1.attacker.example", // DNS name that merely begins with 127.
+      "128.0.0.1",
+      "localhost.evil.com",
+      "localhost.", // trailing dot resolves anywhere
+      "localhost%2eevil.com", // encoded dot in an opaque host
+      "[::ffff:7f00:1]", // IPv4-mapped IPv6 is not [::1]
+      "[::2]",
+    ]) {
+      expect(() => assertSafeTestDatabaseUrl(`postgresql://u@${host}/mergeship_test_x`)).toThrow(
+        DisposablePreflightError,
+      );
+    }
+    for (const host of ["127.0.0.1", "127.0.0.0", "127.255.255.255", "[::1]", "[0:0:0:0:0:0:0:1]", "LOCALHOST"]) {
+      expect(assertSafeTestDatabaseUrl(`postgresql://u@${host}/mergeship_test_x`).dbName).toBe(
+        "mergeship_test_x",
+      );
+    }
+  });
+
+  it("refuses query strings and fragments — connection overrides can redirect the endpoint", () => {
+    for (const tail of [
+      "?host=prod.example.com",
+      "?host=/var/run/postgresql/",
+      "?host=10.0.0.5&port=6543",
+      "?schema=public",
+      "?connect_timeout=5",
+      "?sslmode=disable",
+      "#frag",
+      "?host=prod.example.com#frag",
+    ]) {
+      expect(() =>
+        assertSafeTestDatabaseUrl(`postgresql://u@localhost:5432/mergeship_test_x${tail}`),
+      ).toThrow(DisposablePreflightError);
+      // the same policy applies to any URL, including a maintenance URL
+      expect(() =>
+        assertLoopbackServerUrl(`postgresql://u@localhost:5432/postgres${tail}`),
+      ).toThrow(DisposablePreflightError);
     }
   });
 
@@ -303,7 +372,7 @@ describe("preflightDisposableDatabase (branded result)", () => {
     expect(writes).toHaveLength(0);
   });
 
-  it("a hand-built brand object and a bare URL are not proof of preflight", async () => {
+  it("a hand-built, self-constructed or forged brand and a bare URL are not proof of preflight", async () => {
     const connects: string[] = [];
     const connect = (u: string) => {
       connects.push(u);
@@ -313,6 +382,9 @@ describe("preflightDisposableDatabase (branded result)", () => {
       "postgresql://postgres@localhost/mergeship_test_x", // bare URL
       { url: URL_OK, dbName: "mergeship_test_x" }, // plain object
       Object.create(PreflightedDatabase.prototype), // forged instance shape
+      // a real instance, constructed outside the module: correct class, no
+      // registry entry — membership, not shape, is the credential
+      new PreflightedDatabase(URL_OK, "mergeship_test_x", "127.0.0.1", 5432),
     ]) {
       await expect(
         withScratchDatabase(fake as any, async () => "never", connect),
@@ -321,10 +393,30 @@ describe("preflightDisposableDatabase (branded result)", () => {
     expect(connects).toHaveLength(0); // refused before opening a connection
   });
 
-  it("the brand constructor cannot be invoked outside the module", () => {
-    expect(
-      () => new PreflightedDatabase(Symbol("forged"), URL_OK, "mergeship_test_x", "127.0.0.1", 5432),
-    ).toThrow(DisposablePreflightError);
+  it("the brand exposes no forgery credential and cannot be mutated", async () => {
+    process.env.MERGESHIP_SHADOW_TOKEN = "operator-token-xyz";
+    const brand = await issue({ marker: "mergeship-shadow-disposable:operator-token-xyz" });
+    // No hidden symbol property exists to steal — nothing enumerates.
+    expect(Object.getOwnPropertySymbols(brand)).toEqual([]);
+    expect(Object.isFrozen(brand)).toBe(true);
+    // Mutation attempts cannot take: the object is frozen AND authorization
+    // reads only the private registry entry.
+    expect(Reflect.set(brand, "url", "postgresql://u@localhost:6001/mergeship_test_z")).toBe(false);
+    expect(Reflect.set(brand, "dbName", "mergeship_test_z")).toBe(false);
+    expect(Reflect.set(brand, "port", 6001)).toBe(false);
+    expect(Reflect.defineProperty(brand, "evil", { value: true })).toBe(false);
+    expect(brand.url).toBe(URL_OK);
+    // The legitimate brand still authorizes — against the ORIGINAL endpoint.
+    const seq: string[] = [];
+    const connects: string[] = [];
+    const maintenance = fakeDb({ db: "postgres", marker: "mergeship-shadow-disposable:operator-token-xyz" }, seq);
+    const out = await withScratchDatabase(brand, async (_u, name) => name, (u) => {
+      connects.push(u);
+      return maintenance.db;
+    });
+    expect(out).toMatch(/^mergeship_test_scratch_[0-9a-f]{10}$/);
+    expect(connects).toEqual(["postgresql://postgres:pw@localhost:55432/postgres"]);
+    expect(maintenance.writes[0]).toMatch(/^CREATE DATABASE/);
   });
 });
 
@@ -415,6 +507,22 @@ describe("withScratchDatabase (LOW-4)", () => {
     }
   });
 
+  it("a failed CREATE never issues DROP — an existing database is never destroyed", async () => {
+    process.env.MERGESHIP_SHADOW_TOKEN = "operator-token-xyz";
+    const brand = await issueBrand();
+    const maintenance = fakeDb({
+      db: "postgres",
+      marker: MARKER_OK,
+      failWrite: /^CREATE DATABASE/,
+    });
+    await expect(
+      withScratchDatabase(brand, async () => "never", () => maintenance.db),
+    ).rejects.toThrow(/write failed/);
+    // The only write attempted is the failed CREATE — no DROP may follow.
+    expect(maintenance.writes).toHaveLength(1);
+    expect(maintenance.writes[0]).toMatch(/^CREATE DATABASE/);
+  });
+
   it("still drops the scratch database when the callback throws", async () => {
     process.env.MERGESHIP_SHADOW_TOKEN = "operator-token-xyz";
     const brand = await issueBrand();
@@ -449,17 +557,30 @@ describe("withScratchDatabase (LOW-4)", () => {
 });
 
 describe("urlWithDatabase / checkedDatabaseUrl (LOW-3)", () => {
-  it("retargets a URL by pathname, preserving userinfo, port and query", () => {
+  it("retargets a URL by pathname, preserving userinfo and port", () => {
     const built = urlWithDatabase(
-      "postgresql://postgres:pw@localhost:55432/postgres?connect_timeout=5",
+      "postgresql://postgres:pw@localhost:55432/postgres",
       "mergeship_test_x",
     );
-    expect(built).toBe(
-      "postgresql://postgres:pw@localhost:55432/mergeship_test_x?connect_timeout=5",
-    );
+    expect(built).toBe("postgresql://postgres:pw@localhost:55432/mergeship_test_x");
     const u = new URL(built);
     expect(u.password).toBe("pw");
     expect(u.port).toBe("55432");
+  });
+
+  it("a query-bearing base produces a URL that fails revalidation", () => {
+    // urlWithDatabase faithfully preserves the tail — which is exactly why
+    // every constructed URL must be revalidated before use: query strings
+    // (connection overrides) are never allowed.
+    const built = urlWithDatabase(
+      "postgresql://postgres:pw@localhost:55432/postgres?host=evil.example",
+      "mergeship_test_x",
+    );
+    expect(() => assertSafeTestDatabaseUrl(built)).toThrow(DisposablePreflightError);
+    expect(() => checkedDatabaseUrl(
+      "postgresql://postgres:pw@localhost:55432/postgres?host=evil.example",
+      "mergeship_test_x",
+    )).toThrow(/revalidation/);
   });
 
   it("every constructed target URL is revalidated by assertSafeTestDatabaseUrl", () => {
@@ -496,16 +617,36 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
     confirmDb: FP,
   };
 
-  function harness(cfg: FakeCfg = {}) {
+  function harness(cfg: FakeCfg = {}, targetCfg: FakeCfg = {}) {
     const seq: string[] = [];
     const logs: string[] = [];
     const maintenance = fakeDb({ db: "postgres", ...cfg }, seq);
-    const calls: { migrate?: string; mark?: string; connects: string[] } = { connects: [] };
+    // The migration-target connection: same server identity and oid as the
+    // maintenance connection reports for the freshly created database.
+    const target = fakeDb(
+      {
+        db: "mergeship_test_x",
+        addr: cfg.addr ?? "127.0.0.1",
+        port: cfg.port ?? 5432,
+        oid: cfg.oid === undefined ? BigInt(4242) : cfg.oid,
+        ...targetCfg,
+      },
+      seq,
+    );
+    const calls: { migrate?: string; mark?: string; connects: string[]; targetConnects: string[] } = {
+      connects: [],
+      targetConnects: [],
+    };
     const deps = {
       connectMaintenance: (u: string) => {
         calls.connects.push(u);
         seq.push("connect");
         return maintenance.db;
+      },
+      connectTarget: (u: string) => {
+        calls.targetConnects.push(u);
+        seq.push("connect-target");
+        return target.db;
       },
       runMigrations: (dbUrl: string) => {
         calls.migrate = dbUrl;
@@ -518,7 +659,7 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
       },
       log: (line: string) => logs.push(line),
     };
-    return { seq, logs, calls, maintenance, deps };
+    return { seq, logs, calls, maintenance, target, deps };
   }
 
   it("refuses an EXISTING database before CREATE, migrate deploy or the marker write", async () => {
@@ -534,7 +675,7 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
     expect(calls.mark).toBeUndefined();
   });
 
-  it("creates → migrates → marks, in that order, on a fresh database", async () => {
+  it("creates → proves target identity → migrates → marks, in that order", async () => {
     const { seq, calls, maintenance, deps } = harness({ exists: false });
     const res = await provisionDisposableTestDatabase({ ...ARGS }, deps);
     expect(res).toEqual({ created: true, fingerprint: FP });
@@ -543,11 +684,15 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
       "q:identity",
       "q:exists",
       'x:CREATE DATABASE',
+      "q:oidident",
+      "connect-target",
+      "q:oidident",
       "migrate",
       "mark",
     ]);
     expect(maintenance.writes).toEqual(['CREATE DATABASE "mergeship_test_x"']);
     const expectedUrl = "postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x";
+    expect(calls.targetConnects).toEqual([expectedUrl]);
     expect(calls.migrate).toBe(expectedUrl);
     expect(calls.mark).toBe(expectedUrl);
   });
@@ -611,6 +756,68 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
     expect(calls.migrate).toBeUndefined();
   });
 
+  it("refuses loopback-lookalike hosts and query overrides BEFORE any connection — zero writes (M-1/M-2)", async () => {
+    for (const serverUrl of [
+      "postgresql://u@127.0.0.1.attacker.example:5432/postgres", // 127.* DNS name
+      "postgresql://u@127.999.0.1:5432/postgres", // invalid octets → DNS
+      "postgresql://u@127.1:5432/postgres", // short-form loopback
+      "postgresql://u@localhost:5432/postgres?host=prod.example.com", // connection override
+      "postgresql://u@localhost:5432/postgres?connect_timeout=5", // even benign params
+      "postgresql://u@localhost:5432/postgres#frag",
+    ]) {
+      const { calls, maintenance, deps } = harness();
+      await expect(
+        provisionDisposableTestDatabase({ ...ARGS, serverUrl }, deps),
+      ).rejects.toThrow(BootstrapNotAllowedError);
+      // Refused before opening ANY connection — no CREATE can have happened.
+      expect(calls.connects).toHaveLength(0);
+      expect(calls.targetConnects).toHaveLength(0);
+      expect(maintenance.writes).toHaveLength(0);
+      expect(calls.migrate).toBeUndefined();
+      expect(calls.mark).toBeUndefined();
+    }
+  });
+
+  it("fails closed when the migration target is not the database just created (L-4)", async () => {
+    // oid differs → a different cluster answered the second connection
+    for (const targetCfg of [
+      { oid: BigInt(9999) },
+      { addr: "10.0.0.9" },
+      { port: 5433 },
+      { db: "postgres" }, // connected to the wrong database
+      { db: "mergeship_test_x", oid: null }, // database absent on this server
+      { addr: "35.10.20.30" }, // public address
+    ]) {
+      const { calls, maintenance, deps } = harness({ exists: false }, targetCfg);
+      await expect(provisionDisposableTestDatabase({ ...ARGS }, deps)).rejects.toThrow(
+        BootstrapNotAllowedError,
+      );
+      // CREATE ran; migration and marker must never follow a failed proof.
+      expect(maintenance.writes).toEqual(['CREATE DATABASE "mergeship_test_x"']);
+      expect(calls.migrate).toBeUndefined();
+      expect(calls.mark).toBeUndefined();
+    }
+  });
+
+  it("a CREATE DATABASE failure (concurrent creation race) aborts before migrate and mark", async () => {
+    const { calls, deps } = harness({ exists: false, failWrite: /^CREATE DATABASE/ });
+    await expect(provisionDisposableTestDatabase({ ...ARGS }, deps)).rejects.toThrow(
+      /write failed/,
+    );
+    expect(calls.migrate).toBeUndefined();
+    expect(calls.mark).toBeUndefined();
+  });
+
+  it("a migrate deploy failure never writes the disposable marker", async () => {
+    const { calls, deps } = harness({ exists: false });
+    deps.runMigrations = () => {
+      calls.migrate = "x";
+      throw new Error("P1001 connection refused");
+    };
+    await expect(provisionDisposableTestDatabase({ ...ARGS }, deps)).rejects.toThrow(/P1001/);
+    expect(calls.mark).toBeUndefined();
+  });
+
   it("never prints or errors the URL password (LOW-2)", async () => {
     const { logs, deps } = harness({ exists: false });
     await provisionDisposableTestDatabase({ ...ARGS }, deps);
@@ -640,6 +847,78 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
     );
     const encoded = "postgresql://u:p%40ssw%3Ard@localhost/db";
     expect(scrubCredentials("boom p@ssw:rd here", [encoded])).toBe("boom <redacted> here");
+  });
+
+  it("a malformed percent sequence in the password cannot defeat scrubbing", () => {
+    // decodeURIComponent("ab%zzcd") throws — the raw form must still be
+    // scrubbed, and so must the URL it is embedded in.
+    const url = "postgresql://postgres:ab%zzcd@localhost:5432/postgres";
+    expect(scrubCredentials("fail ab%zzcd here", [url])).toBe("fail <redacted> here");
+    expect(scrubCredentials(`conn ${url} refused`, [url])).toBe(
+      "conn postgresql://postgres:<redacted>@localhost:5432/postgres refused",
+    );
+  });
+
+  it("migrateDeploySanitized never lets the subprocess emit credentials", () => {
+    const url = "postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x";
+    const lines: string[] = [];
+    let seenEnv: NodeJS.ProcessEnv | undefined;
+    migrateDeploySanitized(
+      url,
+      (env) => {
+        seenEnv = env;
+        return {
+          stdout: `Applying migrations to postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x`,
+          stderr: "warn: s3cret-pw leaked to stderr",
+        };
+      },
+      (l) => lines.push(l),
+    );
+    // the URL reaches the child only through the environment
+    expect(seenEnv?.DATABASE_URL).toBe(url);
+    const out = lines.join("\n");
+    expect(out).not.toContain("s3cret-pw");
+    expect(out).toContain("<redacted>");
+  });
+
+  it("a failed migrate deploy is rethrown with stdout, stderr and the message scrubbed", () => {
+    const url = "postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x";
+    const lines: string[] = [];
+    const boom = Object.assign(
+      new Error(`Command failed: postgresql://postgres:s3cret-pw@localhost:55432/db`),
+      { stdout: "out s3cret-pw", stderr: "err postgresql://postgres:s3cret-pw@localhost/db" },
+    );
+    let thrown: unknown;
+    try {
+      migrateDeploySanitized(
+        url,
+        () => {
+          throw boom;
+        },
+        (l) => lines.push(l),
+      );
+    } catch (e) {
+      thrown = e;
+    }
+    expect((thrown as Error).message).toContain("migrate deploy failed");
+    expect((thrown as Error).message).not.toContain("s3cret-pw");
+    expect((thrown as Error).message).toContain("<redacted>");
+    // a failed subprocess logs nothing on the success path
+    expect(lines).toHaveLength(0);
+  });
+
+  it("scrubs debug-style messages carrying encoded or malformed passwords", () => {
+    const url = "postgresql://postgres:ab%zzcd@localhost/db";
+    const boom = new Error(`DEBUG prisma:engines url=postgresql://postgres:ab%zzcd@localhost/db`);
+    let thrown: unknown;
+    try {
+      migrateDeploySanitized(url, () => {
+        throw boom;
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect((thrown as Error).message).not.toContain("ab%zzcd");
   });
 });
 
@@ -803,5 +1082,84 @@ describe("bootstrapDisposableDatabase", () => {
     });
     await expect(bootstrapDisposableDatabase(db, opts())).rejects.toThrow(/cannot verify emptiness/);
     expect(writes).toHaveLength(0);
+  });
+});
+
+describe("CLI entry point (M-3)", () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const viteNodeCli = path.join(root, "node_modules", "vite-node", "vite-node.mjs");
+  const T = 120_000;
+
+  const cleanEnv = (extra: Record<string, string> = {}) => {
+    const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+    for (const k of Object.keys(env)) {
+      if (k.startsWith("RAILWAY_") || k === "NODE_ENV") delete env[k];
+    }
+    delete env.DATABASE_URL;
+    delete env.MERGESHIP_TEST_DATABASE_URL;
+    return env;
+  };
+  const run = (args: string[], extra: Record<string, string> = {}) =>
+    spawnSync(process.execPath, [viteNodeCli, ...args], {
+      cwd: root,
+      env: cleanEnv(extra),
+      encoding: "utf8",
+      timeout: T - 10_000,
+    });
+
+  it("the documented invocation enters main: missing args exit nonzero with usage", () => {
+    const r = run(["--script", "scripts/test-db-provision.ts"]);
+    expect(r.status).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toContain("usage:");
+  }, T);
+
+  it("enters main and refuses an unsafe server — failure is never silent success", () => {
+    const r = run(
+      [
+        "--script",
+        "scripts/test-db-provision.ts",
+        "--server",
+        "mysql://localhost/postgres",
+        "--name",
+        "mergeship_test_x",
+      ],
+      { MERGESHIP_SHADOW_TOKEN: "operator-token-xyz" },
+    );
+    expect(r.status).toBe(2);
+    expect(`${r.stdout}${r.stderr}`).toContain("refusing:");
+  }, T);
+
+  it("fully validated args reach the connection stage (refused port fails nonzero)", () => {
+    const r = run(
+      [
+        "--script",
+        "scripts/test-db-provision.ts",
+        "--server",
+        "postgresql://u@127.0.0.1:1/postgres",
+        "--name",
+        "mergeship_test_x",
+      ],
+      { MERGESHIP_SHADOW_TOKEN: "operator-token-xyz" },
+    );
+    expect(r.status).not.toBe(0);
+    const out = `${r.stdout}${r.stderr}`;
+    expect(out).not.toContain("usage:");
+    expect(out.length).toBeGreaterThan(0);
+  }, T);
+
+  it("without --script the script still fails loudly instead of silently no-op", () => {
+    // vite-node drops the script argv without --script — main() must still
+    // run and fail with usage (exit 2), never exit 0.
+    const r = run(["scripts/test-db-provision.ts"]);
+    expect(r.status).toBe(2);
+    expect(`${r.stdout}${r.stderr}`).toContain("usage:");
+  }, T);
+
+  it("the implementation module is importable and contains no CLI entry", () => {
+    const impl = fs.readFileSync(path.join(root, "scripts/test-db-provision.impl.ts"), "utf8");
+    expect(impl).not.toContain("process.argv");
+    expect(impl).toContain("export async function provisionDisposableTestDatabase");
+    // And it already proved itself: this very test file imported it at the
+    // top of the module graph without any provisioning side effects.
   });
 });
