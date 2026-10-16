@@ -39,6 +39,7 @@ import { bootstrapDisposableDatabase } from "../app/lib/shadow-db-bootstrap.serv
 import {
   preflightDisposableDatabase,
   withScratchDatabase,
+  type PreflightedDatabase,
 } from "./helpers/disposable-db";
 
 const TEST_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
@@ -60,11 +61,13 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   let db2: PrismaClient;
   let ops: OperationStore;
   let savedShadowDb: string | undefined;
+  let preflighted: PreflightedDatabase;
 
   beforeAll(async () => {
     // FIRST — before migrations, comments or any write. Throws unless the
-    // target is an independently marked disposable database.
-    await preflightDisposableDatabase(TEST_URL!);
+    // target is an independently marked disposable database. The returned
+    // brand is the only credential that may authorize scratch databases.
+    preflighted = await preflightDisposableDatabase(TEST_URL!);
     execSync("npx prisma migrate deploy", {
       env: { ...process.env, DATABASE_URL: TEST_URL! },
       stdio: "pipe",
@@ -177,7 +180,7 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
     // A scratch database (empty by construction, dropped afterwards) — the
     // suite never un-marks or re-marks the real test database.
     const cutoff = await setupGate();
-    await withScratchDatabase(TEST_URL!, async (scratchUrl, scratchName) => {
+    await withScratchDatabase(preflighted, async (scratchUrl, scratchName) => {
       const saved = process.env.MERGESHIP_SHADOW_DATABASE;
       process.env.MERGESHIP_SHADOW_DATABASE = scratchName;
       try {
@@ -828,7 +831,7 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   it("bootstrap marks a verified empty database", async () => {
     // A fresh scratch database is empty by construction — the test never
     // truncates a shared database to satisfy the bootstrap's emptiness check.
-    await withScratchDatabase(TEST_URL!, async (scratchUrl) => {
+    await withScratchDatabase(preflighted, async (scratchUrl) => {
       execSync("npx prisma migrate deploy", {
         env: { ...process.env, DATABASE_URL: scratchUrl },
         stdio: "pipe",
@@ -896,7 +899,7 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   });
 
   it("bootstrap refuses a database containing application rows", async () => {
-    await withScratchDatabase(TEST_URL!, async (scratchUrl) => {
+    await withScratchDatabase(preflighted, async (scratchUrl) => {
       execSync("npx prisma migrate deploy", {
         env: { ...process.env, DATABASE_URL: scratchUrl },
         stdio: "pipe",
@@ -920,7 +923,7 @@ describe.skipIf(!TEST_URL)("shipping shadow store (real disposable database)", (
   it("bootstrap refuses when application tables are missing entirely", async () => {
     // An unmigrated scratch database has no schema — a missing table must
     // never read as "empty".
-    await withScratchDatabase(TEST_URL!, async (scratchUrl) => {
+    await withScratchDatabase(preflighted, async (scratchUrl) => {
       const sdb = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
       try {
         await expect(
