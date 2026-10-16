@@ -7,10 +7,14 @@
 //
 //   1. Environment: refuses when NODE_ENV=production or ANY RAILWAY_*
 //      variable is set. Suites never delete these to pass.
-//   2. URL shape: postgres(s):// on a loopback host only — `localhost`,
-//      127/8 or [::1]. Any other host (including *.rlwy.net, railway.internal
-//      or a remote IP) is refused. A production tunnel still LOOKS like
-//      localhost, which is why the next layers exist.
+//   2. URL shape: postgres(s):// on a loopback IP LITERAL only — 127/8 or
+//      [::1]. DNS names, including `localhost`, are refused: a hostname can
+//      resolve to a different address (or a different loopback family) on
+//      each independent connection, and the migration subprocess resolves
+//      it again by itself. Any other host (including *.rlwy.net,
+//      railway.internal or a remote IP) is refused. A production tunnel
+//      still LOOKS like a local endpoint, which is why the next layers
+//      exist.
 //   3. Database name must match DISPOSABLE_DB_NAME_PATTERN — a Railway
 //      production database is named `railway` and can never qualify.
 //   4. Live identity: current_database() must equal the URL's database name
@@ -34,15 +38,17 @@
 // construction, so bootstrap and marker-absence tests never need to un-mark
 // or truncate a real target.
 //
-// Provisioning a fresh disposable database:
-//   docker run -d -p 55432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+// Provisioning a fresh disposable database (never reuse a container that
+// has held anything else; bind the port to loopback ONLY and pick a random
+// unused host port and a random password):
+//   docker run -d -p 127.0.0.1:<port>:5432 -e POSTGRES_PASSWORD=<random> postgres:16
 //   MERGESHIP_SHADOW_TOKEN=<random> npx vite-node --script scripts/test-db-provision.ts \
-//     --server postgresql://postgres:postgres@localhost:55432/postgres \
+//     --server postgresql://postgres:<random>@127.0.0.1:<port>/postgres \
 //     --name mergeship_test_x --confirm-db <printed fingerprint>
 // (the --script flag is required — without it vite-node drops the script's
 // argv and main never runs; the CLI fails loudly rather than silently no-op.)
 // then run suites with:
-//   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:55432/mergeship_test_x \
+//   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres:<random>@127.0.0.1:<port>/mergeship_test_x \
 //   MERGESHIP_SHADOW_TOKEN=<same token> npx vitest run tests/...
 
 import crypto from "node:crypto";
@@ -56,6 +62,12 @@ import {
   type DatabaseIdentity,
 } from "../../app/lib/shadow-db-bootstrap.server";
 import { SHADOW_DB_MARKER_PREFIX } from "../../app/lib/shipping-shadow.server";
+// The oid-bearing identity read lives with the bootstrap's other safety
+// checks; re-exported so provisioning code keeps a single import surface.
+export {
+  serverAndDatabaseIdentity,
+  type DatabaseOidIdentity,
+} from "../../app/lib/shadow-db-bootstrap.server";
 
 export class DisposablePreflightError extends Error {
   name = "DisposablePreflightError";
@@ -93,16 +105,18 @@ const PREFLIGHTED = new WeakMap<PreflightedDatabase, VerifiedServerIdentity>();
  * authorization): the authoritative URL, database name and live server
  * identity are the frozen private registry entry, and `withScratchDatabase`
  * checks the maintenance connection against exactly those stored values.
+ *
+ * The brand deliberately carries NO URL: a connection string embeds
+ * credentials, and a brand printed in a log or a test-failure diff must
+ * never disclose one. Only the module-private registry holds the URL.
  */
 export class PreflightedDatabase {
-  readonly url: string;
   readonly dbName: string;
   readonly addr: string | null;
   readonly port: number | null;
   readonly fingerprint: string;
 
-  constructor(url: string, dbName: string, addr: string | null, port: number | null) {
-    this.url = url;
+  constructor(dbName: string, addr: string | null, port: number | null) {
     this.dbName = dbName;
     this.addr = addr;
     this.port = port;
@@ -141,13 +155,21 @@ function verifiedIdentity(candidate: unknown): VerifiedServerIdentity {
  *     a connection away from the endpoint whose hostname was checked, so the
  *     whole URL tail is refused rather than parsed. No parameter has a
  *     documented justification for the disposable workflow;
- *   - host must be `localhost`, `[::1]` or a strict 127.0.0.0/8 IPv4 literal.
- *     `net.isIPv4` rejects short forms (127.1), out-of-range octets
- *     (127.999.0.1) and octal tricks that looser regexes accept; DNS names
- *     merely beginning with `127.` (127.0.0.1.attacker.example) are refused.
+ *   - host must be a loopback IP LITERAL: a strict 127.0.0.0/8 IPv4 literal
+ *     or canonical `[::1]` (every equivalent spelling — `[0::1]`,
+ *     `[0:0:0:0:0:0:0:1]` — normalizes to it). DNS names, INCLUDING
+ *     `localhost`, are refused: a hostname can resolve to a different
+ *     address — or fall back between ::1 and 127.0.0.1 — on each
+ *     independent connection, and `prisma migrate deploy` resolves it
+ *     again in its own subprocess. A literal IP names exactly one
+ *     endpoint. `net.isIPv4` rejects short forms (127.1), out-of-range
+ *     octets (127.999.0.1) and octal tricks that looser regexes accept;
+ *     DNS names merely beginning with `127.` (127.0.0.1.attacker.example)
+ *     are refused.
  *
- * Pure — opens no connection. The returned URL object shares the caller's
- * parse, so consumers never re-parse differently.
+ * Pure — opens no connection. The returned URL object is the caller's
+ * normalized parse; consumers should use `u.toString()` so validation and
+ * connection see the same literal endpoint.
  */
 export function assertLoopbackServerUrl(url: string): URL {
   let u: URL;
@@ -167,23 +189,19 @@ export function assertLoopbackServerUrl(url: string): URL {
     );
   }
   const host = u.hostname.toLowerCase();
-  const loopback =
-    host === "localhost" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    (net.isIPv4(host) && host.startsWith("127."));
+  const loopback = host === "[::1]" || host === "::1" || (net.isIPv4(host) && host.startsWith("127."));
   if (!loopback) {
     throw new DisposablePreflightError(
-      `database host '${host}' is not loopback — external endpoints, Railway ` +
-        "proxies, remote servers, DNS names starting with '127.' and malformed " +
-        "IPv4 octets are never disposable.",
+      `database host '${host}' is not a loopback IP literal — DNS names ` +
+        "(including 'localhost'), Railway proxies, remote servers, DNS names " +
+        "starting with '127.' and malformed IPv4 octets are never disposable.",
     );
   }
   return u;
 }
 
 /** Parse and validate the test-database URL. Pure — no connection. */
-export function assertSafeTestDatabaseUrl(url: string): { dbName: string; host: string } {
+export function assertSafeTestDatabaseUrl(url: string): { dbName: string; host: string; url: string } {
   const u = assertLoopbackServerUrl(url);
   const host = u.hostname.toLowerCase();
   let dbName: string;
@@ -199,7 +217,7 @@ export function assertSafeTestDatabaseUrl(url: string): { dbName: string; host: 
       `database name '${dbName}' is not a MergeShip test database (expected ${DISPOSABLE_DB_NAME_PATTERN}).`,
     );
   }
-  return { dbName, host };
+  return { dbName, host, url: u.toString() };
 }
 
 /**
@@ -274,17 +292,19 @@ export async function preflightDisposableDatabase(
   connect: DbConnector = realConnector,
 ): Promise<PreflightedDatabase> {
   assertNoProductionEnvironment(process.env);
-  const { dbName } = assertSafeTestDatabaseUrl(url);
-  const db = connect(url);
+  // Connect with the NORMALIZED, validated URL — never the raw input — so
+  // every downstream connection sees exactly the endpoint that was checked.
+  const { dbName, url: safeUrl } = assertSafeTestDatabaseUrl(url);
+  const db = connect(safeUrl);
   try {
     const { identity } = await verifyDisposableConnection(db, dbName);
-    const brand = new PreflightedDatabase(url, dbName, identity.addr, identity.port);
+    const brand = new PreflightedDatabase(dbName, identity.addr, identity.port);
     // Registry membership is the credential. Store the verified values
     // frozen — even if a caller mutates the public fields (impossible after
     // Object.freeze, but defense in depth), authorization uses this entry.
     PREFLIGHTED.set(
       brand,
-      Object.freeze({ url, dbName, addr: identity.addr, port: identity.port }),
+      Object.freeze({ url: safeUrl, dbName, addr: identity.addr, port: identity.port }),
     );
     return brand;
   } finally {
@@ -292,39 +312,8 @@ export async function preflightDisposableDatabase(
   }
 }
 
-/** Server identity plus the oid of `datname` on the connected server. */
-export interface DatabaseOidIdentity extends DatabaseIdentity {
-  /** oid of `datname` in pg_database — stable across connections to one server. */
-  oid: bigint;
-}
-
-/**
- * Who am I connected to, and does `datname` exist there? Used to pin a
- * freshly created database across connections: the oid distinguishes a real
- * database from a same-named stand-in on a different cluster, and is checked
- * together with the server address and port before any migration runs.
- */
-export async function serverAndDatabaseIdentity(
-  db: PrismaClient,
-  datname: string,
-): Promise<DatabaseOidIdentity> {
-  const [row] = await db.$queryRaw<
-    { db: string; addr: string | null; port: number | null; oid: bigint | null }[]
-  >`
-    SELECT current_database() AS db,
-           host(inet_server_addr()) AS addr,
-           inet_server_port() AS port,
-           (SELECT oid::bigint FROM pg_database WHERE datname = ${datname}) AS oid`;
-  if (!row?.db) {
-    throw new DisposablePreflightError("could not resolve server identity — refusing.");
-  }
-  if (row.oid === null || row.oid === undefined) {
-    throw new DisposablePreflightError(
-      `database '${datname}' does not exist on the connected server — refusing.`,
-    );
-  }
-  return { db: row.db, addr: row.addr, port: row.port, oid: row.oid };
-}
+// serverAndDatabaseIdentity / DatabaseOidIdentity live in
+// app/lib/shadow-db-bootstrap.server.ts and are re-exported above.
 
 /** The database on the disposable server used for DDL. Not a test target. */
 const MAINTENANCE_DATABASE = "postgres";

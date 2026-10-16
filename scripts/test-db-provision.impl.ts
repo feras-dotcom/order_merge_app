@@ -11,18 +11,32 @@
 //     using the SAME strict policy as the suite preflight (no query strings —
 //     ?host= style connection overrides can redirect a connection past the
 //     hostname check);
+//   - the host must be an IP LITERAL (127/8 or [::1]): `localhost` and every
+//     other DNS name are refused. A hostname can resolve to a different
+//     address — or fall back between ::1 and 127.0.0.1 — on each independent
+//     connection, including the migration subprocess's own; a literal IP
+//     removes that name-resolution ambiguity;
 //   - the database name must match the test pattern;
 //   - the exact migration target URL is validated BEFORE any connection is
-//     opened or any write is issued;
+//     opened or any write is issued, and every connection, the migration
+//     subprocess and the marker write use the NORMALIZED validated URL;
 //   - an EXISTING database is REFUSED before CREATE, migrate deploy or any
 //     other write — provisioning only ever creates fresh databases;
-//   - after CREATE, the migration connection must prove it landed on the
-//     very database just created (same database oid, server address and
-//     port) or migrate deploy never runs — a localhost alias resolving to a
-//     different cluster cannot receive migrations;
+//   - after CREATE, a dedicated connection must prove it landed on the very
+//     database just created (same database oid, server address and port) or
+//     migrate deploy never runs;
+//   - `prisma migrate deploy` still runs as a SEPARATE subprocess whose own
+//     connection is NOT independently verified — the literal-IP rule is what
+//     pins it to the same endpoint. What remains outside this threat model
+//     is a local process actively rebinding the port between steps. Database
+//     oids are cluster-local, not globally unique, so the proofs here bind
+//     (name, oid, address, port) — not the cluster itself;
+//   - the marker write re-verifies that same identity INSIDE one interactive
+//     transaction on the marking connection immediately before the COMMENT —
+//     a marker can only commit on the database its own connection verified;
 //   - no database URL (or the password inside it) is ever printed or put in
-//     an error message; migration subprocess output is captured and scrubbed
-//     of credentials before display.
+//     an error message; migration subprocess output is captured, scrubbed
+//     of credentials and run with a minimal environment before display.
 
 import { execSync } from "node:child_process";
 import { PrismaClient } from "@prisma/client";
@@ -67,12 +81,23 @@ export function scrubCredentials(text: string, urls: (string | undefined)[]): st
     try {
       const password = new URL(raw).password;
       if (!password) continue;
-      out = out.split(password).join("<redacted>");
+      // Scrub every form the password could be printed in: the raw form
+      // unconditionally, the strict percent-decoded form, and a lenient
+      // per-sequence decode — a lone malformed %XX must not keep the
+      // decodable rest (e.g. `ab%zz%40cd` → `ab%zz@cd`) from being redacted.
+      const forms = new Set<string>([password]);
       try {
-        const decoded = decodeURIComponent(password);
-        if (decoded !== password) out = out.split(decoded).join("<redacted>");
+        forms.add(decodeURIComponent(password));
       } catch {
-        /* malformed percent-encoding — the raw form was already scrubbed */
+        /* malformed percent-encoding — lenient form below still applies */
+      }
+      forms.add(
+        password.replace(/%([0-9A-Fa-f]{2})/g, (_m, h: string) =>
+          String.fromCharCode(parseInt(h, 16)),
+        ),
+      );
+      for (const p of forms) {
+        if (p) out = out.split(p).join("<redacted>");
       }
     } catch {
       /* not a parseable URL — nothing to scrub */
@@ -112,6 +137,31 @@ export interface CommandResult {
 }
 export type MigrateRunner = (env: NodeJS.ProcessEnv) => CommandResult | void;
 
+/**
+ * The migration child gets ONLY what it needs — never the operator's whole
+ * environment, so no other credential-bearing variable can appear in its
+ * output or be inherited by tooling it spawns. Windows entries cover
+ * cmd.exe/npx resolution and process startup; POSIX needs PATH and HOME.
+ */
+const MIGRATE_ENV_KEYS = [
+  "PATH", "Path", "path",
+  "SYSTEMROOT", "SystemRoot", "WINDIR", "SystemDrive",
+  "PATHEXT", "COMSPEC",
+  "TEMP", "TMP", "TMPDIR",
+  "HOME", "USERPROFILE",
+];
+
+function minimalMigrateEnv(databaseUrl: string): NodeJS.ProcessEnv {
+  // ProcessEnv declares NODE_ENV required in this codebase; a fresh minimal
+  // env deliberately starts empty.
+  const env = {} as NodeJS.ProcessEnv;
+  for (const k of MIGRATE_ENV_KEYS) {
+    if (process.env[k] !== undefined) env[k] = process.env[k];
+  }
+  env.DATABASE_URL = databaseUrl;
+  return env;
+}
+
 const execMigrateDeploy: MigrateRunner = (env) => {
   const stdout = execSync("npx prisma migrate deploy", { env, stdio: "pipe" });
   return { stdout: stdout?.toString() ?? "" };
@@ -130,7 +180,7 @@ export function migrateDeploySanitized(
   run: MigrateRunner = execMigrateDeploy,
   log: (line: string) => void = console.log,
 ): void {
-  const env = { ...process.env, DATABASE_URL: databaseUrl };
+  const env = minimalMigrateEnv(databaseUrl);
   try {
     const res = run(env) ?? {};
     const out = scrubCredentials(
@@ -161,12 +211,20 @@ export interface ProvisionDeps {
   connectMaintenance?: DbConnector;
   /** Opens the connection that runs the post-CREATE identity proof (L-4). */
   connectTarget?: DbConnector;
+  /** Opens the marker-writing client used by the default markDisposable. */
+  openClient?: DbConnector;
   /** Runs `prisma migrate deploy` against the freshly created target. */
   runMigrations?: (databaseUrl: string) => void;
-  /** Stamps the disposable marker through the bootstrap's own checks. */
+  /**
+   * Stamps the disposable marker through the bootstrap's own checks.
+   * `opts.expected` is the live identity captured right after CREATE
+   * DATABASE — an implementation MUST verify it on the marker-writing
+   * connection (the default does, inside the marking transaction) and
+   * refuse if the connection reached anything else.
+   */
   markDisposable?: (
     databaseUrl: string,
-    opts: { token: string; confirmDb: string },
+    opts: { token: string; confirmDb: string; expected: DatabaseOidIdentity },
   ) => Promise<{ fingerprint: string }>;
   log?: (line: string) => void;
 }
@@ -193,13 +251,22 @@ export async function provisionDisposableTestDatabase(
     deps.runMigrations ?? ((databaseUrl: string) => migrateDeploySanitized(databaseUrl, undefined, log));
   const markDisposable =
     deps.markDisposable ??
-    (async (databaseUrl: string, opts: { token: string; confirmDb: string }) => {
-      const client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    (async (
+      databaseUrl: string,
+      opts: { token: string; confirmDb: string; expected: DatabaseOidIdentity },
+    ) => {
+      const open = deps.openClient ?? ((url: string) => new PrismaClient({ datasources: { db: { url } } }));
+      const client = open(databaseUrl);
       try {
+        // bootstrapDisposableDatabase verifies opts.expected on THIS
+        // connection inside the same interactive transaction as the
+        // COMMENT write — the marker can only commit on the database
+        // whose creation this run proved.
         return await bootstrapDisposableDatabase(client, {
           token: opts.token,
           confirmDb: opts.confirmDb,
           disposableConfirmed: true,
+          expected: opts.expected,
         });
       } finally {
         await client.$disconnect();
@@ -210,9 +277,11 @@ export async function provisionDisposableTestDatabase(
 
   // Validate the maintenance endpoint BEFORE connecting — the same strict
   // loopback policy the suite preflight uses (no query/fragment overrides,
-  // strict IPv4 loopback, canonical [::1], localhost).
+  // strict IPv4 loopback, canonical [::1]; DNS names including localhost
+  // are refused). The NORMALIZED URL is what every connection sees.
+  let serverUrl: string;
   try {
-    assertLoopbackServerUrl(args.serverUrl);
+    serverUrl = assertLoopbackServerUrl(args.serverUrl).toString();
   } catch (err) {
     // Never echo the URL itself — it may carry credentials.
     throw new BootstrapNotAllowedError(
@@ -233,9 +302,9 @@ export async function provisionDisposableTestDatabase(
   // M-1: the exact migration/marker target URL is validated BEFORE any
   // connection is opened or any write is issued. An input like
   // 127.0.0.1.attacker.example is refused here — zero writes.
-  const dbUrl = checkedDatabaseUrl(args.serverUrl, args.dbName);
+  const dbUrl = checkedDatabaseUrl(serverUrl, args.dbName);
 
-  const maintenance = connect(args.serverUrl);
+  const maintenance = connect(serverUrl);
   let created: DatabaseOidIdentity;
   try {
     const identity = await databaseIdentity(maintenance);
@@ -283,10 +352,14 @@ export async function provisionDisposableTestDatabase(
     await maintenance.$disconnect();
   }
 
-  // L-4: the migration runs on a NEW connection. Prove it landed on the
-  // database just created — same oid, address and port on a local/private
-  // server — before prisma migrate deploy is allowed to run. A localhost
-  // alias resolving to a different loopback cluster fails closed here.
+  // L-4: prove on a NEW connection that the migration target resolved to
+  // the database just created — same oid, address and port on a
+  // local/private server — before prisma migrate deploy is allowed to run.
+  // The migration itself is a SEPARATE subprocess connection this check
+  // cannot cover: the 127/8-or-[::1]-literal rule is what pins it to the
+  // same endpoint (a hostname could re-resolve differently per process).
+  // A local process actively rebinding the port mid-run is outside this
+  // threat model, and oids are cluster-local — not a cluster identifier.
   const target = connectTarget(dbUrl);
   try {
     let t: DatabaseOidIdentity;
@@ -296,7 +369,7 @@ export async function provisionDisposableTestDatabase(
       // A failed identity proof is a refusal (exit 2), not an opaque crash:
       // e.g. the database does not exist on the server this connection
       // reached. Transport errors still propagate as ordinary failures.
-      if (err instanceof DisposablePreflightError) {
+      if (err instanceof DisposablePreflightError || err instanceof BootstrapNotAllowedError) {
         throw new BootstrapNotAllowedError(
           `refusing: migration target identity check failed (${err.message}).`,
         );
@@ -323,9 +396,14 @@ export async function provisionDisposableTestDatabase(
 
   runMigrations(dbUrl);
 
+  // The marker is bound to the database just created: the default
+  // markDisposable opens the marking connection and verifies `expected`
+  // inside the same transaction as the COMMENT write. (`created.db` is the
+  // MAINTENANCE connection's current_database() — pin the target's name.)
   const res = await markDisposable(dbUrl, {
     token: args.token,
     confirmDb: args.confirmDb!,
+    expected: { db: args.dbName, addr: created.addr, port: created.port, oid: created.oid },
   });
   log(`marked disposable: ${res.fingerprint}`);
   log(

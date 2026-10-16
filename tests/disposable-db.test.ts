@@ -64,6 +64,14 @@ function fakeDb(cfg: FakeCfg, seq?: string[]) {
   const reads: string[] = [];
   const tag = (t: string) => seq?.push(t);
   const db: any = {
+    // Interactive transactions run their callback on this same fake — the
+    // marker-pin tests rely on it to prove verify-and-write share a tx.
+    $transaction: async (fn: (tx: any) => Promise<unknown>) => {
+      tag("tx:open");
+      const r = await fn(db);
+      tag("tx:commit");
+      return r;
+    },
     $queryRaw: async (a: any, ..._vals: any[]) => {
       const sql: string =
         typeof a === "string" ? a : Array.isArray(a) ? a.join("?") : (a.sql ?? "");
@@ -184,13 +192,32 @@ afterEach(() => {
 });
 
 describe("assertSafeTestDatabaseUrl", () => {
-  it("accepts a strictly-named local test database", () => {
-    expect(assertSafeTestDatabaseUrl("postgresql://u@localhost:5432/mergeship_test_x").dbName).toBe(
+  it("accepts a strictly-named local test database on an IP literal", () => {
+    expect(assertSafeTestDatabaseUrl("postgresql://u@127.0.0.1:5432/mergeship_test_x").dbName).toBe(
       "mergeship_test_x",
     );
     expect(assertSafeTestDatabaseUrl("postgres://u@127.0.0.1/mergeship_shadow_test").dbName).toBe(
       "mergeship_shadow_test",
     );
+    // every spelling of IPv6 loopback normalizes to [::1]
+    for (const h of ["[::1]", "[0::1]", "[0:0:0:0:0:0:0:1]"]) {
+      const r = assertSafeTestDatabaseUrl(`postgresql://u:p@${h}:5432/mergeship_test_x`);
+      expect(r.host).toBe("[::1]");
+      expect(r.url).toContain("[::1]:5432");
+    }
+  });
+
+  it("refuses DNS names — including localhost — before any connection", () => {
+    // `localhost` can resolve to ::1 or 127.0.0.1 independently per
+    // connection (and per subprocess), so only IP literals are accepted.
+    for (const host of ["localhost", "LOCALHOST", "LocalHost", "localhost.", "localhost.evil.com"]) {
+      expect(() => assertLoopbackServerUrl(`postgresql://u:p@${host}:5432/postgres`)).toThrow(
+        /not a loopback IP literal/,
+      );
+      expect(() => assertSafeTestDatabaseUrl(`postgresql://u@${host}/mergeship_test_x`)).toThrow(
+        DisposablePreflightError,
+      );
+    }
   });
 
   it("rejects Railway proxies, internal hosts and remote servers", () => {
@@ -210,8 +237,6 @@ describe("assertSafeTestDatabaseUrl", () => {
       "127.1", // short form — not a dotted quad
       "127.0.0.1.attacker.example", // DNS name that merely begins with 127.
       "128.0.0.1",
-      "localhost.evil.com",
-      "localhost.", // trailing dot resolves anywhere
       "localhost%2eevil.com", // encoded dot in an opaque host
       "[::ffff:7f00:1]", // IPv4-mapped IPv6 is not [::1]
       "[::2]",
@@ -220,7 +245,7 @@ describe("assertSafeTestDatabaseUrl", () => {
         DisposablePreflightError,
       );
     }
-    for (const host of ["127.0.0.1", "127.0.0.0", "127.255.255.255", "[::1]", "[0:0:0:0:0:0:0:1]", "LOCALHOST"]) {
+    for (const host of ["127.0.0.1", "127.0.0.0", "127.255.255.255"]) {
       expect(assertSafeTestDatabaseUrl(`postgresql://u@${host}/mergeship_test_x`).dbName).toBe(
         "mergeship_test_x",
       );
@@ -239,24 +264,24 @@ describe("assertSafeTestDatabaseUrl", () => {
       "?host=prod.example.com#frag",
     ]) {
       expect(() =>
-        assertSafeTestDatabaseUrl(`postgresql://u@localhost:5432/mergeship_test_x${tail}`),
+        assertSafeTestDatabaseUrl(`postgresql://u@127.0.0.1:5432/mergeship_test_x${tail}`),
       ).toThrow(DisposablePreflightError);
       // the same policy applies to any URL, including a maintenance URL
       expect(() =>
-        assertLoopbackServerUrl(`postgresql://u@localhost:5432/postgres${tail}`),
+        assertLoopbackServerUrl(`postgresql://u@127.0.0.1:5432/postgres${tail}`),
       ).toThrow(DisposablePreflightError);
     }
   });
 
   it("rejects non-test database names (a Railway db is named 'railway')", () => {
     for (const name of ["railway", "production", "postgres", "test"]) {
-      expect(() => assertSafeTestDatabaseUrl(`postgresql://u@localhost/${name}`)).toThrow(/database name/);
+      expect(() => assertSafeTestDatabaseUrl(`postgresql://u@127.0.0.1/${name}`)).toThrow(/database name/);
     }
     expect(DISPOSABLE_DB_NAME_PATTERN.test("mergeship_test_scratch_ab12")).toBe(true);
   });
 
   it("rejects non-postgres schemes and invalid URLs", () => {
-    expect(() => assertSafeTestDatabaseUrl("mysql://localhost/mergeship_test")).toThrow(/scheme/);
+    expect(() => assertSafeTestDatabaseUrl("mysql://127.0.0.1/mergeship_test")).toThrow(/scheme/);
     expect(() => assertSafeTestDatabaseUrl("not a url")).toThrow(DisposablePreflightError);
   });
 });
@@ -349,7 +374,7 @@ describe("verifyDisposableConnection", () => {
 });
 
 describe("preflightDisposableDatabase (branded result)", () => {
-  const URL_OK = "postgresql://postgres:pw@localhost:55432/mergeship_test_x";
+  const URL_OK = "postgresql://postgres:pw@127.0.0.1:55432/mergeship_test_x";
 
   const issue = (cfg: FakeCfg = {}, url = URL_OK) =>
     preflightDisposableDatabase(url, () => fakeDb(cfg).db);
@@ -358,11 +383,25 @@ describe("preflightDisposableDatabase (branded result)", () => {
     process.env.MERGESHIP_SHADOW_TOKEN = "operator-token-xyz";
     const brand = await issue({ marker: "mergeship-shadow-disposable:operator-token-xyz" });
     expect(brand).toBeInstanceOf(PreflightedDatabase);
-    expect(brand.url).toBe(URL_OK);
     expect(brand.dbName).toBe("mergeship_test_x");
     expect(brand.addr).toBe("127.0.0.1");
     expect(brand.port).toBe(5432);
     expect(brand.fingerprint).toBe("mergeship_test_x@127.0.0.1:5432");
+  });
+
+  it("the brand carries no credential-bearing URL — a log or diff cannot leak one", async () => {
+    process.env.MERGESHIP_SHADOW_TOKEN = "operator-token-xyz";
+    const brand = await issue({ marker: "mergeship-shadow-disposable:operator-token-xyz" });
+    expect("url" in brand).toBe(false);
+    expect(JSON.stringify(brand)).not.toContain("pw");
+    // …but the privately stored URL still authorizes scratch databases.
+    const connects: string[] = [];
+    const maintenance = fakeDb({ db: "postgres", marker: "mergeship-shadow-disposable:operator-token-xyz" });
+    await withScratchDatabase(brand, async () => "ok", (u) => {
+      connects.push(u);
+      return maintenance.db;
+    });
+    expect(connects).toEqual(["postgresql://postgres:pw@127.0.0.1:55432/postgres"]);
   });
 
   it("is read-only: a passing preflight performs zero writes", async () => {
@@ -379,12 +418,12 @@ describe("preflightDisposableDatabase (branded result)", () => {
       return fakeDb({}).db;
     };
     for (const fake of [
-      "postgresql://postgres@localhost/mergeship_test_x", // bare URL
+      "postgresql://postgres@127.0.0.1/mergeship_test_x", // bare URL
       { url: URL_OK, dbName: "mergeship_test_x" }, // plain object
       Object.create(PreflightedDatabase.prototype), // forged instance shape
       // a real instance, constructed outside the module: correct class, no
       // registry entry — membership, not shape, is the credential
-      new PreflightedDatabase(URL_OK, "mergeship_test_x", "127.0.0.1", 5432),
+      new PreflightedDatabase("mergeship_test_x", "127.0.0.1", 5432),
     ]) {
       await expect(
         withScratchDatabase(fake as any, async () => "never", connect),
@@ -401,11 +440,11 @@ describe("preflightDisposableDatabase (branded result)", () => {
     expect(Object.isFrozen(brand)).toBe(true);
     // Mutation attempts cannot take: the object is frozen AND authorization
     // reads only the private registry entry.
-    expect(Reflect.set(brand, "url", "postgresql://u@localhost:6001/mergeship_test_z")).toBe(false);
+    expect(Reflect.set(brand, "url", "postgresql://u@127.0.0.1:6001/mergeship_test_z")).toBe(false);
     expect(Reflect.set(brand, "dbName", "mergeship_test_z")).toBe(false);
     expect(Reflect.set(brand, "port", 6001)).toBe(false);
     expect(Reflect.defineProperty(brand, "evil", { value: true })).toBe(false);
-    expect(brand.url).toBe(URL_OK);
+    expect(brand.dbName).toBe("mergeship_test_x");
     // The legitimate brand still authorizes — against the ORIGINAL endpoint.
     const seq: string[] = [];
     const connects: string[] = [];
@@ -415,13 +454,13 @@ describe("preflightDisposableDatabase (branded result)", () => {
       return maintenance.db;
     });
     expect(out).toMatch(/^mergeship_test_scratch_[0-9a-f]{10}$/);
-    expect(connects).toEqual(["postgresql://postgres:pw@localhost:55432/postgres"]);
+    expect(connects).toEqual(["postgresql://postgres:pw@127.0.0.1:55432/postgres"]);
     expect(maintenance.writes[0]).toMatch(/^CREATE DATABASE/);
   });
 });
 
 describe("withScratchDatabase (LOW-4)", () => {
-  const URL_OK = "postgresql://postgres:pw@localhost:55432/mergeship_test_x";
+  const URL_OK = "postgresql://postgres:pw@127.0.0.1:55432/mergeship_test_x";
   const MARKER_OK = "mergeship-shadow-disposable:operator-token-xyz";
 
   const issueBrand = () =>
@@ -452,11 +491,11 @@ describe("withScratchDatabase (LOW-4)", () => {
       seen = { url, name };
       // The constructed target URL is itself a validated test-database URL.
       expect(() => assertSafeTestDatabaseUrl(url)).not.toThrow();
-      expect(new URL(url).hostname).toBe("localhost");
+      expect(new URL(url).hostname).toBe("127.0.0.1");
       return "done";
     });
     expect(seen!.name).toMatch(/^mergeship_test_scratch_[0-9a-f]{10}$/);
-    expect(connects).toEqual(["postgresql://postgres:pw@localhost:55432/postgres"]);
+    expect(connects).toEqual(["postgresql://postgres:pw@127.0.0.1:55432/postgres"]);
     // identity → marker recheck → CREATE → fn → DROP
     expect(seq).toEqual([
       "connect",
@@ -559,10 +598,10 @@ describe("withScratchDatabase (LOW-4)", () => {
 describe("urlWithDatabase / checkedDatabaseUrl (LOW-3)", () => {
   it("retargets a URL by pathname, preserving userinfo and port", () => {
     const built = urlWithDatabase(
-      "postgresql://postgres:pw@localhost:55432/postgres",
+      "postgresql://postgres:pw@127.0.0.1:55432/postgres",
       "mergeship_test_x",
     );
-    expect(built).toBe("postgresql://postgres:pw@localhost:55432/mergeship_test_x");
+    expect(built).toBe("postgresql://postgres:pw@127.0.0.1:55432/mergeship_test_x");
     const u = new URL(built);
     expect(u.password).toBe("pw");
     expect(u.port).toBe("55432");
@@ -573,18 +612,18 @@ describe("urlWithDatabase / checkedDatabaseUrl (LOW-3)", () => {
     // every constructed URL must be revalidated before use: query strings
     // (connection overrides) are never allowed.
     const built = urlWithDatabase(
-      "postgresql://postgres:pw@localhost:55432/postgres?host=evil.example",
+      "postgresql://postgres:pw@127.0.0.1:55432/postgres?host=evil.example",
       "mergeship_test_x",
     );
     expect(() => assertSafeTestDatabaseUrl(built)).toThrow(DisposablePreflightError);
     expect(() => checkedDatabaseUrl(
-      "postgresql://postgres:pw@localhost:55432/postgres?host=evil.example",
+      "postgresql://postgres:pw@127.0.0.1:55432/postgres?host=evil.example",
       "mergeship_test_x",
     )).toThrow(/revalidation/);
   });
 
   it("every constructed target URL is revalidated by assertSafeTestDatabaseUrl", () => {
-    const base = "postgresql://postgres:pw@localhost:55432/postgres";
+    const base = "postgresql://postgres:pw@127.0.0.1:55432/postgres";
     expect(() =>
       assertSafeTestDatabaseUrl(urlWithDatabase(base, "mergeship_test_x")),
     ).not.toThrow();
@@ -598,9 +637,9 @@ describe("urlWithDatabase / checkedDatabaseUrl (LOW-3)", () => {
   });
 
   it("checkedDatabaseUrl revalidates and refuses non-test targets", () => {
-    const base = "postgresql://postgres:pw@localhost:55432/postgres";
+    const base = "postgresql://postgres:pw@127.0.0.1:55432/postgres";
     expect(checkedDatabaseUrl(base, "mergeship_test_x")).toBe(
-      "postgresql://postgres:pw@localhost:55432/mergeship_test_x",
+      "postgresql://postgres:pw@127.0.0.1:55432/mergeship_test_x",
     );
     expect(() => checkedDatabaseUrl(base, "postgres")).toThrow(/revalidation|database name/);
     expect(() => checkedDatabaseUrl(base, 'evil"name')).toThrow(/identifier/);
@@ -608,7 +647,7 @@ describe("urlWithDatabase / checkedDatabaseUrl (LOW-3)", () => {
 });
 
 describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
-  const SERVER = "postgresql://postgres:s3cret-pw@localhost:55432/postgres";
+  const SERVER = "postgresql://postgres:s3cret-pw@127.0.0.1:55432/postgres";
   const FP = "mergeship_test_x@127.0.0.1:5432";
   const ARGS = {
     serverUrl: SERVER,
@@ -633,7 +672,13 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
       },
       seq,
     );
-    const calls: { migrate?: string; mark?: string; connects: string[]; targetConnects: string[] } = {
+    const calls: {
+      migrate?: string;
+      mark?: string;
+      markOpts?: { token: string; confirmDb: string; expected: unknown };
+      connects: string[];
+      targetConnects: string[];
+    } = {
       connects: [],
       targetConnects: [],
     };
@@ -652,8 +697,9 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
         calls.migrate = dbUrl;
         seq.push("migrate");
       },
-      markDisposable: async (dbUrl: string) => {
+      markDisposable: async (dbUrl: string, opts: { token: string; confirmDb: string; expected: unknown }) => {
         calls.mark = dbUrl;
+        calls.markOpts = opts;
         seq.push("mark");
         return { fingerprint: FP };
       },
@@ -691,10 +737,14 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
       "mark",
     ]);
     expect(maintenance.writes).toEqual(['CREATE DATABASE "mergeship_test_x"']);
-    const expectedUrl = "postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x";
+    const expectedUrl = "postgresql://postgres:s3cret-pw@127.0.0.1:55432/mergeship_test_x";
     expect(calls.targetConnects).toEqual([expectedUrl]);
     expect(calls.migrate).toBe(expectedUrl);
     expect(calls.mark).toBe(expectedUrl);
+    // The marker is pinned to the identity captured right after CREATE.
+    const exp = calls.markOpts?.expected as { db: string; addr: string; port: number; oid: bigint };
+    expect(exp).toMatchObject({ db: "mergeship_test_x", addr: "127.0.0.1", port: 5432 });
+    expect(String(exp.oid)).toBe("4242");
   });
 
   it("prints only the fingerprint without --confirm-db and writes nothing", async () => {
@@ -723,7 +773,7 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
   it("refuses a non-loopback server, a bad scheme, a non-test name and a missing token before connecting", async () => {
     for (const badArgs of [
       { ...ARGS, serverUrl: "postgresql://u:p@db.example.com/postgres" },
-      { ...ARGS, serverUrl: "mysql://localhost/postgres" },
+      { ...ARGS, serverUrl: "mysql://127.0.0.1/postgres" },
       { ...ARGS, dbName: "railway" },
       { ...ARGS, token: undefined },
       { ...ARGS, token: "short" },
@@ -756,14 +806,17 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
     expect(calls.migrate).toBeUndefined();
   });
 
-  it("refuses loopback-lookalike hosts and query overrides BEFORE any connection — zero writes (M-1/M-2)", async () => {
+  it("refuses loopback-lookalike hosts, DNS names and query overrides BEFORE any connection — zero writes (M-1/M-2)", async () => {
     for (const serverUrl of [
+      "postgresql://u@localhost:5432/postgres", // DNS name — can re-resolve per connection
+      "postgresql://u@LOCALHOST:5432/postgres",
+      "postgresql://u@localhost.:5432/postgres",
       "postgresql://u@127.0.0.1.attacker.example:5432/postgres", // 127.* DNS name
       "postgresql://u@127.999.0.1:5432/postgres", // invalid octets → DNS
       "postgresql://u@127.1:5432/postgres", // short-form loopback
-      "postgresql://u@localhost:5432/postgres?host=prod.example.com", // connection override
-      "postgresql://u@localhost:5432/postgres?connect_timeout=5", // even benign params
-      "postgresql://u@localhost:5432/postgres#frag",
+      "postgresql://u@127.0.0.1:5432/postgres?host=prod.example.com", // connection override
+      "postgresql://u@127.0.0.1:5432/postgres?connect_timeout=5", // even benign params
+      "postgresql://u@127.0.0.1:5432/postgres#frag",
     ]) {
       const { calls, maintenance, deps } = harness();
       await expect(
@@ -818,12 +871,58 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
     expect(calls.mark).toBeUndefined();
   });
 
+  it("the DEFAULT markDisposable writes the marker on the pinned database (L-4)", async () => {
+    // Exercises the real default path — a real bootstrapDisposableDatabase
+    // against a fake marking client opened through the `openClient` hook.
+    const { calls, deps } = harness({ exists: false });
+    const marker = fakeDb({ ...cleanDb() }); // marker read derives from the COMMENT write
+    let markerUrl = "";
+    const { markDisposable: _defaultNotUsed, ...rest } = deps;
+    await provisionDisposableTestDatabase(
+      { ...ARGS },
+      {
+        ...rest,
+        openClient: (u: string) => {
+          markerUrl = u;
+          return marker.db;
+        },
+      },
+    );
+    expect(markerUrl).toBe("postgresql://postgres:s3cret-pw@127.0.0.1:55432/mergeship_test_x");
+    expect(marker.writes).toEqual([
+      `COMMENT ON DATABASE "mergeship_test_x" IS 'mergeship-shadow-disposable:operator-token-xyz'`,
+    ]);
+    expect(calls.migrate).toBeDefined(); // migrate ran, then the real marking path
+  });
+
+  it("the DEFAULT markDisposable refuses when the marking connection is not the created database", async () => {
+    for (const over of [
+      { oid: BigInt(9999) }, // different cluster answered the marker connection
+      { addr: "10.0.0.9" }, // different server address
+      { port: 5433 }, // different server port
+      { db: "mergeship_test_y" }, // right shape, wrong database
+    ]) {
+      const { calls, deps } = harness({ exists: false });
+      const marker = fakeDb({ ...cleanDb(), ...over });
+      const { markDisposable: _defaultNotUsed, ...rest } = deps;
+      await expect(
+        provisionDisposableTestDatabase(
+          { ...ARGS },
+          { ...rest, openClient: () => marker.db },
+        ),
+      ).rejects.toThrow(BootstrapNotAllowedError);
+      // The pin check fires inside the marking transaction — zero writes.
+      expect(marker.writes).toHaveLength(0);
+      expect(calls.mark).toBeUndefined();
+    }
+  });
+
   it("never prints or errors the URL password (LOW-2)", async () => {
     const { logs, deps } = harness({ exists: false });
     await provisionDisposableTestDatabase({ ...ARGS }, deps);
     const out = logs.join("\n");
     expect(out).not.toContain("s3cret-pw");
-    expect(out).toContain("postgresql://postgres@localhost:55432/mergeship_test_x");
+    expect(out).toContain("postgresql://postgres@127.0.0.1:55432/mergeship_test_x");
     // A refusal path errors without credentials too.
     const { deps: deps2, maintenance } = harness({ exists: true });
     const refusal: unknown = await provisionDisposableTestDatabase(
@@ -836,31 +935,31 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
   });
 
   it("redactUrlPassword clears only the password, scrubCredentials strips raw and encoded forms", () => {
-    expect(redactUrlPassword(SERVER)).toBe("postgresql://postgres@localhost:55432/postgres");
+    expect(redactUrlPassword(SERVER)).toBe("postgresql://postgres@127.0.0.1:55432/postgres");
     expect(
       scrubCredentials(
-        "connect failed postgresql://postgres:s3cret-pw@localhost:55432/postgres s3cret-pw",
+        "connect failed postgresql://postgres:s3cret-pw@127.0.0.1:55432/postgres s3cret-pw",
         [SERVER],
       ),
     ).toBe(
-      "connect failed postgresql://postgres:<redacted>@localhost:55432/postgres <redacted>",
+      "connect failed postgresql://postgres:<redacted>@127.0.0.1:55432/postgres <redacted>",
     );
-    const encoded = "postgresql://u:p%40ssw%3Ard@localhost/db";
+    const encoded = "postgresql://u:p%40ssw%3Ard@127.0.0.1/db";
     expect(scrubCredentials("boom p@ssw:rd here", [encoded])).toBe("boom <redacted> here");
   });
 
   it("a malformed percent sequence in the password cannot defeat scrubbing", () => {
     // decodeURIComponent("ab%zzcd") throws — the raw form must still be
     // scrubbed, and so must the URL it is embedded in.
-    const url = "postgresql://postgres:ab%zzcd@localhost:5432/postgres";
+    const url = "postgresql://postgres:ab%zzcd@127.0.0.1:5432/postgres";
     expect(scrubCredentials("fail ab%zzcd here", [url])).toBe("fail <redacted> here");
     expect(scrubCredentials(`conn ${url} refused`, [url])).toBe(
-      "conn postgresql://postgres:<redacted>@localhost:5432/postgres refused",
+      "conn postgresql://postgres:<redacted>@127.0.0.1:5432/postgres refused",
     );
   });
 
   it("migrateDeploySanitized never lets the subprocess emit credentials", () => {
-    const url = "postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x";
+    const url = "postgresql://postgres:s3cret-pw@127.0.0.1:55432/mergeship_test_x";
     const lines: string[] = [];
     let seenEnv: NodeJS.ProcessEnv | undefined;
     migrateDeploySanitized(
@@ -868,7 +967,7 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
       (env) => {
         seenEnv = env;
         return {
-          stdout: `Applying migrations to postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x`,
+          stdout: `Applying migrations to postgresql://postgres:s3cret-pw@127.0.0.1:55432/mergeship_test_x`,
           stderr: "warn: s3cret-pw leaked to stderr",
         };
       },
@@ -881,12 +980,43 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
     expect(out).toContain("<redacted>");
   });
 
+  it("the migration subprocess inherits a minimal environment — no unrelated secrets", () => {
+    process.env.OTHER_SECRET_FOR_TEST = "shpss_should_not_propagate";
+    try {
+      let seenEnv: NodeJS.ProcessEnv | undefined;
+      migrateDeploySanitized(
+        "postgresql://postgres:s3cret-pw@127.0.0.1:55432/mergeship_test_x",
+        (env) => {
+          seenEnv = env;
+        },
+      );
+      expect(seenEnv?.DATABASE_URL).toBe(
+        "postgresql://postgres:s3cret-pw@127.0.0.1:55432/mergeship_test_x",
+      );
+      expect(seenEnv?.OTHER_SECRET_FOR_TEST).toBeUndefined();
+      expect(seenEnv?.MERGESHIP_SHADOW_TOKEN).toBeUndefined();
+      expect(seenEnv?.Path ?? seenEnv?.PATH).toBeTruthy(); // still spawnable
+      expect(Object.keys(seenEnv ?? {}).length).toBeLessThanOrEqual(20);
+    } finally {
+      delete process.env.OTHER_SECRET_FOR_TEST;
+    }
+  });
+
+  it("a partially malformed password still gets its decodable form scrubbed", () => {
+    // "ab%zz%40cd": decodeURIComponent throws on %zz, but a lenient per-byte
+    // decode yields "ab%zz@cd" — a lower layer printing that form must still
+    // be redacted, and the raw form always is.
+    const url = "postgresql://u:ab%zz%40cd@127.0.0.1/db";
+    expect(scrubCredentials("lenient: ab%zz@cd", [url])).toBe("lenient: <redacted>");
+    expect(scrubCredentials("raw: ab%zz%40cd", [url])).toBe("raw: <redacted>");
+  });
+
   it("a failed migrate deploy is rethrown with stdout, stderr and the message scrubbed", () => {
-    const url = "postgresql://postgres:s3cret-pw@localhost:55432/mergeship_test_x";
+    const url = "postgresql://postgres:s3cret-pw@127.0.0.1:55432/mergeship_test_x";
     const lines: string[] = [];
     const boom = Object.assign(
-      new Error(`Command failed: postgresql://postgres:s3cret-pw@localhost:55432/db`),
-      { stdout: "out s3cret-pw", stderr: "err postgresql://postgres:s3cret-pw@localhost/db" },
+      new Error(`Command failed: postgresql://postgres:s3cret-pw@127.0.0.1:55432/db`),
+      { stdout: "out s3cret-pw", stderr: "err postgresql://postgres:s3cret-pw@127.0.0.1/db" },
     );
     let thrown: unknown;
     try {
@@ -908,8 +1038,8 @@ describe("provisionDisposableTestDatabase (LOW-1, LOW-2)", () => {
   });
 
   it("scrubs debug-style messages carrying encoded or malformed passwords", () => {
-    const url = "postgresql://postgres:ab%zzcd@localhost/db";
-    const boom = new Error(`DEBUG prisma:engines url=postgresql://postgres:ab%zzcd@localhost/db`);
+    const url = "postgresql://postgres:ab%zzcd@127.0.0.1/db";
+    const boom = new Error(`DEBUG prisma:engines url=postgresql://postgres:ab%zzcd@127.0.0.1/db`);
     let thrown: unknown;
     try {
       migrateDeploySanitized(url, () => {
@@ -1085,16 +1215,90 @@ describe("bootstrapDisposableDatabase", () => {
   });
 });
 
-describe("CLI entry point (M-3)", () => {
+describe("bootstrapDisposableDatabase — pinned marker write", () => {
+  // The identity the provisioner captured right after CREATE DATABASE.
+  const EXPECTED = { db: "mergeship_test_x", addr: "127.0.0.1", port: 5432, oid: BigInt(4242) };
+  const pinOpts = (over = {}) => ({
+    token: "bootstrap-token-1",
+    confirmDb: "mergeship_test_x@127.0.0.1:5432",
+    disposableConfirmed: true,
+    expected: EXPECTED,
+    ...over,
+  });
+
+  it("verifies identity and writes the marker in ONE transaction on the marking connection", async () => {
+    const seq: string[] = [];
+    const { db, writes } = fakeDb(cleanDb(), seq);
+    const res = await bootstrapDisposableDatabase(db, pinOpts());
+    expect(res.fingerprint).toBe("mergeship_test_x@127.0.0.1:5432");
+    expect(writes).toEqual([
+      `COMMENT ON DATABASE "mergeship_test_x" IS 'mergeship-shadow-disposable:bootstrap-token-1'`,
+    ]);
+    // The oid-bearing identity read is the FIRST thing inside the
+    // transaction; the COMMENT write and its readback precede the commit.
+    expect(seq[0]).toBe("tx:open");
+    expect(seq[1]).toBe("q:oidident");
+    expect(seq[seq.length - 1]).toBe("tx:commit");
+    expect(seq.indexOf("x:COMMENT ON")).toBeGreaterThan(seq.indexOf("q:oidident"));
+  });
+
+  it("refuses when the marking connection is not the database that was created — zero writes, rolled back", async () => {
+    for (const over of [
+      { oid: BigInt(9999) }, // different cluster
+      { addr: "10.0.0.9" }, // different server address
+      { port: 5433 }, // different server port
+      { db: "mergeship_test_y" }, // wrong database on the same server
+      { oid: null }, // incomplete identity — fails closed
+    ]) {
+      const seq: string[] = [];
+      const { db, writes } = fakeDb({ ...cleanDb(), ...over }, seq);
+      await expect(bootstrapDisposableDatabase(db, pinOpts())).rejects.toThrow(
+        BootstrapNotAllowedError,
+      );
+      expect(writes).toHaveLength(0);
+      expect(seq).toContain("tx:open");
+      expect(seq).not.toContain("tx:commit");
+    }
+  });
+
+  it("a failed COMMENT write rolls back — no commit follows", async () => {
+    const seq: string[] = [];
+    const { db, writes } = fakeDb({ ...cleanDb(), failWrite: /^COMMENT ON DATABASE/ }, seq);
+    await expect(bootstrapDisposableDatabase(db, pinOpts())).rejects.toThrow(/write failed/);
+    expect(writes).toEqual([expect.stringMatching(/^COMMENT ON DATABASE/)]);
+    expect(seq).not.toContain("tx:commit");
+  });
+
+  it("without a pin, the standalone bootstrap keeps its own checks unchanged", async () => {
+    const seq: string[] = [];
+    const { db, writes } = fakeDb(cleanDb(), seq);
+    const res = await bootstrapDisposableDatabase(db, {
+      token: "bootstrap-token-1",
+      confirmDb: "mergeship_test_x@127.0.0.1:5432",
+      disposableConfirmed: true,
+    });
+    expect(res.fingerprint).toBe("mergeship_test_x@127.0.0.1:5432");
+    expect(writes).toHaveLength(1);
+    expect(seq).toContain("tx:commit");
+  });
+});
+
+// If the ambient environment carries production markers, these subprocess
+// tests are incompatible — SKIP them. RAILWAY_* and NODE_ENV are never
+// stripped to make a test pass.
+const CLI_ENV_INCOMPATIBLE =
+  process.env.NODE_ENV === "production" ||
+  Object.keys(process.env).some((k) => k.startsWith("RAILWAY_"));
+
+describe.skipIf(CLI_ENV_INCOMPATIBLE)("CLI entry point (M-3)", () => {
   const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
   const viteNodeCli = path.join(root, "node_modules", "vite-node", "vite-node.mjs");
   const T = 120_000;
 
   const cleanEnv = (extra: Record<string, string> = {}) => {
     const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
-    for (const k of Object.keys(env)) {
-      if (k.startsWith("RAILWAY_") || k === "NODE_ENV") delete env[k];
-    }
+    // Only real connection strings are removed (the child must never see
+    // one); safety markers are inherited or the whole describe is skipped.
     delete env.DATABASE_URL;
     delete env.MERGESHIP_TEST_DATABASE_URL;
     return env;
@@ -1119,7 +1323,7 @@ describe("CLI entry point (M-3)", () => {
         "--script",
         "scripts/test-db-provision.ts",
         "--server",
-        "mysql://localhost/postgres",
+        "mysql://127.0.0.1/postgres",
         "--name",
         "mergeship_test_x",
       ],
@@ -1129,22 +1333,24 @@ describe("CLI entry point (M-3)", () => {
     expect(`${r.stdout}${r.stderr}`).toContain("refusing:");
   }, T);
 
-  it("fully validated args reach the connection stage (refused port fails nonzero)", () => {
+  it("fully parsed args reach the safety checks — a bad database name refuses before any connection", () => {
+    // `railway` is a valid parse but not a test-database name: main() runs,
+    // validation refuses with exit 2, and no socket is ever opened.
     const r = run(
       [
         "--script",
         "scripts/test-db-provision.ts",
         "--server",
-        "postgresql://u@127.0.0.1:1/postgres",
+        "postgresql://u@127.0.0.1:5432/postgres",
         "--name",
-        "mergeship_test_x",
+        "railway",
       ],
       { MERGESHIP_SHADOW_TOKEN: "operator-token-xyz" },
     );
-    expect(r.status).not.toBe(0);
+    expect(r.status).toBe(2);
     const out = `${r.stdout}${r.stderr}`;
+    expect(out).toContain("refusing:");
     expect(out).not.toContain("usage:");
-    expect(out.length).toBeGreaterThan(0);
   }, T);
 
   it("without --script the script still fails loudly instead of silently no-op", () => {
