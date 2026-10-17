@@ -525,6 +525,15 @@ describe("S1 transition graph (migration text)", () => {
     expect(evidenceBody).toContain("OLD.\"status\" = 'PREPARED'");
   });
 
+  it("the sourceCancelledAt terminal exception is NULL-safe (no UNKNOWN pass)", () => {
+    // A bare reasonCode = '...' is NULL when reasonCode is NULL, and CHECK
+    // treats UNKNOWN as pass — the CHECK must use explicit NULL handling.
+    expect(MIGRATION_SQL).toContain('COALESCE("reasonCode", \'\') = \'CANCELLED_AT_INVALID\'');
+    expect(MIGRATION_SQL).not.toMatch(
+      /"reasonCode" = 'CANCELLED_AT_INVALID' AND "status"/,
+    );
+  });
+
   it("sourceCancelledAt immutability uses NULL-safe IS DISTINCT FROM", () => {
     const frozen = extractFunctionBody(MIGRATION_SQL, "shipping_refund_fn_frozen_columns_guard");
     expect(frozen).toContain('NEW."sourceCancelledAt" IS DISTINCT FROM OLD."sourceCancelledAt"');
@@ -568,31 +577,64 @@ function stripComments(source: string): string {
     .replace(/\/\/[^\n]*/g, "");
 }
 
-describe("forbidden trigger bypass (spec 3.2 rules 7-11)", () => {
-  // The catalog role token is assembled so this test file does not itself
-  // contain the forbidden mutation-form tokens as contiguous text.
+describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
+  // Every sensitive token is assembled from fragments so this file itself
+  // never contains a forbidden form as contiguous text and stays scannable.
   const ROLE = ["session", "replication", "role"].join("_");
-  const mutationForms: RegExp[] = [
-    new RegExp(`\\bSET\\s+(LOCAL\\s+|SESSION\\s+)?${ROLE}\\b`, "i"),
-    new RegExp(`set_config\\s*\\(\\s*'${ROLE}'`, "i"),
-    new RegExp(`\\bRESET\\s+${ROLE}\\b`, "i"),
-    new RegExp(`\\bALTER\\s+(SYSTEM|ROLE|DATABASE)[^;]*${ROLE}`, "i"),
-    new RegExp(`-c\\s*${ROLE}`, "i"),
-    /\bPGOPTIONS\b/i,
-    /\b(DISABLE|ENABLE)\s+TRIGGER\b/i,
-    /\bDISABLE\s+TRIGGER\s+ALL\b/i,
-  ];
-
-  const allowlisted = new Set([
-    "app/lib/shipping-refund-trigger-manifest.ts", // the read-only catalog query
-    "tests/shipping-refund-trigger-manifest.test.ts", // may name the setting to assert on it
-    "tests/shipping-refund-schema-pg.test.ts",
-    "tests/helpers/shipping-refund-fixture.ts", // the only future fixture that may suspend a trigger
+  const DIS = ["DIS", "ABLE"].join("");
+  const ENA = ["EN", "ABLE"].join("");
+  const TRIG = ["TRIG", "GER"].join("");
+  const REPLICA = ["REPL", "ICA"].join("");
+  const ALWAYS = ["ALW", "AYS"].join("");
+  const TRIGGER_TOGGLE = new RegExp(
+    `\\b(${DIS}|${ENA})\\s+((?:${REPLICA}|${ALWAYS})\\s+)?${TRIG}\\s+([A-Za-z_]+|ALL|USER)`,
+    "gi",
+  );
+  const NAMED_TRANSITION_TRIGGER = "shippingrefund_transition_guard";
+  // The ONLY file permitted to contain a trigger toggle, and only for the
+  // one named transition trigger (spec 19.2 fixture isolation).
+  const FIXTURE_HELPER = "tests/helpers/shipping-refund-fixture.ts";
+  // Files allowed to name the replication role at all — the read-only catalog
+  // query, the fixture helper contract, and this architecture test.
+  const MAY_NAME_ROLE = new Set([
+    "app/lib/shipping-refund-trigger-manifest.ts",
+    "tests/helpers/shipping-refund-fixture.ts",
+    "tests/shipping-refund-trigger-manifest.test.ts",
   ]);
 
-  const scanRoots = ["app", "scripts", "prisma/migrations", "tests/helpers", "tests"];
+  const roleMutationForms: RegExp[] = [
+    new RegExp("\\bSET\\s+(LOCAL\\s+|SESSION\\s+)?" + ROLE + "\\b", "i"),
+    new RegExp("set_config\\s*\\(\\s*'" + ROLE + "'", "i"),
+    new RegExp("\\bRESET\\s+" + ROLE + "\\b", "i"),
+    new RegExp("\\bALTER\\s+(SYSTEM|ROLE|DATABASE)[^;]*" + ROLE, "i"),
+    new RegExp(`-c\\s*${ROLE}`, "i"),
+    new RegExp(`\\b${["PG", "OPTIONS"].join("")}\\b`, "i"),
+  ];
 
-  it("no non-allowlisted source mutates the replication role or toggles triggers", () => {
+  const scanRoots = ["app", "scripts", "prisma/migrations", "tests"];
+
+  /** The single predicate the scan applies to every scanned source. */
+  function scanSource(text: string, relPath: string): string[] {
+    const offenders: string[] = [];
+    const stripped = stripComments(text);
+    for (const re of roleMutationForms) {
+      if (re.test(stripped)) offenders.push(`${relPath}: role mutation /${re.source}/`);
+    }
+    // Even the read form may be named only by the allowlisted modules.
+    if (stripped.includes(ROLE) && !MAY_NAME_ROLE.has(relPath)) {
+      offenders.push(`${relPath}: names ${ROLE}`);
+    }
+    for (const m of stripped.matchAll(TRIGGER_TOGGLE)) {
+      const permitted =
+        relPath === FIXTURE_HELPER &&
+        !m[2] &&
+        m[3].toLowerCase() === NAMED_TRANSITION_TRIGGER;
+      if (!permitted) offenders.push(`${relPath}: ${m[0]}`);
+    }
+    return offenders;
+  }
+
+  it("no source mutates the replication role or toggles triggers outside the fixture contract", () => {
     const offenders: string[] = [];
     for (const root of scanRoots) {
       const abs = join(REPO_ROOT, root);
@@ -604,26 +646,36 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11)", () => {
       }
       for (const f of files) {
         const rel = relative(REPO_ROOT, f).split("\\").join("/");
-        if (allowlisted.has(rel)) continue;
-        const text = stripComments(readFileSync(f, "utf8"));
-        for (const re of mutationForms) {
-          if (re.test(text)) offenders.push(`${rel}: ${re.source}`);
-        }
-        // Even the read form is only allowed in allowlisted files.
-        if (text.includes(ROLE)) offenders.push(`${rel}: names ${ROLE}`);
+        offenders.push(...scanSource(readFileSync(f, "utf8"), rel));
       }
     }
     expect(offenders).toEqual([]);
   });
 
-  it("allowlisted sources contain only the read-only catalog form", () => {
+  it("synthetic negative: the previously offending statement is caught by the scan", () => {
+    // Reconstructs exactly the statement that used to live in the pg suite.
+    const offending = `ALTER TABLE "ShippingRefund" ${DIS} ${TRIG} ${NAMED_TRANSITION_TRIGGER}`;
+    expect(scanSource(offending, "tests/shipping-refund-schema-pg.test.ts")).not.toEqual([]);
+    // The narrow exception: only the fixture helper, only that named trigger.
+    expect(scanSource(offending, FIXTURE_HELPER)).toEqual([]);
+    // Any wider toggle is rejected even in the fixture helper.
+    expect(
+      scanSource(`ALTER TABLE "ShippingRefund" ${DIS} ${TRIG} ALL`, FIXTURE_HELPER),
+    ).not.toEqual([]);
+    expect(
+      scanSource(`ALTER TABLE t ${ENA} ${REPLICA} ${TRIG} x`, FIXTURE_HELPER),
+    ).not.toEqual([]);
+  });
+
+  it("the integrity module contains only the read-only catalog form", () => {
     const manifestSrc = readFileSync(
       join(REPO_ROOT, "app/lib/shipping-refund-trigger-manifest.ts"),
       "utf8",
     );
-    for (const re of mutationForms) {
+    for (const re of roleMutationForms) {
       expect(stripComments(manifestSrc)).not.toMatch(re);
     }
+    expect([...stripComments(manifestSrc).matchAll(TRIGGER_TOGGLE)]).toEqual([]);
     expect(manifestSrc).toContain(`current_setting('${ROLE}')`);
   });
 });

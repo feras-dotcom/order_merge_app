@@ -83,7 +83,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     const reasonCode = p.reasonCode ?? null;
     const key = randomUUID();
     const dispatchEpoch: string | null = lane === "EXECUTE" ? "2030-01-02T00:00:00Z" : null;
-    await db.$queryRaw`
+    await db.$executeRaw`
       INSERT INTO "ShippingRefund" (
         "id", "shop", "mergeOperationId", "sourceOrderId", "primaryOrderId",
         "primaryOrderName", "operationCreatedAt", "sourceCancelledAt",
@@ -150,7 +150,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     >`SELECT "sourceOrderId", "idempotencyKey", "marker" FROM "ShippingRefund" WHERE "id" = ${id}`;
     const { sourceOrderId, idempotencyKey: key, marker } = rows[0];
     const parentTxn = txnGid(777);
-    await db.$queryRaw`
+    await db.$executeRaw`
       UPDATE "ShippingRefund" SET
         "currencyCode" = 'USD',
         "plannedShippingMinor" = '1000',
@@ -164,7 +164,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
   /** Freeze an EXECUTE row to PREPARED through a legal QUEUED -> PREPARED. */
   async function insertPrepared(): Promise<{ id: string; sourceOrderId: string; key: string }> {
     const { id, sourceOrderId, key, marker, parentTxn } = await insertFrozen();
-    await db.$queryRaw`
+    await db.$executeRaw`
       UPDATE "ShippingRefund" SET
         "status" = 'PREPARED',
         "documentSha256" = ${HASH64},
@@ -215,7 +215,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     const shop = uniqueShop();
     const key = randomUUID();
     await expect(
-      db.$queryRaw`
+      db.$executeRaw`
         INSERT INTO "ShippingRefund" (
           "id", "shop", "mergeOperationId", "sourceOrderId", "primaryOrderId",
           "primaryOrderName", "operationCreatedAt", "sourceCancelledAt",
@@ -331,6 +331,36 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     await expect(
       db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = '2030-02-02'::timestamptz AT TIME ZONE 'UTC' WHERE "id" = ${rr.id}`,
     ).rejects.toThrow(/terminal/i);
+  });
+
+  // Regression: the old CHECK evaluated to UNKNOWN when sourceCancelledAt and
+  // reasonCode were both NULL on a terminal status, and CHECK treats UNKNOWN
+  // as pass. The corrected CHECK uses COALESCE so every combination below
+  // must fail closed.
+  it("NULL sourceCancelledAt fails closed for NULL, empty and non-exception reasonCode", async () => {
+    for (const reasonCode of [null, "", "OTHER_REASON", "SOME_CODE"]) {
+      await expect(
+        insertRefund({ status: "REVIEW_REQUIRED", reasonCode, sourceCancelledAt: null }),
+      ).rejects.toThrow(/sourceCancelledAt|violates check/i);
+      // QUEUED never tolerates NULL either.
+      await expect(
+        insertRefund({ status: "QUEUED", reasonCode, sourceCancelledAt: null }),
+      ).rejects.toThrow(/sourceCancelledAt|violates check/i);
+    }
+    // The one valid exception stays accepted.
+    const { id } = await insertRefund({
+      status: "REVIEW_REQUIRED",
+      reasonCode: "CANCELLED_AT_INVALID",
+      sourceCancelledAt: null,
+    });
+    expect(await getStatus(id)).toBe("REVIEW_REQUIRED");
+    // Clearing or changing the reasonCode on that NULL-cancelled row must fail.
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET "reasonCode" = NULL WHERE "id" = ${id}`,
+    ).rejects.toThrow();
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET "reasonCode" = 'OTHER' WHERE "id" = ${id}`,
+    ).rejects.toThrow();
   });
 
   it("write-once wire columns can be set once and never changed", async () => {
@@ -601,7 +631,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
       { shop: string; sourceOrderId: string; idempotencyKey: string; marker: string }[]
     >`SELECT "shop", "sourceOrderId", "idempotencyKey", "marker" FROM "ShippingRefund" WHERE "id" = ${first.id}`)[0];
     const clone = async (over: { key?: string; marker?: string; src?: string }) =>
-      db.$queryRaw`
+      db.$executeRaw`
         INSERT INTO "ShippingRefund" (
           "id","shop","mergeOperationId","sourceOrderId","primaryOrderId","primaryOrderName",
           "operationCreatedAt","sourceCancelledAt","lane","status",
@@ -630,7 +660,11 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
   // These alter triggers, so they run inside a separately migrated scratch
   // database that is dropped afterwards — never on the provisioned baseline.
 
-  it("unexpected, missing, disabled and wrongly defined triggers fail closed on a scratch copy", async () => {
+  // NOTE: no DISABLE/ENABLE TRIGGER here — the spec (3.2, 19.2) reserves the
+  // only suspend mechanism for the narrowly controlled fixture helper, and
+  // 5.4.7 scratch checks use only the permitted DROP/CREATE mechanisms.
+  // Disabled-trigger verdicts stay covered by the mocked catalog tests.
+  it("unexpected, missing and wrongly defined triggers fail closed on a scratch copy", async () => {
     await withScratchDatabase(
       preflighted,
       async (scratchUrl) => {
@@ -676,14 +710,6 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
           );
           expect(v.intact).toBe(false);
           expect(v.reasons.map((r) => r.code)).toContain("MISSING");
-
-          // Disabled trigger.
-          v = await withMutated(
-            [`ALTER TABLE "ShippingRefund" DISABLE TRIGGER shippingrefund_transition_guard`],
-            [`ALTER TABLE "ShippingRefund" ENABLE TRIGGER shippingrefund_transition_guard`],
-          );
-          expect(v.intact).toBe(false);
-          expect(v.reasons.map((r) => r.code)).toContain("DISABLED");
 
           // Wrongly defined trigger (function swapped).
           v = await withMutated(

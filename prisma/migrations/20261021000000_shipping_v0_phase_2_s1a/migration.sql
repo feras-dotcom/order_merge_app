@@ -170,10 +170,14 @@ CREATE TABLE "ShippingRefund" (
         AND ("dispatchedAt" IS NULL OR (
             "lane" = 'EXECUTE'
             AND "status" IN ('DISPATCHING','IN_DOUBT','REFUND_RECORDED','VERIFIED','REVIEW_REQUIRED','RESOLVED')))),
-    -- sourceCancelledAt: NULL only on the terminal CANCELLED_AT_INVALID row (A-2).
+    -- sourceCancelledAt: NULL only on the terminal CANCELLED_AT_INVALID row
+    -- (A-2). COALESCE is mandatory: a bare `"reasonCode" = '...'` is NULL when
+    -- reasonCode is NULL, and a CHECK treats UNKNOWN as pass — which would
+    -- silently admit NULL sourceCancelledAt on a terminal row.
     CONSTRAINT "ShippingRefund_sourceCancelledAt_nullable_terminal" CHECK (
         "sourceCancelledAt" IS NOT NULL
-        OR ("reasonCode" = 'CANCELLED_AT_INVALID' AND "status" IN ('REVIEW_REQUIRED','RESOLVED'))),
+        OR ("status" IN ('REVIEW_REQUIRED','RESOLVED')
+            AND COALESCE("reasonCode", '') = 'CANCELLED_AT_INVALID')),
     -- Gate snapshot derived cutoffs and no-retroactivity (N7, NEW-8, I8).
     CONSTRAINT "ShippingRefund_activationCutoff_derived" CHECK (
         "activationCutoffAt" = GREATEST("merchantEpochAt","rolloutEpochAt","switchEpochAt")),
