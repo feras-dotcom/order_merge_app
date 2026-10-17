@@ -20,6 +20,7 @@
       content="Turn eligible repeat orders from the same customer into one fulfillment job."
     />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="MergeShip" />
     <meta property="og:url" content="https://mergeship.app/" />
     <meta
       property="og:image"
@@ -64,18 +65,50 @@
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
-        "@type": "SoftwareApplication",
-        "name": "MergeShip",
-        "url": "https://mergeship.app/",
-        "applicationCategory": "BusinessApplication",
-        "operatingSystem": "Web",
-        "description": "MergeShip automatically combines eligible repeat Shopify orders before fulfillment.",
-        "offers": {
-          "@type": "Offer",
-          "price": "19.00",
-          "priceCurrency": "USD",
-          "description": "30 day free trial, then $19 per month"
-        }
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://mergeship.app/#website",
+            "name": "MergeShip",
+            "url": "https://mergeship.app/",
+            "publisher": {
+              "@id": "https://mergeship.app/#organization"
+            }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://mergeship.app/#organization",
+            "name": "MergeShip",
+            "url": "https://mergeship.app/",
+            "logo": {
+              "@type": "ImageObject",
+              "url": "https://mergeship.app/brand/logo-512.png",
+              "width": 512,
+              "height": 512
+            },
+            "sameAs": ["https://apps.shopify.com/mergeship"]
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://mergeship.app/#software-application",
+            "name": "MergeShip",
+            "url": "https://mergeship.app/",
+            "sameAs": "https://apps.shopify.com/mergeship",
+            "installUrl": "https://apps.shopify.com/mergeship",
+            "provider": {
+              "@id": "https://mergeship.app/#organization"
+            },
+            "applicationCategory": "BusinessApplication",
+            "operatingSystem": "Web",
+            "description": "MergeShip automatically combines eligible repeat Shopify orders before fulfillment.",
+            "offers": {
+              "@type": "Offer",
+              "price": "19.00",
+              "priceCurrency": "USD",
+              "description": "30 day free trial, then $19 per month"
+            }
+          }
+        ]
       }
     </script>
   </head>
