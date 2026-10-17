@@ -323,3 +323,139 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+// ═══ Shipping v0 Phase 2 (docs/SHIPPING-PHASE2-DESIGN.md Revision 3.3) ═══
+// S1-A adds only these four tables plus the canonical triggers; all
+// constraints beyond what Prisma can express live in the
+// 20261021000000_shipping_v0_phase_2_s1a migration. Execution is strictly
+// non-dispatch: the transition trigger has no PREPARED -> DISPATCHING edge.
+
+// Singleton id='control', seeded fully off by the migration (section 4.2).
+model ShippingExecuteControl {
+  id                 String    @id
+  admissionEnabled   Boolean   @default(false)
+  // DB-clock epoch: non-null exactly while its switch is on (SQL CHECK).
+  admissionEnabledAt DateTime?
+  dispatchEnabled    Boolean   @default(false)
+  dispatchEnabledAt  DateTime?
+  globalDailyCap     Int       @default(0)
+  note               String?
+  updatedAt          DateTime  @default(now()) @updatedAt
+}
+
+// Primary key shop: at most one live decision per shop; an empty table means
+// NO shops are approved (section 4.3). Rollforward-only in later stages.
+model ShippingExecuteApproval {
+  shop               String    @id
+  approvedAt         DateTime
+  approvedBy         String
+  note               String?
+  revokedAt          DateTime?
+  // Merchant opt-in epoch snapshotted at approval.
+  merchantOptInEpoch DateTime
+  ackVersion         String
+  ackRecordedAt      DateTime
+  currencyCode       String
+  // Whole minor units as text, '0' or a positive decimal (SQL CHECK).
+  maxRefundMinor     String
+  dailyCap           Int       @default(0)
+  autoApprove        Boolean   @default(false)
+}
+
+// The financial record (section 5.1). CHECKs, triggers and the event journal
+// live in the migration SQL; the S1 insert guard admits only
+// QUEUED | SKIPPED | INELIGIBLE | REVIEW_REQUIRED rows with no evidence.
+model ShippingRefund {
+  id                      String   @id @default(cuid())
+  shop                    String
+  mergeOperationId        String
+  sourceOrderId           String
+  primaryOrderId          String
+  primaryOrderName        String
+  operationCreatedAt      DateTime
+  // NULL only on a terminal CANCELLED_AT_INVALID row (SQL CHECK).
+  sourceCancelledAt       DateTime?
+  lane                    String   // OBSERVE | EXECUTE
+  status                  String   @default("QUEUED")
+  // Gate snapshot (each epoch stored individually).
+  merchantEpochAt         DateTime
+  rolloutEpochAt          DateTime
+  switchEpochAt           DateTime
+  activationCutoffAt      DateTime
+  admissionEpochAt        DateTime
+  admissionCutoffAt       DateTime
+  // EXECUTE rows only; OBSERVE rows must keep it NULL (SQL CHECK).
+  dispatchEpochAtAdmission DateTime?
+  approvalApprovedAt      DateTime
+  approvalOptInEpoch      DateTime
+  approvalAckVersion      String
+  policyKind              String   // 'REFUND_ALL'
+  // Frozen financial facts and the frozen wire contract (write-once).
+  currencyCode            String?
+  plannedShippingMinor    String?
+  parentTransactionId     String?
+  gateway                 String?
+  idempotencyKey          String   @unique
+  marker                  String   @unique
+  documentSha256          String?
+  wireVariables           Json?
+  wireHash                String?
+  mutationVersion         String?
+  preEvidence             Json?
+  preparedAt              DateTime?
+  // Operator wire-hash approval (PREPARED EXECUTE rows only).
+  approvedWireHash        String?
+  approvedAt              DateTime?
+  approvedBy              String?
+  // Dispatch write-ahead evidence — stamped only by PREPARED -> DISPATCHING
+  // (a transition S1 has no edge for; the evidence guard governs first-set).
+  dispatchToken           String?
+  dispatchedAt            DateTime?
+  respondedAt             DateTime?
+  responseKind            String?
+  responseSummary         String?
+  refundId                String?  @unique
+  refundCreatedAt         DateTime?
+  settlementState         String?
+  settlementCheckAt       DateTime?
+  verifiedEvidence        Json?
+  verifiedAt              DateTime?
+  // Ownership: liveness and stale-write fencing only.
+  leaseToken              String?
+  leasedUntil             DateTime?
+  nextCheckAt             DateTime?
+  attempts                Int      @default(0)
+  reasonCode              String?
+  reviewReason            String?
+  resolvedAt              DateTime?
+  resolvedBy              String?
+  resolution              String?
+  resolutionNote          String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @default(now()) @updatedAt
+
+  events                  ShippingRefundEvent[]
+
+  @@unique([shop, sourceOrderId])
+  @@index([status, nextCheckAt])
+  @@index([shop, status])
+  @@index([mergeOperationId])
+  @@index([dispatchedAt])
+}
+
+// Append-only journal (section 5.2). Written only by the event-writer
+// trigger; no UPDATE, DELETE or TRUNCATE. The FK column is shippingRefundId —
+// 'refundId' would mean the Shopify refund GID.
+model ShippingRefundEvent {
+  id               String         @id
+  shippingRefundId String
+  at               DateTime
+  fromStatus       String?
+  toStatus         String
+  actor            String         @default("unknown")
+
+  shippingRefund   ShippingRefund @relation(fields: [shippingRefundId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([shippingRefundId])
+  @@index([at])
+}
