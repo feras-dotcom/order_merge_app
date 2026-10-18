@@ -192,8 +192,11 @@ CREATE TABLE "ShippingRefund" (
         "status" NOT IN ('OBSERVED','ABORTED','SKIPPED','INELIGIBLE') OR "dispatchedAt" IS NULL),
     CONSTRAINT "ShippingRefund_recorded_needs_refundId" CHECK (
         "status" NOT IN ('REFUND_RECORDED','VERIFIED') OR "refundId" IS NOT NULL),
+    -- VERIFIED requires settlementState='SUCCESS' and verifiedAt (5.3).
+    -- COALESCE is mandatory: a bare `"settlementState" = 'SUCCESS'` is NULL
+    -- when settlementState is NULL, and a CHECK treats UNKNOWN as pass.
     CONSTRAINT "ShippingRefund_verified_needs_success" CHECK (
-        "status" <> 'VERIFIED' OR ("settlementState" = 'SUCCESS' AND "verifiedAt" IS NOT NULL)),
+        "status" <> 'VERIFIED' OR (COALESCE("settlementState", '') = 'SUCCESS' AND "verifiedAt" IS NOT NULL)),
     CONSTRAINT "ShippingRefund_resolved_needs_actor" CHECK (
         "status" <> 'RESOLVED' OR ("resolvedBy" IS NOT NULL AND "resolution" IS NOT NULL AND "resolvedAt" IS NOT NULL)),
 
@@ -219,6 +222,9 @@ CREATE TABLE "ShippingRefund" (
             AND "wireVariables"->'input'->'transactions'->0->>'parentId' = "parentTransactionId"
             AND "wireVariables"->'input'->'transactions'->0->>'gateway' IS NOT NULL
             AND "wireVariables"->'input'->'transactions'->0->>'gateway' = "gateway"
+            -- JSON null turns ->> into SQL NULL: a bare `= 'REFUND'` would
+            -- evaluate UNKNOWN and a CHECK would pass it. IS NOT NULL first.
+            AND "wireVariables"->'input'->'transactions'->0->>'kind' IS NOT NULL
             AND "wireVariables"->'input'->'transactions'->0->>'kind' = 'REFUND')),
     CONSTRAINT "ShippingRefund_wire_fullRefund_false" CHECK (
         "wireVariables" IS NULL

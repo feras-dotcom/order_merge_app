@@ -41,6 +41,12 @@ const IDENT = /^[A-Za-z0-9_]+$/;
 
 // Every application table must exist and be empty. `_prisma_migrations` is
 // the only harmless non-application table (handled in the schema scan).
+//
+// G-P0 COMPATIBILITY DELTA (S1-A): the four shipping-refund journal tables
+// join the required schema set. ShippingExecuteControl legitimately holds
+// exactly one fully-off seed row after `migrate deploy` — whitelisted like
+// the AppControl seed below. This delta requires independent acceptance
+// before any further database-backed test; it loosens nothing else.
 const APPLICATION_TABLES = [
   "Session",
   "Settings",
@@ -53,6 +59,10 @@ const APPLICATION_TABLES = [
   "MergeMutationAttempt",
   "WorkerInstance",
   "ShippingAdjustment",
+  "ShippingExecuteControl",
+  "ShippingExecuteApproval",
+  "ShippingRefund",
+  "ShippingRefundEvent",
 ];
 
 export class BootstrapNotAllowedError extends Error {
@@ -299,6 +309,42 @@ export async function bootstrapDisposableDatabase(
           throw new BootstrapNotAllowedError(
             "refusing: AppControl does not hold exactly the fresh migration seed row " +
               "(id='control', all switches off, empty allowlists) — real operator state present.",
+          );
+        }
+        continue;
+      }
+      // G-P0 COMPATIBILITY DELTA (S1-A): the S1-A migration legitimately
+      // seeds ONE ShippingExecuteControl row — the 'control' singleton with
+      // both switches off, both epochs NULL and a zero cap. Whitelist exactly
+      // that state; any enabled switch, stamped epoch, nonzero cap, missing
+      // or extra row is real operator state and refuses the mark.
+      if (t.nspname === appSchema && t.relname === "ShippingExecuteControl") {
+        const rows = await tx.$queryRaw<
+          {
+            id: string;
+            admissionEnabled: boolean;
+            admissionEnabledAt: unknown;
+            dispatchEnabled: boolean;
+            dispatchEnabledAt: unknown;
+            globalDailyCap: number;
+          }[]
+        >(
+          Prisma.sql`SELECT "id", "admissionEnabled", "admissionEnabledAt",
+                     "dispatchEnabled", "dispatchEnabledAt", "globalDailyCap"
+                     FROM ${qualified}`,
+        );
+        const seed =
+          rows.length === 1 &&
+          rows[0].id === "control" &&
+          !rows[0].admissionEnabled &&
+          !rows[0].dispatchEnabled &&
+          rows[0].admissionEnabledAt == null &&
+          rows[0].dispatchEnabledAt == null &&
+          rows[0].globalDailyCap === 0;
+        if (!seed) {
+          throw new BootstrapNotAllowedError(
+            "refusing: ShippingExecuteControl does not hold exactly the fresh migration seed row " +
+              "(id='control', admission and dispatch off, no epochs, zero cap) — real operator state present.",
           );
         }
         continue;

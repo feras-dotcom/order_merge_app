@@ -200,7 +200,8 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
 
   it("admits only the four claim statuses on insert", async () => {
     for (const status of ["PREPARED", "OBSERVED", "DISPATCHING", "IN_DOUBT", "REFUND_RECORDED", "VERIFIED", "ABORTED", "RESOLVED"]) {
-      await expect(insertRefund({ status })).rejects.toThrow();
+      // The insert guard owns this refusal, not a CHECK.
+      await expect(insertRefund({ status }), status).rejects.toThrow(/illegal initial status/i);
     }
     for (const status of ["QUEUED", "SKIPPED", "INELIGIBLE", "REVIEW_REQUIRED"]) {
       const { id } = await insertRefund({ status });
@@ -243,8 +244,69 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
           'v1', 'REFUND_ALL', ${key}, ${"MS-SHIPREFUND-" + key}, 'tok'
         )
       `,
-    ).rejects.toThrow(/evidence|initial status/i);
+    ).rejects.toThrow(/insert carries.*evidence/i);
     expect(id).toBeTruthy();
+  });
+
+  it("rejects an insert carrying any of the 28 evidence columns (representative set)", async () => {
+    // A single non-NULL evidence column in an otherwise claim-valid insert.
+    // The guard groups them into six families; one representative per family
+    // plus the frozen-wire group proves the guard sees the whole surface.
+    const evidences: [string, string][] = [
+      ["dispatchToken", `'${randomUUID()}'`],
+      ["dispatchedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["respondedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["refundId", `'${refundGid(77)}'`],
+      ["refundCreatedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["settlementState", `'SUCCESS'`],
+      ["settledAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["verifiedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["approvedWireHash", `'${HASH64}'`],
+      ["approvedBy", `'op'`],
+      ["approvedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["preparedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["wireVariables", `'{"idempotencyKey":"k","input":{}}'::jsonb`],
+      ["wireHash", `'${HASH64}'`],
+      ["documentSha256", `'${HASH64}'`],
+      ["mutationVersion", `'refundCreate@2026-04'`],
+      ["resolvedBy", `'op'`],
+      ["resolution", `'x'`],
+      ["resolvedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+    ];
+    for (const [col, val] of evidences) {
+      const key = randomUUID();
+      await expect(
+        db.$executeRawUnsafe(
+          `INSERT INTO "ShippingRefund" (
+            "id", "shop", "mergeOperationId", "sourceOrderId", "primaryOrderId",
+            "primaryOrderName", "operationCreatedAt", "sourceCancelledAt",
+            "lane", "status",
+            "merchantEpochAt", "rolloutEpochAt", "switchEpochAt",
+            "activationCutoffAt", "admissionEpochAt", "admissionCutoffAt",
+            "dispatchEpochAtAdmission",
+            "approvalApprovedAt", "approvalOptInEpoch", "approvalAckVersion",
+            "policyKind", "idempotencyKey", "marker", "${col}"
+          ) VALUES (
+            '${"sr_evi_" + randomUUID().replace(/-/g, "")}', '${uniqueShop()}',
+            '${"mo_" + randomUUID().replace(/-/g, "")}', '${oid(3)}', '${oid(4)}',
+            '#P', '2030-01-06'::timestamptz AT TIME ZONE 'UTC',
+            '2030-01-06'::timestamptz AT TIME ZONE 'UTC',
+            'OBSERVE', 'QUEUED',
+            '2030-01-01'::timestamptz AT TIME ZONE 'UTC',
+            '2030-01-02'::timestamptz AT TIME ZONE 'UTC',
+            '2030-01-03'::timestamptz AT TIME ZONE 'UTC',
+            '2030-01-03'::timestamptz AT TIME ZONE 'UTC',
+            '2030-01-04'::timestamptz AT TIME ZONE 'UTC',
+            '2030-01-05'::timestamptz AT TIME ZONE 'UTC',
+            NULL,
+            '2030-01-05'::timestamptz AT TIME ZONE 'UTC',
+            '2030-01-01'::timestamptz AT TIME ZONE 'UTC',
+            'v1', 'REFUND_ALL', '${key}', 'MS-SHIPREFUND-${key}', ${val}
+          )`,
+        ),
+        col,
+      ).rejects.toThrow(/insert carries.*evidence/i);
+    }
   });
 
   // ── Transition graph incl. the S1 non-dispatch proof (19.3 item 4, I27) ──
@@ -262,6 +324,35 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     await expect(
       db.$executeRaw`UPDATE "ShippingRefund" SET "status" = 'PREPARED' WHERE "id" = ${id}`,
     ).rejects.toThrow(/illegal transition/i);
+  });
+
+  it("QUEUED -> OBSERVED succeeds on the OBSERVE lane, then OBSERVED is immutable", async () => {
+    const { id } = await insertRefund({ lane: "OBSERVE" });
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "status" = 'OBSERVED' WHERE "id" = ${id}`;
+    expect(await getStatus(id)).toBe("OBSERVED");
+    // OBSERVED is terminal: even an ordinary bookkeeping update raises.
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET "attempts" = "attempts" + 1 WHERE "id" = ${id}`,
+    ).rejects.toThrow(/terminal/i);
+    // ...and the transition was journaled exactly once.
+    const ev = await db.$queryRaw<{ fromStatus: string; toStatus: string }[]>`
+      SELECT "fromStatus", "toStatus" FROM "ShippingRefundEvent"
+      WHERE "shippingRefundId" = ${id} AND "toStatus" = 'OBSERVED'`;
+    expect(ev).toEqual([{ fromStatus: "QUEUED", toStatus: "OBSERVED" }]);
+  });
+
+  it("PREPARED -> DISPATCHING is refused even with dispatch evidence in the same update", async () => {
+    const { id } = await insertPrepared();
+    // The exact update the evidence-integrity guard permits: only the
+    // transition guard may refuse it (the other guards admit this shape).
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET
+        "status" = 'DISPATCHING',
+        "dispatchToken" = ${randomUUID()},
+        "dispatchedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+        WHERE "id" = ${id}`,
+    ).rejects.toThrow(/illegal transition/i);
+    expect(await getStatus(id)).toBe("PREPARED");
   });
 
   it("accepts the legal S1 edges and rejects arbitrary pairs", async () => {
@@ -333,6 +424,53 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     ).rejects.toThrow(/terminal/i);
   });
 
+  it("A-2: NULL -> value is refused on the REVIEW_REQUIRED(CANCELLED_AT_INVALID) row itself", async () => {
+    const { id } = await insertRefund({
+      status: "REVIEW_REQUIRED",
+      reasonCode: "CANCELLED_AT_INVALID",
+      sourceCancelledAt: null,
+    });
+    // Alone — the frozen-columns guard owns this refusal (the column is in
+    // the immutable group: NULL stays NULL forever).
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = '2030-02-02'::timestamptz AT TIME ZONE 'UTC' WHERE "id" = ${id}`,
+    ).rejects.toThrow(/immutable column/i);
+    // Combined with the legal REVIEW_REQUIRED -> RESOLVED edge in one update.
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET
+        "status" = 'RESOLVED', "resolvedBy" = 'op', "resolution" = 'void',
+        "resolvedAt" = clock_timestamp() AT TIME ZONE 'UTC',
+        "sourceCancelledAt" = '2030-02-02'::timestamptz AT TIME ZONE 'UTC'
+        WHERE "id" = ${id}`,
+    ).rejects.toThrow(/immutable column/i);
+    // Neither failed update moved anything.
+    expect(await getStatus(id)).toBe("REVIEW_REQUIRED");
+    const row = await db.$queryRaw<{ s: Date | null }[]>`
+      SELECT "sourceCancelledAt" AS s FROM "ShippingRefund" WHERE "id" = ${id}`;
+    expect(row[0].s).toBeNull();
+    // And a PREPARED row cannot move it either.
+    const p = await insertPrepared();
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = '2030-02-02'::timestamptz AT TIME ZONE 'UTC' WHERE "id" = ${p.id}`,
+    ).rejects.toThrow(/immutable column/i);
+  });
+
+  it("restating an identical sourceCancelledAt succeeds and writes no event", async () => {
+    const { id } = await insertRefund(); // sourceCancelledAt = 2030-01-06
+    const before = await eventCount(id);
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = '2030-01-06'::timestamptz AT TIME ZONE 'UTC' WHERE "id" = ${id}`;
+    // NULL -> NULL on the terminal exception row is likewise a no-op write.
+    const rr = await insertRefund({
+      status: "REVIEW_REQUIRED",
+      reasonCode: "CANCELLED_AT_INVALID",
+      sourceCancelledAt: null,
+    });
+    const before2 = await eventCount(rr.id);
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = NULL WHERE "id" = ${rr.id}`;
+    expect(await eventCount(id)).toBe(before);
+    expect(await eventCount(rr.id)).toBe(before2);
+  });
+
   // Regression: the old CHECK evaluated to UNKNOWN when sourceCancelledAt and
   // reasonCode were both NULL on a terminal status, and CHECK treats UNKNOWN
   // as pass. The corrected CHECK uses COALESCE so every combination below
@@ -372,6 +510,39 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     await expect(
       db.$executeRaw`UPDATE "ShippingRefund" SET "plannedShippingMinor" = NULL WHERE "id" = ${id}`,
     ).rejects.toThrow(/write-once/i);
+  });
+
+  it("the write-once family binds representative columns, not just one", async () => {
+    // NULL -> value once (the frozen facts path), then any second write or
+    // NULL-return must fail with the write-once error — per column.
+    const cases: [string, string, string][] = [
+      ["currencyCode", `'USD'`, `'EUR'`],
+      ["plannedShippingMinor", `'1000'`, `'2000'`],
+      ["parentTransactionId", `'${txnGid(1)}'`, `'${txnGid(2)}'`],
+      ["gateway", `'bogus'`, `'other'`],
+    ];
+    for (const [col, first, second] of cases) {
+      const { id } = await insertRefund();
+      await db.$executeRawUnsafe(
+        `UPDATE "ShippingRefund" SET "${col}" = ${first} WHERE "id" = '${id}'`,
+      );
+      // restating the same value stays legal (IS DISTINCT FROM is false)
+      await db.$executeRawUnsafe(
+        `UPDATE "ShippingRefund" SET "${col}" = ${first} WHERE "id" = '${id}'`,
+      );
+      await expect(
+        db.$executeRawUnsafe(
+          `UPDATE "ShippingRefund" SET "${col}" = ${second} WHERE "id" = '${id}'`,
+        ),
+        `${col} second write`,
+      ).rejects.toThrow(/write-once/i);
+      await expect(
+        db.$executeRawUnsafe(
+          `UPDATE "ShippingRefund" SET "${col}" = NULL WHERE "id" = '${id}'`,
+        ),
+        `${col} NULL return`,
+      ).rejects.toThrow(/write-once/i);
+    }
   });
 
   // ── Evidence integrity (5.4.6, I28) ──
@@ -503,6 +674,59 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     }
   });
 
+  it("decimal format and positivity are enforced even when amounts are equal", async () => {
+    // Setting BOTH amounts to the same bad value means the amount-equality
+    // CHECK cannot mask the format/positivity CHECK — each rejection below
+    // must come from ShippingRefund_wire_amount_decimal itself.
+    const withAmount = (amount: string) => (w: any) => ({
+      ...w,
+      input: {
+        ...w.input,
+        shipping: { ...w.input.shipping, amount },
+        transactions: [{ ...w.input.transactions[0], amount }],
+      },
+    });
+    for (const bad of ["0.00", "0", "10.00001", "007.5", "-1.00", "+1.00", "1e3", "10.", ".5", "1,000.00", " 10.00"]) {
+      const r = await insertFrozen();
+      const wv = withAmount(bad)(wireFor(r.sourceOrderId, r.key, r.marker, r.parentTxn));
+      await expect(setWire(r.id, wv), `amount=${bad}`).rejects.toThrow(/wire_amount_decimal/i);
+    }
+    for (const good of ["0.01", "1", "10.0000", "123456789.1234"]) {
+      const r = await insertFrozen();
+      const wv = withAmount(good)(wireFor(r.sourceOrderId, r.key, r.marker, r.parentTxn));
+      await setWire(r.id, wv);
+    }
+  });
+
+  it("B2: the transaction kind CHECK rejects NULL, missing, non-string and wrong values", async () => {
+    const withTxn = (txn: Record<string, unknown>) => (w: any) => ({
+      ...w,
+      input: { ...w.input, transactions: [txn] },
+    });
+    const mkTxn = (r: { sourceOrderId: string; parentTxn: string }, kind: unknown) => ({
+      orderId: r.sourceOrderId, parentId: r.parentTxn, gateway: "bogus",
+      kind, amount: "10.00",
+    });
+    // kind: JSON null — the key set is satisfied (txn ? 'kind'), so only the
+    // NULL-safe kind CHECK can refuse. This is the B2 regression.
+    for (const kind of [null, 5, true, "refund", "CAPTURE", ""]) {
+      const r = await insertFrozen();
+      const wv = withTxn(mkTxn(r, kind))(wireFor(r.sourceOrderId, r.key, r.marker, r.parentTxn));
+      await expect(setWire(r.id, wv), `kind=${JSON.stringify(kind)}`).rejects.toThrow(
+        /wire_txn_fields/i,
+      );
+    }
+    // Missing key — the shape trigger owns this refusal.
+    const r = await insertFrozen();
+    const txn = mkTxn(r, "REFUND") as Record<string, unknown>;
+    delete txn.kind;
+    const wv = withTxn(txn)(wireFor(r.sourceOrderId, r.key, r.marker, r.parentTxn));
+    await expect(setWire(r.id, wv)).rejects.toThrow(/transaction keys/i);
+    // The legitimate value still lands.
+    const r2 = await insertFrozen();
+    await setWire(r2.id, wireFor(r2.sourceOrderId, r2.key, r2.marker, r2.parentTxn));
+  });
+
   it("accepts the exact approved wire shape on a real PREPARED transition", async () => {
     // insertPrepared already exercises QUEUED -> PREPARED with the full valid
     // wire payload; assert the row landed with its frozen facts intact.
@@ -531,11 +755,29 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
       await tx.$executeRaw`UPDATE "ShippingRefund" SET "status" = 'SKIPPED' WHERE "id" = ${id}`;
     });
     expect(await eventCount(id)).toBe(2);
+    // Select by toStatus, not timestamp: "at" has millisecond precision and
+    // two events in the same transaction window may tie.
     const ev2 = await db.$queryRaw<
       { fromStatus: string | null; toStatus: string; actor: string }[]
     >`SELECT "fromStatus", "toStatus", "actor" FROM "ShippingRefundEvent"
-      WHERE "shippingRefundId" = ${id} ORDER BY "at" DESC LIMIT 1`;
+      WHERE "shippingRefundId" = ${id} AND "toStatus" = 'SKIPPED'`;
+    expect(ev2).toHaveLength(1);
     expect(ev2[0]).toMatchObject({ fromStatus: "QUEUED", toStatus: "SKIPPED", actor: "operator-1" });
+  });
+
+  it("the event writer stamps the UTC wall clock under a non-UTC session", async () => {
+    const { id } = await insertRefund();
+    await db.$transaction(async (tx) => {
+      // Same discipline the other real suites run under (Asia/Tokyo).
+      await tx.$executeRawUnsafe(`SET LOCAL TIME ZONE 'Asia/Tokyo'`);
+      await tx.$executeRaw`UPDATE "ShippingRefund" SET "status" = 'SKIPPED' WHERE "id" = ${id}`;
+      const rows = await tx.$queryRaw<{ at: Date; nowUtc: Date }[]>`
+        SELECT e."at", clock_timestamp() AT TIME ZONE 'UTC' AS "nowUtc"
+        FROM "ShippingRefundEvent" e
+        WHERE e."shippingRefundId" = ${id} AND e."toStatus" = 'SKIPPED'`;
+      // If the writer used session-local now() the stamp would sit ~9h off.
+      expect(Math.abs(rows[0].at.getTime() - rows[0].nowUtc.getTime())).toBeLessThan(10_000);
+    });
   });
 
   it("journal rows cannot be updated or deleted; journal tables cannot be truncated", async () => {
@@ -549,10 +791,20 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     await expect(
       db.$executeRaw`DELETE FROM "ShippingRefundEvent" WHERE "shippingRefundId" = ${id}`,
     ).rejects.toThrow(/forbidden/i);
-    // TRUNCATE — including through CASCADE from a referencing table — raises.
-    await expect(db.$executeRawUnsafe(`TRUNCATE "ShippingRefund"`)).rejects.toThrow(/forbidden/i);
+    // TRUNCATE refusals come from two distinct layers. PostgreSQL checks
+    // foreign-key references BEFORE firing BEFORE TRUNCATE triggers, so a
+    // plain truncate of the parent is refused by the FK dependency — the
+    // mandatory no-TRUNCATE trigger never gets to speak. Naming the
+    // referencing table (or CASCADE, which pulls it in) satisfies the FK
+    // check and then the trigger raises 'forbidden'.
+    await expect(db.$executeRawUnsafe(`TRUNCATE "ShippingRefund"`)).rejects.toThrow(
+      /cannot truncate a table referenced in a foreign key constraint/i,
+    );
     await expect(
       db.$executeRawUnsafe(`TRUNCATE "ShippingRefundEvent"`),
+    ).rejects.toThrow(/forbidden/i);
+    await expect(
+      db.$executeRawUnsafe(`TRUNCATE "ShippingRefund", "ShippingRefundEvent"`),
     ).rejects.toThrow(/forbidden/i);
     await expect(
       db.$executeRawUnsafe(`TRUNCATE "ShippingRefund" CASCADE`),
@@ -592,12 +844,62 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     ).rejects.toThrow();
   });
 
+  it("safe control-state changes commit, and ordered violations roll back", async () => {
+    const ROLLBACK = "__rollback__";
+    // Positive path: admission then dispatch, each with its epoch — legal.
+    // The tx is rolled back so the seeded singleton stays fully off.
+    await expect(
+      db.$transaction(async (tx) => {
+        await tx.$executeRaw`UPDATE "ShippingExecuteControl" SET
+          "admissionEnabled" = true,
+          "admissionEnabledAt" = clock_timestamp() AT TIME ZONE 'UTC'
+          WHERE "id" = 'control'`;
+        await tx.$executeRaw`UPDATE "ShippingExecuteControl" SET
+          "dispatchEnabled" = true,
+          "dispatchEnabledAt" = clock_timestamp() AT TIME ZONE 'UTC'
+          WHERE "id" = 'control'`;
+        throw new Error(ROLLBACK);
+      }),
+    ).rejects.toThrow(ROLLBACK);
+    // Order violation: with dispatch on, admission cannot drop first.
+    await expect(
+      db.$transaction(async (tx) => {
+        await tx.$executeRaw`UPDATE "ShippingExecuteControl" SET
+          "admissionEnabled" = true,
+          "admissionEnabledAt" = clock_timestamp() AT TIME ZONE 'UTC'
+          WHERE "id" = 'control'`;
+        await tx.$executeRaw`UPDATE "ShippingExecuteControl" SET
+          "dispatchEnabled" = true,
+          "dispatchEnabledAt" = clock_timestamp() AT TIME ZONE 'UTC'
+          WHERE "id" = 'control'`;
+        await tx.$executeRaw`UPDATE "ShippingExecuteControl" SET
+          "admissionEnabled" = false, "admissionEnabledAt" = NULL
+          WHERE "id" = 'control'`;
+      }),
+    ).rejects.toThrow();
+    // Epoch discipline: the epoch cannot go NULL while the switch stays on.
+    await expect(
+      db.$transaction(async (tx) => {
+        await tx.$executeRaw`UPDATE "ShippingExecuteControl" SET
+          "admissionEnabled" = true,
+          "admissionEnabledAt" = clock_timestamp() AT TIME ZONE 'UTC'
+          WHERE "id" = 'control'`;
+        await tx.$executeRaw`UPDATE "ShippingExecuteControl" SET
+          "admissionEnabledAt" = NULL WHERE "id" = 'control'`;
+      }),
+    ).rejects.toThrow();
+    // The singleton is untouched — still the fully-off seed.
+    const rows = await db.$queryRaw<{ admissionEnabled: boolean; dispatchEnabled: boolean }[]>`
+      SELECT "admissionEnabled", "dispatchEnabled" FROM "ShippingExecuteControl" WHERE "id" = 'control'`;
+    expect(rows).toEqual([{ admissionEnabled: false, dispatchEnabled: false }]);
+  });
+
   it("approval format constraints hold", async () => {
     const base = {
       approvedAt: "2030-01-01", approvedBy: "op", merchantOptInEpoch: "2030-01-01",
       ackVersion: "v1", ackRecordedAt: "2030-01-01", currencyCode: "USD",
     };
-    for (const bad of ["", "00", "-1", "1.5", "abc", "1e3"]) {
+    for (const bad of ["", "00", "01", "-1", "1.5", "abc", "1e3", "9".repeat(41)]) {
       await expect(
         db.$executeRaw`INSERT INTO "ShippingExecuteApproval"
           ("shop","approvedAt","approvedBy","merchantOptInEpoch","ackVersion","ackRecordedAt","currencyCode","maxRefundMinor")
@@ -606,7 +908,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
             ${base.ackRecordedAt}::timestamptz AT TIME ZONE 'UTC', 'USD', ${bad})`,
       ).rejects.toThrow();
     }
-    for (const good of ["0", "1", "500000"]) {
+    for (const good of ["0", "1", "500000", "9".repeat(40)]) {
       const shop = uniqueShop();
       await db.$executeRaw`INSERT INTO "ShippingExecuteApproval"
         ("shop","approvedAt","approvedBy","merchantOptInEpoch","ackVersion","ackRecordedAt","currencyCode","maxRefundMinor")
@@ -731,5 +1033,141 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
         }
       },
     );
+  }, 180_000);
+
+  // ── Constraint deployment (non-destructive; main database) ──
+  // Text + predicate proof that the deployed CHECKs are the NULL-safe forms.
+  // This reads pg_constraint only — no writes.
+
+  it("the deployed verified_needs_success and wire_txn_fields CHECKs are NULL-safe", async () => {
+    const defs = await db.$queryRaw<{ conname: string; def: string }[]>`
+      SELECT conname, pg_get_constraintdef(oid) AS def
+      FROM pg_constraint
+      WHERE conrelid = '"ShippingRefund"'::regclass
+        AND conname IN ('ShippingRefund_verified_needs_success', 'ShippingRefund_wire_txn_fields')`;
+    const byName = Object.fromEntries(defs.map((d) => [d.conname, d.def]));
+    expect(byName["ShippingRefund_verified_needs_success"]).toMatch(/COALESCE/i);
+    expect(byName["ShippingRefund_wire_txn_fields"]).toMatch(/kind.+IS NOT NULL/is);
+    // Predicate proof against real SQL: the VERIFIED clause is FALSE —
+    // never UNKNOWN-pass — when settlementState is NULL.
+    const p = await db.$queryRaw<{ passes: boolean | null }[]>`
+      SELECT (('VERIFIED'::text <> 'VERIFIED') OR
+              (COALESCE(NULL::text, '') = 'SUCCESS' AND NULL::timestamp IS NOT NULL)) AS passes`;
+    expect(p[0].passes).toBe(false);
+    // A NULL JSON kind turns ->> into SQL NULL; the fixed CHECK's IS NOT NULL
+    // guard makes the conjunction FALSE rather than UNKNOWN.
+    const k = await db.$queryRaw<{ passes: boolean | null }[]>`
+      SELECT (NULLIF('x','x')::jsonb IS NULL OR
+              (true AND '{"kind": null}'::jsonb->'kind' IS NOT NULL
+               AND '{"kind": null}'::jsonb->>'kind' = 'REFUND')) AS passes`;
+    expect(k[0].passes).toBe(false);
+  });
+
+  // ── Post-dispatch enforcement on a fixture-isolated scratch database ──
+  // The S1 transition graph can never manufacture a DISPATCHING or
+  // REFUND_RECORDED row, so enforcement at those statuses is proven on a
+  // scratch database whose insert guard is dropped for the fixture rows.
+  // This exercises only the permitted DROP/CREATE catalog mechanisms of
+  // 5.4.7 — no trigger disabling, no session_replication_role.
+
+  const insertPostDispatchRow = async (
+    client: PrismaClient,
+    status: "DISPATCHING" | "REFUND_RECORDED",
+  ): Promise<string> => {
+    const id = `sr_pd_${randomUUID().replace(/-/g, "")}`;
+    const shop = uniqueShop();
+    const key = randomUUID();
+    const sourceOrderId = oid(6000 + Math.floor(Math.random() * 1e9));
+    const parentTxn = txnGid(888);
+    const marker = "MS-SHIPREFUND-" + key;
+    const wv = JSON.stringify(wireFor(sourceOrderId, key, marker, parentTxn)).replace(/'/g, "''");
+    await client.$executeRawUnsafe(
+      `INSERT INTO "ShippingRefund" (
+        "id","shop","mergeOperationId","sourceOrderId","primaryOrderId","primaryOrderName",
+        "operationCreatedAt","sourceCancelledAt","lane","status",
+        "merchantEpochAt","rolloutEpochAt","switchEpochAt","activationCutoffAt",
+        "admissionEpochAt","admissionCutoffAt","dispatchEpochAtAdmission",
+        "approvalApprovedAt","approvalOptInEpoch","approvalAckVersion",
+        "policyKind","idempotencyKey","marker",
+        "currencyCode","plannedShippingMinor","parentTransactionId","gateway",
+        "wireVariables","wireHash","documentSha256","mutationVersion","preparedAt",
+        "dispatchToken","dispatchedAt","refundId","respondedAt"
+      ) VALUES (
+        '${id}','${shop}','${"mo_" + randomUUID().replace(/-/g, "")}','${sourceOrderId}','${oid(9100)}','#P',
+        '2030-01-06'::timestamptz AT TIME ZONE 'UTC','2030-01-06'::timestamptz AT TIME ZONE 'UTC',
+        'EXECUTE','${status}',
+        '2030-01-01'::timestamptz AT TIME ZONE 'UTC','2030-01-02'::timestamptz AT TIME ZONE 'UTC',
+        '2030-01-03'::timestamptz AT TIME ZONE 'UTC','2030-01-03'::timestamptz AT TIME ZONE 'UTC',
+        '2030-01-04'::timestamptz AT TIME ZONE 'UTC','2030-01-05'::timestamptz AT TIME ZONE 'UTC',
+        '2030-01-02'::timestamptz AT TIME ZONE 'UTC',
+        '2030-01-05'::timestamptz AT TIME ZONE 'UTC','2030-01-01'::timestamptz AT TIME ZONE 'UTC',
+        'v1','REFUND_ALL','${key}','${marker}',
+        'USD','1000','${parentTxn}','bogus',
+        '${wv}'::jsonb,'${HASH64}','${HASH64}','refundCreate@2026-04',
+        '2030-01-07'::timestamptz AT TIME ZONE 'UTC',
+        '${randomUUID()}','2030-01-08'::timestamptz AT TIME ZONE 'UTC',
+        ${status === "REFUND_RECORDED" ? `'${refundGid(9)}'` : "NULL"},'2030-01-08'::timestamptz AT TIME ZONE 'UTC'
+      )`,
+    );
+    return id;
+  };
+
+  it("B1: the VERIFIED CHECK rejects NULL and non-SUCCESS settlement on a legal edge (scratch)", async () => {
+    await withScratchDatabase(preflighted, async (scratchUrl) => {
+      execSync("npx prisma migrate deploy", {
+        env: { ...process.env, DATABASE_URL: scratchUrl },
+        stdio: "pipe",
+      });
+      const sdb = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+      try {
+        // Drop the insert guard only long enough to place the fixture row;
+        // it is restored before the scratch is dropped.
+        await sdb.$executeRawUnsafe(
+          `DROP TRIGGER shippingrefund_insert_guard ON "ShippingRefund"`,
+        );
+        const id = await insertPostDispatchRow(sdb, "REFUND_RECORDED");
+        // Legal edge REFUND_RECORDED -> VERIFIED: the only layer that can
+        // refuse these updates is the CHECK itself.
+        await expect(
+          sdb.$executeRaw`UPDATE "ShippingRefund" SET
+            "status" = 'VERIFIED',
+            "verifiedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+            WHERE "id" = ${id}`,
+        ).rejects.toThrow(/verified_needs_success/i);            // settlementState NULL
+        await expect(
+          sdb.$executeRaw`UPDATE "ShippingRefund" SET
+            "status" = 'VERIFIED', "settlementState" = 'FAILED',
+            "verifiedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+            WHERE "id" = ${id}`,
+        ).rejects.toThrow(/verified_needs_success/i);            // non-SUCCESS
+        await expect(
+          sdb.$executeRaw`UPDATE "ShippingRefund" SET
+            "status" = 'VERIFIED', "settlementState" = 'SUCCESS'
+            WHERE "id" = ${id}`,
+        ).rejects.toThrow(/verified_needs_success/i);            // verifiedAt NULL
+        // The valid combination still lands and journals the transition.
+        await sdb.$executeRaw`UPDATE "ShippingRefund" SET
+          "status" = 'VERIFIED', "settlementState" = 'SUCCESS',
+          "verifiedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+          WHERE "id" = ${id}`;
+        const st = await sdb.$queryRaw<{ status: string }[]>`
+          SELECT "status" FROM "ShippingRefund" WHERE "id" = ${id}`;
+        expect(st[0].status).toBe("VERIFIED");
+        const ev = await sdb.$queryRaw<{ toStatus: string }[]>`
+          SELECT "toStatus" FROM "ShippingRefundEvent"
+          WHERE "shippingRefundId" = ${id} AND "toStatus" = 'VERIFIED'`;
+        expect(ev).toHaveLength(1);
+        // Post-dispatch immutability still binds: sourceCancelledAt cannot
+        // move on a DISPATCHING row either.
+        const did = await insertPostDispatchRow(sdb, "DISPATCHING");
+        await expect(
+          sdb.$executeRaw`UPDATE "ShippingRefund" SET
+            "sourceCancelledAt" = '2030-03-01'::timestamptz AT TIME ZONE 'UTC'
+            WHERE "id" = ${did}`,
+        ).rejects.toThrow(/immutable column/i);
+      } finally {
+        await sdb.$disconnect();
+      }
+    });
   }, 180_000);
 });

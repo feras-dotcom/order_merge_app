@@ -39,6 +39,9 @@ const APP_TABLES = [
   "Session", "Settings", "AppControl", "ProcessedWebhook", "MergeClaim",
   "MergeRecord", "MergeOperation", "MergeOrderLock", "MergeMutationAttempt",
   "WorkerInstance", "ShippingAdjustment",
+  // S1-A journal tables (G-P0 compatibility delta).
+  "ShippingExecuteControl", "ShippingExecuteApproval",
+  "ShippingRefund", "ShippingRefundEvent",
 ];
 
 interface FakeCfg {
@@ -56,6 +59,7 @@ interface FakeCfg {
   userTables?: { nspname: string; relname: string }[];
   counts?: Record<string, number>;
   appControlRows?: any[];
+  shippingControlRows?: any[];
 }
 
 /** Fake PrismaClient driven by fixtures; records every read and write. */
@@ -129,6 +133,10 @@ function fakeDb(cfg: FakeCfg, seq?: string[]) {
         tag("q:appcontrol");
         return cfg.appControlRows ?? [SEED_CONTROL_ROW];
       }
+      if (/FROM "([^"]+)"\."ShippingExecuteControl"/.test(sql)) {
+        tag("q:shipcontrol");
+        return cfg.shippingControlRows ?? [SEED_SHIPPING_CONTROL_ROW];
+      }
       throw new Error(`unmocked query: ${sql}`);
     },
     $queryRawUnsafe: async (sql: string) => {
@@ -159,6 +167,16 @@ const SEED_CONTROL_ROW = {
   shippingAdjustmentsEnabled: false,
   shippingAllowShops: [],
   shippingEnabledAt: null,
+};
+
+/** The one legitimate S1-A migration seed: fully off, no epochs, zero cap. */
+const SEED_SHIPPING_CONTROL_ROW = {
+  id: "control",
+  admissionEnabled: false,
+  admissionEnabledAt: null,
+  dispatchEnabled: false,
+  dispatchEnabledAt: null,
+  globalDailyCap: 0,
 };
 
 /** A healthy disposable database: all app tables in public, everything empty. */
@@ -1058,6 +1076,7 @@ describe("suite-level safety regressions", () => {
     "tests/postgres-stores.test.ts",
     "tests/shipping-shadow-pg.test.ts",
     "tests/two-process.test.ts",
+    "tests/shipping-refund-schema-pg.test.ts",
   ];
 
   it("every destructive suite runs preflightDisposableDatabase BEFORE its first migration, TRUNCATE or write", () => {
@@ -1200,6 +1219,39 @@ describe("bootstrapDisposableDatabase", () => {
     });
     await expect(bootstrapDisposableDatabase(extra, opts())).rejects.toThrow(/AppControl/);
     expect(w2).toHaveLength(0);
+  });
+
+  it("accepts exactly the fresh ShippingExecuteControl seed — and refuses every deviation", async () => {
+    // The legitimate fresh seed is covered by every cleanDb() success test;
+    // here each deviation must refuse with zero marker writes.
+    const deviations: { label: string; rows: any[] }[] = [
+      { label: "missing seed", rows: [] },
+      { label: "extra row beside the seed", rows: [SEED_SHIPPING_CONTROL_ROW, { ...SEED_SHIPPING_CONTROL_ROW, id: "control" }] },
+      { label: "wrong singleton id", rows: [{ ...SEED_SHIPPING_CONTROL_ROW, id: "other" }] },
+      { label: "admission enabled", rows: [{ ...SEED_SHIPPING_CONTROL_ROW, admissionEnabled: true }] },
+      { label: "dispatch enabled", rows: [{ ...SEED_SHIPPING_CONTROL_ROW, dispatchEnabled: true }] },
+      { label: "admission epoch stamped", rows: [{ ...SEED_SHIPPING_CONTROL_ROW, admissionEnabledAt: new Date() }] },
+      { label: "dispatch epoch stamped", rows: [{ ...SEED_SHIPPING_CONTROL_ROW, dispatchEnabledAt: new Date() }] },
+      { label: "nonzero global cap", rows: [{ ...SEED_SHIPPING_CONTROL_ROW, globalDailyCap: 5 }] },
+    ];
+    for (const d of deviations) {
+      const { db, writes } = fakeDb({ ...cleanDb(), shippingControlRows: d.rows });
+      await expect(bootstrapDisposableDatabase(db, opts()), d.label).rejects.toThrow(
+        /ShippingExecuteControl/,
+      );
+      expect(writes, d.label).toHaveLength(0);
+    }
+  });
+
+  it("refuses populated S1-A journal and approval tables", async () => {
+    for (const table of ["ShippingExecuteApproval", "ShippingRefund", "ShippingRefundEvent"]) {
+      const { db, writes } = fakeDb({
+        ...cleanDb(),
+        counts: { [`public.${table}`]: 1 },
+      });
+      await expect(bootstrapDisposableDatabase(db, opts()), table).rejects.toThrow(/populated/);
+      expect(writes, table).toHaveLength(0);
+    }
   });
 
   it("refuses an unnameable object instead of silently skipping it", async () => {

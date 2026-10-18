@@ -266,7 +266,7 @@ export function compareTriggerCatalog(
   if (sessionReplicationRole !== "origin") {
     reasons.push({
       code: "NON_ORIGIN_ROLE",
-      detail: `session_replication_role is '${sessionReplicationRole}', expected 'origin'`,
+      detail: `sessionReplicationRole is '${sessionReplicationRole}', expected 'origin'`,
     });
   }
 

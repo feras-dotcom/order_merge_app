@@ -570,11 +570,232 @@ function* walk(dir: string, exts: readonly string[]): Generator<string> {
   }
 }
 
-function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/--[^\n]*/g, "")
-    .replace(/\/\/[^\n]*/g, "");
+// ── Source-aware scanning (spec 3.2 rule 10, 19.3 item 3) ──
+//
+// A comment is never a source occurrence, but SQL lives inside string and
+// template literals — their contents are kept VERBATIM so a `//` inside a
+// URL or a `--` inside an option string can never erase text, and a comment
+// can never hide a statement either. `${...}` interpolation holes collapse
+// to a __dynamic__ marker (their contents are still scanned as code) so a
+// dynamic trigger name can never read as a literal. Concatenated literals
+// ("A" + "B") fold into the contiguous text they build at runtime.
+
+const DYN = ["__dyna", "mic__"].join("");
+
+function significantText(source: string, kind: "ts" | "sql"): string {
+  const out: string[] = [];
+  const holes: string[] = []; // "brace" | "interp" — tracks ${ } nesting
+  let state: "code" | "template" = "code";
+  let i = 0;
+  const n = source.length;
+
+  const skipWs = (at: number): number => {
+    while (at < n && /\s/.test(source[at])) at += 1;
+    return at;
+  };
+  // After a literal ends, `lit + lit` folds: if only whitespace, a + and
+  // another literal follow, continue directly into it.
+  const foldNext = (at: number): number => {
+    const k = skipWs(at);
+    if (source[k] !== "+") return at;
+    const k2 = skipWs(k + 1);
+    const q = source[k2];
+    return q === "'" || q === '"' || q === "`" ? k2 : at;
+  };
+  // Emit string contents WITHOUT delimiters; handles backslash escapes and
+  // the SQL '' doubled quote. Unterminated single-line strings end at \n.
+  const emitStringContents = (at: number, quote: string): number => {
+    let j = at + 1;
+    while (j < n) {
+      const ch = source[j];
+      if (ch === "\\") {
+        out.push(source.slice(j, j + 2));
+        j += 2;
+        continue;
+      }
+      if (ch === quote) {
+        if (kind === "sql" && quote === "'" && source[j + 1] === "'") {
+          out.push("''");
+          j += 2;
+          continue;
+        }
+        return kind === "ts" ? foldNext(j + 1) : j + 1;
+      }
+      if (kind === "ts" && ch === "\n") return j;
+      out.push(ch);
+      j += 1;
+    }
+    return n;
+  };
+  // SQL "quoted identifier" — emitted verbatim INCLUDING the quotes.
+  const emitQuotedIdent = (at: number): number => {
+    let j = at;
+    while (j < n) {
+      out.push(source[j]);
+      if (source[j] === '"') {
+        if (source[j + 1] === '"') {
+          out.push('"');
+          j += 2;
+          continue;
+        }
+        return j + 1;
+      }
+      j += 1;
+    }
+    return n;
+  };
+  // PostgreSQL dollar-quoted body ($tag$ ... $tag$) — emitted verbatim:
+  // function bodies are executable code and stay in the scanned text.
+  const emitDollarQuoted = (at: number, tag: string): number => {
+    const end = source.indexOf(tag, at + tag.length);
+    if (end < 0) {
+      out.push(source.slice(at + tag.length));
+      return n;
+    }
+    out.push(source.slice(at + tag.length, end));
+    return end + tag.length;
+  };
+  // A `/` in code is a regex literal start when the previous significant
+  // token cannot end an expression; otherwise it is division and is emitted.
+  const REGEX_AFTER_CHARS = "=(:,[!&|?{};+-*%~^<>";
+  const REGEX_AFTER_WORDS = new Set([
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "else", "do", "case", "yield", "await",
+  ]);
+  const emitMaybeRegex = (at: number): number => {
+    const trimmed = out.join("").replace(/\s+$/, "");
+    const lastChar = trimmed.slice(-1);
+    const lastWord = /[A-Za-z_$]+$/.exec(trimmed)?.[0] ?? "";
+    const isRegex =
+      lastChar === "" || REGEX_AFTER_CHARS.includes(lastChar) || REGEX_AFTER_WORDS.has(lastWord);
+    if (!isRegex) {
+      out.push("/");
+      return at + 1;
+    }
+    let j = at + 1;
+    let inClass = false;
+    while (j < n) {
+      const ch = source[j];
+      if (ch === "\\") {
+        out.push(source.slice(j, j + 2));
+        j += 2;
+        continue;
+      }
+      if (ch === "[") inClass = true;
+      else if (ch === "]") inClass = false;
+      else if (ch === "/" && !inClass) {
+        j += 1;
+        while (j < n && /[a-z]/i.test(source[j])) j += 1; // flags
+        return j;
+      } else if (ch === "\n") {
+        return j;
+      }
+      out.push(ch);
+      j += 1;
+    }
+    return n;
+  };
+
+  while (i < n) {
+    const c = source[i];
+    if (state === "template") {
+      if (c === "\\") {
+        out.push(source.slice(i, i + 2));
+        i += 2;
+        continue;
+      }
+      if (c === "`") {
+        state = "code";
+        i = foldNext(i + 1);
+        continue;
+      }
+      if (c === "$" && source[i + 1] === "{") {
+        out.push(` ${DYN} `);
+        holes.push("interp");
+        state = "code";
+        i += 2;
+        continue;
+      }
+      out.push(c);
+      i += 1;
+      continue;
+    }
+    if (kind === "ts") {
+      if (c === "/" && source[i + 1] === "/") {
+        const nl = source.indexOf("\n", i);
+        i = nl < 0 ? n : nl;
+        out.push(" ");
+        continue;
+      }
+      if (c === "/" && source[i + 1] === "*") {
+        const e = source.indexOf("*/", i + 2);
+        i = e < 0 ? n : e + 2;
+        out.push(" ");
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        i = emitStringContents(i, c);
+        continue;
+      }
+      if (c === "`") {
+        state = "template";
+        i += 1;
+        continue;
+      }
+      if (c === "/") {
+        i = emitMaybeRegex(i);
+        continue;
+      }
+    } else {
+      if (c === "-" && source[i + 1] === "-") {
+        const nl = source.indexOf("\n", i);
+        i = nl < 0 ? n : nl;
+        out.push(" ");
+        continue;
+      }
+      if (c === "/" && source[i + 1] === "*") {
+        const e = source.indexOf("*/", i + 2);
+        i = e < 0 ? n : e + 2;
+        out.push(" ");
+        continue;
+      }
+      if (c === "'") {
+        i = emitStringContents(i, "'");
+        continue;
+      }
+      if (c === '"') {
+        i = emitQuotedIdent(i);
+        continue;
+      }
+      if (c === "$") {
+        const m = /^\$[A-Za-z_0-9]*\$/.exec(source.slice(i));
+        if (m) {
+          i = emitDollarQuoted(i, m[0]);
+          continue;
+        }
+      }
+    }
+    if (c === "{") {
+      holes.push("brace");
+      out.push(c);
+      i += 1;
+      continue;
+    }
+    if (c === "}") {
+      const top = holes.pop();
+      if (top === "interp") {
+        out.push(" ");
+        state = "template";
+      } else {
+        out.push(c);
+      }
+      i += 1;
+      continue;
+    }
+    out.push(c);
+    i += 1;
+  }
+  return out.join("");
 }
 
 describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
@@ -586,29 +807,53 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
   const TRIG = ["TRIG", "GER"].join("");
   const REPLICA = ["REPL", "ICA"].join("");
   const ALWAYS = ["ALW", "AYS"].join("");
+  const SET_ = ["SE", "T"].join("");
+  const RST = ["RE", "SET"].join("");
+  const CFG = ["set_", "config"].join("");
+  const ALT = ["AL", "TER"].join("");
+  const UPD = ["UP", "DATE"].join("");
+  const PGS = ["pg", "settings"].join("_");
+  const PGO = ["PG", "OPTIONS"].join("");
+  const OPT = ["opt", "ions"].join("");
   const TRIGGER_TOGGLE = new RegExp(
-    `\\b(${DIS}|${ENA})\\s+((?:${REPLICA}|${ALWAYS})\\s+)?${TRIG}\\s+([A-Za-z_]+|ALL|USER)`,
+    `\\b(${DIS}|${ENA})\\s+((?:${REPLICA}|${ALWAYS})\\s+)?${TRIG}S?\\s*("[^"\\n]*"|${DYN}|ALL|USER|[A-Za-z_][A-Za-z0-9_]*|\\S)?`,
     "gi",
   );
   const NAMED_TRANSITION_TRIGGER = "shippingrefund_transition_guard";
   // The ONLY file permitted to contain a trigger toggle, and only for the
   // one named transition trigger (spec 19.2 fixture isolation).
   const FIXTURE_HELPER = "tests/helpers/shipping-refund-fixture.ts";
-  // Files allowed to name the replication role at all — the read-only catalog
-  // query, the fixture helper contract, and this architecture test.
-  const MAY_NAME_ROLE = new Set([
+  // The only places the setting may be referenced AT ALL (3.2 rule 10):
+  // the authorized integrity module and the fixture verification — and in
+  // those files every occurrence must be the exact read-only form.
+  // String delimiters are dropped during scanning (concatenated literals
+  // fold), so the permitted read form tolerates either the quoted literal
+  // inside a template or the delimiter-stripped form.
+  const READ_FORM = new RegExp(`current_setting\\s*\\(\\s*'?\\s*${ROLE}\\s*'?\\s*\\)`, "g");
+  const READ_FORM_ONLY = new Set([
     "app/lib/shipping-refund-trigger-manifest.ts",
-    "tests/helpers/shipping-refund-fixture.ts",
-    "tests/shipping-refund-trigger-manifest.test.ts",
+    FIXTURE_HELPER,
   ]);
+  // The architecture test may name the setting in order to assert on it;
+  // mutation forms remain forbidden here as everywhere.
+  const MAY_ASSERT_ROLE = new Set(["tests/shipping-refund-trigger-manifest.test.ts"]);
 
   const roleMutationForms: RegExp[] = [
-    new RegExp("\\bSET\\s+(LOCAL\\s+|SESSION\\s+)?" + ROLE + "\\b", "i"),
-    new RegExp("set_config\\s*\\(\\s*'" + ROLE + "'", "i"),
-    new RegExp("\\bRESET\\s+" + ROLE + "\\b", "i"),
-    new RegExp("\\bALTER\\s+(SYSTEM|ROLE|DATABASE)[^;]*" + ROLE, "i"),
-    new RegExp(`-c\\s*${ROLE}`, "i"),
-    new RegExp(`\\b${["PG", "OPTIONS"].join("")}\\b`, "i"),
+    // SET [LOCAL|SESSION] of the role — bare or quoted identifier.
+    new RegExp(`\\b${SET_}\\s+(?:LOCAL\\s+|SESSION\\s+)?["'\\\`]{0,3}${ROLE}\\b`, "gi"),
+    new RegExp(`\\b${CFG}\\s*\\(\\s*["'\\\`]{1,3}${ROLE}\\b`, "gi"),
+    new RegExp(`\\b${RST}\\s+["'\\\`]{0,3}${ROLE}\\b`, "gi"),
+    // RESET ALL resets the role among everything else.
+    new RegExp(`\\b${RST}\\s+ALL\\b`, "gi"),
+    new RegExp(`\\b${ALT}\\s+(?:SYSTEM|ROLE|USER|DATABASE|ALL)\\b[^;\\n]*${ROLE}\\b`, "gi"),
+    // A direct catalog write aimed at the setting.
+    new RegExp(`\\b${UPD}\\s+(?:ONLY\\s+)?(?:pg_catalog\\s*\\.\\s*)?${PGS}\\b`, "gi"),
+    // Environment or connection-string overrides that can carry -c/-- sets.
+    new RegExp(`\\b${PGO}\\b`, "g"),
+    new RegExp(`-c\\s*["'\\\`]{0,3}${ROLE}\\b`, "gi"),
+    new RegExp(`-{2}${ROLE}\\b`, "gi"),
+    // libpq options= embedding any command-line switch (-c, --set...).
+    new RegExp(`\\b${OPT}\\s*=\\s*["'\\\`]{0,2}-`, "gi"),
   ];
 
   const scanRoots = ["app", "scripts", "prisma/migrations", "tests"];
@@ -616,19 +861,31 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
   /** The single predicate the scan applies to every scanned source. */
   function scanSource(text: string, relPath: string): string[] {
     const offenders: string[] = [];
-    const stripped = stripComments(text);
+    const sig = significantText(text, relPath.endsWith(".sql") ? "sql" : "ts");
     for (const re of roleMutationForms) {
-      if (re.test(stripped)) offenders.push(`${relPath}: role mutation /${re.source}/`);
+      for (const m of sig.matchAll(re)) {
+        offenders.push(`${relPath}: role mutation ${m[0]}`);
+      }
     }
-    // Even the read form may be named only by the allowlisted modules.
-    if (stripped.includes(ROLE) && !MAY_NAME_ROLE.has(relPath)) {
-      offenders.push(`${relPath}: names ${ROLE}`);
+    // 19.3 item 3: every non-comment occurrence of the token is classified.
+    // It is legal only as the exact read form and only in the allowlisted
+    // modules; this architecture test may name it to assert on it.
+    if (sig.includes(ROLE)) {
+      const residual = sig.replace(READ_FORM, " ");
+      if (READ_FORM_ONLY.has(relPath)) {
+        if (residual.includes(ROLE)) {
+          offenders.push(`${relPath}: ${ROLE} outside the permitted read form`);
+        }
+      } else if (!MAY_ASSERT_ROLE.has(relPath)) {
+        offenders.push(`${relPath}: names ${ROLE}`);
+      }
     }
-    for (const m of stripped.matchAll(TRIGGER_TOGGLE)) {
+    for (const m of sig.matchAll(TRIGGER_TOGGLE)) {
+      const rawName = (m[3] ?? "").replace(/^"|"$/g, "");
       const permitted =
         relPath === FIXTURE_HELPER &&
         !m[2] &&
-        m[3].toLowerCase() === NAMED_TRANSITION_TRIGGER;
+        rawName === NAMED_TRANSITION_TRIGGER;
       if (!permitted) offenders.push(`${relPath}: ${m[0]}`);
     }
     return offenders;
@@ -656,8 +913,15 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
     // Reconstructs exactly the statement that used to live in the pg suite.
     const offending = `ALTER TABLE "ShippingRefund" ${DIS} ${TRIG} ${NAMED_TRANSITION_TRIGGER}`;
     expect(scanSource(offending, "tests/shipping-refund-schema-pg.test.ts")).not.toEqual([]);
-    // The narrow exception: only the fixture helper, only that named trigger.
+    // The narrow exception: only the fixture helper, only that named trigger
+    // (unquoted or quoted — the same one named trigger).
     expect(scanSource(offending, FIXTURE_HELPER)).toEqual([]);
+    expect(
+      scanSource(
+        `ALTER TABLE "ShippingRefund" ${DIS} ${TRIG} "${NAMED_TRANSITION_TRIGGER}"`,
+        FIXTURE_HELPER,
+      ),
+    ).toEqual([]);
     // Any wider toggle is rejected even in the fixture helper.
     expect(
       scanSource(`ALTER TABLE "ShippingRefund" ${DIS} ${TRIG} ALL`, FIXTURE_HELPER),
@@ -665,6 +929,132 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
     expect(
       scanSource(`ALTER TABLE t ${ENA} ${REPLICA} ${TRIG} x`, FIXTURE_HELPER),
     ).not.toEqual([]);
+    expect(
+      scanSource(`ALTER TABLE t ${ENA} ${ALWAYS} ${TRIG} x`, FIXTURE_HELPER),
+    ).not.toEqual([]);
+    // A quoted or interpolated name is still a toggle — and never qualifies
+    // for the fixture exception. (DYN_EXPR is the literal text ${t}.)
+    const DYN_EXPR = ["$", "{t}"].join("");
+    expect(
+      scanSource(
+        `ALTER TABLE "ShippingRefund" ${DIS} ${TRIG} "shippingrefund_shape_guard"`,
+        "tests/x.ts",
+      ),
+    ).not.toEqual([]);
+    expect(
+      scanSource(
+        `ALTER TABLE "ShippingRefund" ${DIS} ${TRIG} "${NAMED_TRANSITION_TRIGGER}"`,
+        "tests/x.ts",
+      ),
+    ).not.toEqual([]);
+    expect(
+      scanSource(`ALTER TABLE t ${DIS} ${TRIG} ${DYN_EXPR}`, FIXTURE_HELPER),
+    ).not.toEqual([]);
+    expect(
+      scanSource(`ALTER TABLE t ${DIS} ${TRIG} ${DYN_EXPR}`, "tests/x.ts"),
+    ).not.toEqual([]);
+    // A toggle assembled by string concatenation scans as its runtime form.
+    expect(
+      scanSource(
+        `const s = "ALTER TABLE t ${DIS}" + " ${TRIG} ${NAMED_TRANSITION_TRIGGER}"`,
+        "tests/x.ts",
+      ),
+    ).not.toEqual([]);
+    // DISABLE TRIGGER USER / a bare toggle with no name are caught too.
+    expect(scanSource(`ALTER TABLE t ${DIS} ${TRIG} USER`, FIXTURE_HELPER)).not.toEqual([]);
+  });
+
+  it("synthetic negative: every replication-role mutation form is caught", () => {
+    const ANY_FILE = "app/lib/anything.ts";
+    const mutations = [
+      `${SET_} ${ROLE} = 'replica'`,
+      `${SET_} LOCAL ${ROLE} = 'replica'`,
+      `${SET_} SESSION ${ROLE} = 'replica'`,
+      `${SET_} LOCAL "${ROLE}" = 'replica'`,
+      `${SET_} '${ROLE}' = 'replica'`,
+      `${CFG}('${ROLE}', 'replica', false)`,
+      `${CFG}("${ROLE}", 'replica', false)`,
+      `${RST} ${ROLE}`,
+      `${RST} ALL`,
+      `${ALT} ROLE app ${SET_} ${ROLE} = 'replica'`,
+      `${ALT} DATABASE d ${SET_} ${ROLE} = 'replica'`,
+      `${ALT} SYSTEM ${SET_} ${ROLE} = 'replica'`,
+      `${UPD} ${PGS} ${SET_} setting = 'replica' WHERE name = '${ROLE}'`,
+      `-c ${ROLE}=replica`,
+      `-c"${ROLE}=replica"`,
+      `--${ROLE}=replica`,
+      `${OPT}=-c ${ROLE}=replica`,
+      `${OPT}=--${ROLE}=replica`,
+      `${PGO}="-c statement_timeout=1"`,
+      `const u = "postgresql://u@127.0.0.1:5432/db?${OPT}=-c ${ROLE}=replica"`,
+      `const u = "postgresql://u@127.0.0.1:5432/db?${OPT}=--${ROLE}=replica"`,
+    ];
+    for (const stmt of mutations) {
+      expect(scanSource(stmt, ANY_FILE), stmt).not.toEqual([]);
+      // A mutation form fails even inside an allowlisted file.
+      expect(
+        scanSource(stmt, "app/lib/shipping-refund-trigger-manifest.ts"),
+        `${stmt} (allowlisted)`,
+      ).not.toEqual([]);
+    }
+  });
+
+  it("classifies the token: the read form only in allowlisted files, nowhere else", () => {
+    // The read form alone passes only inside the allowlisted modules.
+    expect(
+      scanSource(
+        `SELECT current_setting('${ROLE}')`,
+        "app/lib/shipping-refund-trigger-manifest.ts",
+      ),
+    ).toEqual([]);
+    expect(scanSource(`SELECT current_setting('${ROLE}')`, FIXTURE_HELPER)).toEqual([]);
+    // The same read form is still forbidden anywhere else.
+    expect(scanSource(`SELECT current_setting('${ROLE}')`, "app/lib/anything.ts")).not.toEqual([]);
+    expect(scanSource(`SELECT current_setting('${ROLE}')`, "prisma/migrations/x.sql")).not.toEqual([]);
+    // A non-read mention fails even in an allowlisted file.
+    expect(
+      scanSource(`const s = "${ROLE} is the setting"`, "app/lib/shipping-refund-trigger-manifest.ts"),
+    ).not.toEqual([]);
+    expect(
+      scanSource(`SHOW ${ROLE}`, "app/lib/shipping-refund-trigger-manifest.ts"),
+    ).not.toEqual([]);
+    // A second-argument read form is not the permitted single-argument read.
+    expect(
+      scanSource(
+        `SELECT current_setting('${ROLE}', true)`,
+        "app/lib/shipping-refund-trigger-manifest.ts",
+      ),
+    ).not.toEqual([]);
+    // This architecture test may name the token to assert on it.
+    expect(
+      scanSource(`// asserts on ${ROLE}`, "tests/shipping-refund-trigger-manifest.test.ts"),
+    ).toEqual([]);
+  });
+
+  it("comments and string punctuation can neither hide statements nor create them", () => {
+    // A comment is never a source occurrence — forbidden-looking text inside
+    // comments is not an offender.
+    expect(scanSource(`// ${DIS} ${TRIG} x and ${SET_} ${ROLE}='replica'`, "x.ts")).toEqual([]);
+    expect(scanSource(`/* ${DIS} ${TRIG} x ${SET_} ${ROLE} */`, "x.ts")).toEqual([]);
+    expect(scanSource(`-- ${SET_} ${ROLE} = 'replica'`, "x.sql")).toEqual([]);
+    expect(scanSource(`/* ${SET_} ${ROLE} = 'replica' */`, "x.sql")).toEqual([]);
+    // A // or -- inside a string is content, not a comment: the mutation
+    // after it is still seen.
+    expect(
+      scanSource(
+        `const u = "postgresql://u@127.0.0.1:5432/db?${OPT}=-c ${ROLE}=replica"`,
+        "x.ts",
+      ),
+    ).not.toEqual([]);
+    expect(
+      scanSource(`const s = "note -- ${SET_} ${ROLE} = 'replica'"`, "x.ts"),
+    ).not.toEqual([]);
+    // Benign URLs, dashes and mentions inside strings are not offenders.
+    expect(
+      scanSource(`const u = "postgresql://u@127.0.0.1:5432/mergeship_test_x"`, "x.ts"),
+    ).toEqual([]);
+    expect(scanSource(`const s = "a -- b // c"`, "x.ts")).toEqual([]);
+    expect(scanSource(`/* nothing */ const n = 1 -- 2;`, "x.sql")).toEqual([]);
   });
 
   it("the integrity module contains only the read-only catalog form", () => {
@@ -672,10 +1062,7 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
       join(REPO_ROOT, "app/lib/shipping-refund-trigger-manifest.ts"),
       "utf8",
     );
-    for (const re of roleMutationForms) {
-      expect(stripComments(manifestSrc)).not.toMatch(re);
-    }
-    expect([...stripComments(manifestSrc).matchAll(TRIGGER_TOGGLE)]).toEqual([]);
+    expect(scanSource(manifestSrc, "app/lib/shipping-refund-trigger-manifest.ts")).toEqual([]);
     expect(manifestSrc).toContain(`current_setting('${ROLE}')`);
   });
 });
@@ -688,11 +1075,11 @@ describe("no dispatch path in S1-A", () => {
     const offenders: string[] = [];
     for (const root of ["app", "scripts"]) {
       for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
-        const text = stripComments(readFileSync(f, "utf8"));
+        const text = significantText(readFileSync(f, "utf8"), "ts");
         if (
-          /\bstatus\s*[:=]\s*['"]DISPATCHING['"]/.test(text) ||
-          /SET\s+"?status"?\s*=\s*'DISPATCHING'/i.test(text) ||
-          /ShippingRefund[\s\S]{0,200}'DISPATCHING'/.test(text)
+          /\bstatus\s*[:=]\s*['"]?DISPATCHING\b/.test(text) ||
+          /SET\s+"?status"?\s*=\s*'?DISPATCHING\b/i.test(text) ||
+          /ShippingRefund[\s\S]{0,200}DISPATCHING\b/.test(text)
         ) {
           offenders.push(relative(REPO_ROOT, f));
         }
@@ -710,7 +1097,7 @@ describe("no dispatch path in S1-A", () => {
     const offenders: string[] = [];
     for (const root of ["app", "scripts", "tests/helpers"]) {
       for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
-        if (banned.test(stripComments(readFileSync(f, "utf8")))) {
+        if (banned.test(significantText(readFileSync(f, "utf8"), "ts"))) {
           offenders.push(relative(REPO_ROOT, f));
         }
       }
