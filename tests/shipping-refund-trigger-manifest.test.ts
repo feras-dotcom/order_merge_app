@@ -1093,12 +1093,41 @@ describe("no dispatch path in S1-A", () => {
   });
 
   it("no dispatcher, worker, DispatchPermit, sendRefund or Shopify mutation path exists", () => {
-    const banned = /\b(DispatchPermit|sendRefund|shipping[-_]?refund[-_]?(dispatch|worker)|refundCreate|MERGESHIP_SHIPPING_REFUNDS)\b/i;
+    // The mutation DOCUMENT text is data (section 10): the contract module is
+    // the one file allowed to carry `refundCreate`, exposed through a single
+    // accessor (3.2 rule 5). Everything that could EXECUTE a dispatch —
+    // DispatchPermit, sendRefund, a dispatch/worker module, the worker env
+    // flag — stays banned everywhere in S1.
+    const CONTRACT_PATH = "app/lib/shipping-refund-contract.ts";
+    const banned = /\b(DispatchPermit|sendRefund|shipping[-_]?refund[-_]?(dispatch|worker)|MERGESHIP_SHIPPING_REFUNDS)\b/i;
     const offenders: string[] = [];
+    const mutationText: string[] = [];
     for (const root of ["app", "scripts", "tests/helpers"]) {
       for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
-        if (banned.test(significantText(readFileSync(f, "utf8"), "ts"))) {
-          offenders.push(relative(REPO_ROOT, f));
+        const text = significantText(readFileSync(f, "utf8"), "ts");
+        const rel = relative(REPO_ROOT, f).replace(/\\/g, "/");
+        if (banned.test(text)) {
+          offenders.push(rel);
+        }
+        if (/\brefundCreate\b/.test(text) && rel !== CONTRACT_PATH) {
+          mutationText.push(rel);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+    expect(mutationText).toEqual([]);
+  });
+
+  it("the mutation document text accessor is referenced only inside the contract module (3.2 rule 5)", () => {
+    const CONTRACT_PATH = "app/lib/shipping-refund-contract.ts";
+    const offenders: string[] = [];
+    for (const root of ["app", "scripts"]) {
+      for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
+        const rel = relative(REPO_ROOT, f).replace(/\\/g, "/");
+        if (rel === CONTRACT_PATH) continue;
+        const text = significantText(readFileSync(f, "utf8"), "ts");
+        if (/shippingRefundMutationDocument/.test(text)) {
+          offenders.push(rel);
         }
       }
     }
