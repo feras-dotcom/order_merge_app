@@ -418,10 +418,13 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     await db.$executeRaw`UPDATE "ShippingRefund" SET
       "status" = 'RESOLVED', "resolvedBy" = 'op', "resolution" = 'void',
       "resolvedAt" = clock_timestamp() AT TIME ZONE 'UTC' WHERE "id" = ${rr.id}`;
-    // But stamping it afterwards is still impossible (RESOLVED is terminal).
+    // But stamping it afterwards is still impossible. The frozen-columns
+    // guard fires before the transition guard (triggers fire in name order),
+    // so a write to an always-immutable column is refused as an immutable-
+    // column violation even though RESOLVED is also terminal.
     await expect(
       db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = '2030-02-02'::timestamptz AT TIME ZONE 'UTC' WHERE "id" = ${rr.id}`,
-    ).rejects.toThrow(/terminal/i);
+    ).rejects.toThrow(/immutable column/i);
   });
 
   it("A-2: NULL -> value is refused on the REVIEW_REQUIRED(CANCELLED_AT_INVALID) row itself", async () => {
