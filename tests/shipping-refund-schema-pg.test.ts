@@ -259,7 +259,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
       ["refundId", `'${refundGid(77)}'`],
       ["refundCreatedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
       ["settlementState", `'SUCCESS'`],
-      ["settledAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
+      ["settlementCheckAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
       ["verifiedAt", `'2030-01-07'::timestamptz AT TIME ZONE 'UTC'`],
       ["approvedWireHash", `'${HASH64}'`],
       ["approvedBy", `'op'`],
@@ -458,7 +458,7 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
   it("restating an identical sourceCancelledAt succeeds and writes no event", async () => {
     const { id } = await insertRefund(); // sourceCancelledAt = 2030-01-06
     const before = await eventCount(id);
-    await db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = '2030-01-06'::timestamptz AT TIME ZONE 'UTC' WHERE "id" = ${id}`;
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "sourceCancelledAt" = '2030-01-06T00:00:00Z'::timestamptz AT TIME ZONE 'UTC' WHERE "id" = ${id}`;
     // NULL -> NULL on the terminal exception row is likewise a no-op write.
     const rr = await insertRefund({
       status: "REVIEW_REQUIRED",
