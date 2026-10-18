@@ -1054,120 +1054,37 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
       SELECT (('VERIFIED'::text <> 'VERIFIED') OR
               (COALESCE(NULL::text, '') = 'SUCCESS' AND NULL::timestamp IS NOT NULL)) AS passes`;
     expect(p[0].passes).toBe(false);
-    // A NULL JSON kind turns ->> into SQL NULL; the fixed CHECK's IS NOT NULL
-    // guard makes the conjunction FALSE rather than UNKNOWN.
-    const k = await db.$queryRaw<{ passes: boolean | null }[]>`
-      SELECT (NULLIF('x','x')::jsonb IS NULL OR
-              (true AND '{"kind": null}'::jsonb->'kind' IS NOT NULL
-               AND '{"kind": null}'::jsonb->>'kind' = 'REFUND')) AS passes`;
-    expect(k[0].passes).toBe(false);
+    // The exact kind clause of ShippingRefund_wire_txn_fields, evaluated by
+    // real PostgreSQL over every invalid shape plus the valid one. `passes`
+    // is the corrected predicate; `unsafe` is the pre-fix bare comparison —
+    // JSON null and a missing key make it NULL (a CHECK accepts UNKNOWN),
+    // while the corrected predicate is FALSE, never NULL.
+    const k = await db.$queryRaw<{ passes: boolean | null; unsafe: boolean | null }[]>`
+      SELECT (w->'input'->'transactions'->0->>'kind' IS NOT NULL
+              AND w->'input'->'transactions'->0->>'kind' = 'REFUND') AS passes,
+             (w->'input'->'transactions'->0->>'kind' = 'REFUND') AS unsafe
+      FROM (VALUES
+        ('{"idempotencyKey":"k","input":{"transactions":[{"kind":null}]}}'::jsonb),
+        ('{"idempotencyKey":"k","input":{"transactions":[{}]}}'::jsonb),
+        ('{"idempotencyKey":"k","input":{"transactions":[{"kind":5}]}}'::jsonb),
+        ('{"idempotencyKey":"k","input":{"transactions":[{"kind":true}]}}'::jsonb),
+        ('{"idempotencyKey":"k","input":{"transactions":[{"kind":"CAPTURE"}]}}'::jsonb),
+        ('{"idempotencyKey":"k","input":{"transactions":[{"kind":"REFUND"}]}}'::jsonb)
+      ) AS t(w)`;
+    expect(k.map((r) => r.passes)).toEqual([false, false, false, false, false, true]);
+    // The unsafe form would have admitted the first two shapes.
+    expect(k.map((r) => r.unsafe)).toEqual([null, null, false, false, false, true]);
   });
 
-  // ── Post-dispatch enforcement on a fixture-isolated scratch database ──
+  // ── Deferred integration proof (19.2.1/19.2.2 fixture contract) ──
   // The S1 transition graph can never manufacture a DISPATCHING or
-  // REFUND_RECORDED row, so enforcement at those statuses is proven on a
-  // scratch database whose insert guard is dropped for the fixture rows.
-  // This exercises only the permitted DROP/CREATE catalog mechanisms of
-  // 5.4.7 — no trigger disabling, no session_replication_role.
-
-  const insertPostDispatchRow = async (
-    client: PrismaClient,
-    status: "DISPATCHING" | "REFUND_RECORDED",
-  ): Promise<string> => {
-    const id = `sr_pd_${randomUUID().replace(/-/g, "")}`;
-    const shop = uniqueShop();
-    const key = randomUUID();
-    const sourceOrderId = oid(6000 + Math.floor(Math.random() * 1e9));
-    const parentTxn = txnGid(888);
-    const marker = "MS-SHIPREFUND-" + key;
-    const wv = JSON.stringify(wireFor(sourceOrderId, key, marker, parentTxn)).replace(/'/g, "''");
-    await client.$executeRawUnsafe(
-      `INSERT INTO "ShippingRefund" (
-        "id","shop","mergeOperationId","sourceOrderId","primaryOrderId","primaryOrderName",
-        "operationCreatedAt","sourceCancelledAt","lane","status",
-        "merchantEpochAt","rolloutEpochAt","switchEpochAt","activationCutoffAt",
-        "admissionEpochAt","admissionCutoffAt","dispatchEpochAtAdmission",
-        "approvalApprovedAt","approvalOptInEpoch","approvalAckVersion",
-        "policyKind","idempotencyKey","marker",
-        "currencyCode","plannedShippingMinor","parentTransactionId","gateway",
-        "wireVariables","wireHash","documentSha256","mutationVersion","preparedAt",
-        "dispatchToken","dispatchedAt","refundId","respondedAt"
-      ) VALUES (
-        '${id}','${shop}','${"mo_" + randomUUID().replace(/-/g, "")}','${sourceOrderId}','${oid(9100)}','#P',
-        '2030-01-06'::timestamptz AT TIME ZONE 'UTC','2030-01-06'::timestamptz AT TIME ZONE 'UTC',
-        'EXECUTE','${status}',
-        '2030-01-01'::timestamptz AT TIME ZONE 'UTC','2030-01-02'::timestamptz AT TIME ZONE 'UTC',
-        '2030-01-03'::timestamptz AT TIME ZONE 'UTC','2030-01-03'::timestamptz AT TIME ZONE 'UTC',
-        '2030-01-04'::timestamptz AT TIME ZONE 'UTC','2030-01-05'::timestamptz AT TIME ZONE 'UTC',
-        '2030-01-02'::timestamptz AT TIME ZONE 'UTC',
-        '2030-01-05'::timestamptz AT TIME ZONE 'UTC','2030-01-01'::timestamptz AT TIME ZONE 'UTC',
-        'v1','REFUND_ALL','${key}','${marker}',
-        'USD','1000','${parentTxn}','bogus',
-        '${wv}'::jsonb,'${HASH64}','${HASH64}','refundCreate@2026-04',
-        '2030-01-07'::timestamptz AT TIME ZONE 'UTC',
-        '${randomUUID()}','2030-01-08'::timestamptz AT TIME ZONE 'UTC',
-        ${status === "REFUND_RECORDED" ? `'${refundGid(9)}'` : "NULL"},'2030-01-08'::timestamptz AT TIME ZONE 'UTC'
-      )`,
-    );
-    return id;
-  };
-
-  it("B1: the VERIFIED CHECK rejects NULL and non-SUCCESS settlement on a legal edge (scratch)", async () => {
-    await withScratchDatabase(preflighted, async (scratchUrl) => {
-      execSync("npx prisma migrate deploy", {
-        env: { ...process.env, DATABASE_URL: scratchUrl },
-        stdio: "pipe",
-      });
-      const sdb = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
-      try {
-        // Drop the insert guard only long enough to place the fixture row;
-        // it is restored before the scratch is dropped.
-        await sdb.$executeRawUnsafe(
-          `DROP TRIGGER shippingrefund_insert_guard ON "ShippingRefund"`,
-        );
-        const id = await insertPostDispatchRow(sdb, "REFUND_RECORDED");
-        // Legal edge REFUND_RECORDED -> VERIFIED: the only layer that can
-        // refuse these updates is the CHECK itself.
-        await expect(
-          sdb.$executeRaw`UPDATE "ShippingRefund" SET
-            "status" = 'VERIFIED',
-            "verifiedAt" = clock_timestamp() AT TIME ZONE 'UTC'
-            WHERE "id" = ${id}`,
-        ).rejects.toThrow(/verified_needs_success/i);            // settlementState NULL
-        await expect(
-          sdb.$executeRaw`UPDATE "ShippingRefund" SET
-            "status" = 'VERIFIED', "settlementState" = 'FAILED',
-            "verifiedAt" = clock_timestamp() AT TIME ZONE 'UTC'
-            WHERE "id" = ${id}`,
-        ).rejects.toThrow(/verified_needs_success/i);            // non-SUCCESS
-        await expect(
-          sdb.$executeRaw`UPDATE "ShippingRefund" SET
-            "status" = 'VERIFIED', "settlementState" = 'SUCCESS'
-            WHERE "id" = ${id}`,
-        ).rejects.toThrow(/verified_needs_success/i);            // verifiedAt NULL
-        // The valid combination still lands and journals the transition.
-        await sdb.$executeRaw`UPDATE "ShippingRefund" SET
-          "status" = 'VERIFIED', "settlementState" = 'SUCCESS',
-          "verifiedAt" = clock_timestamp() AT TIME ZONE 'UTC'
-          WHERE "id" = ${id}`;
-        const st = await sdb.$queryRaw<{ status: string }[]>`
-          SELECT "status" FROM "ShippingRefund" WHERE "id" = ${id}`;
-        expect(st[0].status).toBe("VERIFIED");
-        const ev = await sdb.$queryRaw<{ toStatus: string }[]>`
-          SELECT "toStatus" FROM "ShippingRefundEvent"
-          WHERE "shippingRefundId" = ${id} AND "toStatus" = 'VERIFIED'`;
-        expect(ev).toHaveLength(1);
-        // Post-dispatch immutability still binds: sourceCancelledAt cannot
-        // move on a DISPATCHING row either.
-        const did = await insertPostDispatchRow(sdb, "DISPATCHING");
-        await expect(
-          sdb.$executeRaw`UPDATE "ShippingRefund" SET
-            "sourceCancelledAt" = '2030-03-01'::timestamptz AT TIME ZONE 'UTC'
-            WHERE "id" = ${did}`,
-        ).rejects.toThrow(/immutable column/i);
-      } finally {
-        await sdb.$disconnect();
-      }
-    });
-  }, 180_000);
+  // REFUND_RECORDED row, so end-to-end enforcement at those statuses —
+  // notably REFUND_RECORDED -> VERIFIED against ShippingRefund_
+  // verified_needs_success on a real row — requires the narrowly controlled
+  // fixture mechanism authorized for the post-dispatch stage (or Fixture B).
+  // Scratch-catalog DROP/CREATE (5.4.7) exists to test integrity DETECTION,
+  // not to manufacture financial rows, so this suite deliberately contains
+  // no such bypass. The deployment and predicate proofs above are the S1-A
+  // evidence; the live transition proof is deferred to the authorized
+  // fixture helper when that stage is reached.
 });
