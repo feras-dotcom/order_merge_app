@@ -56,7 +56,9 @@ function makeReady(
   };
   return {
     kind: "READY",
-    sourceShippingMinor: "800",
+    // REFUND_ALL (8.1): the evaluator's planned refund is the entire paid
+    // shipping amount — source equals planned.
+    sourceShippingMinor: minor,
     plannedRefundMinor: minor,
     currencyCode,
     previewEvidence: {
@@ -70,7 +72,7 @@ function makeReady(
         currencyCode,
         presentmentCurrencyCode: currencyCode,
         taxesIncluded: false,
-        shippingPaidMinor: "800",
+        shippingPaidMinor: minor,
         shippingOriginalMinor: "800",
         shippingTaxMinor: "0",
         refundedShippingMinor: "0",
@@ -267,10 +269,25 @@ describe("positive cases", () => {
     expect(r.financialColumns.currencyCode).toBe(currencyCode);
   });
 
-  it("tolerates a READY result without requestHash, but never a wrong one", () => {
-    const ready = makeReady();
-    delete ready.requestHash;
-    expect(adaptReadyToFreezeContract(ready, bindings()).ok).toBe(true);
+  it("accepts REFUND_ALL READYs at 0-, 2-, 3- and 4-decimal precision where source equals planned", () => {
+    // JPY/USD/JOD/CLF cases above prove precision; here a JPY READY where
+    // source, planned, evidence and payload all agree end to end.
+    const r = adaptReadyToFreezeContract(
+      makeReady({ currencyCode: "JPY", minor: "800", amount: "800" }),
+      bindings({ currencyCode: "JPY", plannedShippingMinor: "800" }),
+    );
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.contract.wireVariables.input.shipping.amount).toBe("800");
+    expect(r.financialColumns.plannedShippingMinor).toBe("800");
+  });
+
+  it("accepts a SUCCESS SALE allocation as well as CAPTURE", () => {
+    const ready = mutateReady((r) => {
+      r.previewEvidence.allocation.parentKind = "SALE";
+    });
+    const r = adaptReadyToFreezeContract(ready, bindings());
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.financialColumns.parentTransactionId).toBe(PARENT_TXN);
   });
 
   it("returns an immutable contract and never mutates its inputs", () => {
@@ -448,8 +465,177 @@ describe("negative cases", () => {
     ["a hash that forgets the tamper", (r: any) => { r.requestPayload.shipping.amount = "99.99"; /* hash left stale */ }],
     ["a non-string hash", (r: any) => { r.requestHash = 42; }],
     ["a null hash", (r: any) => { r.requestHash = null; }],
+    ["a missing hash", (r: any) => { delete r.requestHash; }],
+    ["an undefined hash", (r: any) => { r.requestHash = undefined; }],
+    ["an empty hash", (r: any) => { r.requestHash = ""; }],
+    ["a truncated hash", (r: any) => { r.requestHash = (r.requestHash as string).slice(0, 63); }],
+    ["a 64-char non-hex hash", (r: any) => { r.requestHash = "g".repeat(64); }],
+    ["an uppercase-hex hash", (r: any) => { r.requestHash = (r.requestHash as string).toUpperCase(); }],
   ])("refuses a tampered requestHash: %s", (_l, mutate) => {
     expect(adaptReadyToFreezeContract(mutateReady(mutate), bindings()).ok).toBe(false);
+  });
+});
+
+describe("S-1: REFUND_ALL requires source === planned === row planned amount", () => {
+  /** A genuine REFUND_ALL READY pays back the entire paid shipping. */
+  const real = () => makeReady({ minor: "800", amount: "8.00" });
+  const realBindings = () => bindings({ plannedShippingMinor: "800" });
+
+  it("accepts the genuine REFUND_ALL result", () => {
+    const r = adaptReadyToFreezeContract(real(), realBindings());
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.financialColumns.plannedShippingMinor).toBe("800");
+  });
+
+  it.each([
+    ["source 900 > planned 800", "900"],
+    ["source 799 < planned 800", "799"],
+  ])("refuses a fabricated READY with %s", (_l, source) => {
+    const ready = mutateReady((r) => {
+      // Evidence agrees with the fabricated source — only S-1 equality can
+      // catch that the refund would not cover the paid shipping.
+      r.sourceShippingMinor = source;
+      r.previewEvidence.order.shippingPaidMinor = source;
+      r.previewEvidence.order.shippingOriginalMinor = source;
+    });
+    expect(adaptReadyToFreezeContract(ready, realBindings()).ok).toBe(false);
+  });
+
+  it.each([
+    ["missing", (r: any) => { delete r.sourceShippingMinor; }],
+    ["null", (r: any) => { r.sourceShippingMinor = null; }],
+    ["a number", (r: any) => { r.sourceShippingMinor = 800; }],
+    ["a decimal string", (r: any) => { r.sourceShippingMinor = "8.00"; }],
+    ["empty", (r: any) => { r.sourceShippingMinor = ""; }],
+  ])("refuses a READY whose sourceShippingMinor is %s", (_l, mutate) => {
+    expect(adaptReadyToFreezeContract(mutateReady(mutate), realBindings()).ok).toBe(false);
+  });
+
+  it("refuses a planned amount that is not a minor string", () => {
+    expect(
+      adaptReadyToFreezeContract(
+        mutateReady((r) => { r.plannedRefundMinor = "8.00"; }),
+        realBindings(),
+      ).ok,
+    ).toBe(false);
+  });
+});
+
+describe("S-2: zero-tax and preview-total consistency", () => {
+  it.each([
+    ["taxesIncluded true", (r: any) => { r.previewEvidence.order.taxesIncluded = true; }],
+    ["taxesIncluded missing", (r: any) => { delete r.previewEvidence.order.taxesIncluded; }],
+    ["taxesIncluded string 'false'", (r: any) => { r.previewEvidence.order.taxesIncluded = "false"; }],
+    ["order shippingTaxMinor nonzero", (r: any) => { r.previewEvidence.order.shippingTaxMinor = "10"; }],
+    ["order shippingTaxMinor missing", (r: any) => { delete r.previewEvidence.order.shippingTaxMinor; }],
+    ["order shippingTaxMinor '0.00'", (r: any) => { r.previewEvidence.order.shippingTaxMinor = "0.00"; }],
+    ["preview shippingTaxMinor nonzero", (r: any) => { r.previewEvidence.preview.shippingTaxMinor = "10"; }],
+    ["preview shippingTaxMinor missing", (r: any) => { delete r.previewEvidence.preview.shippingTaxMinor; }],
+    ["preview totalMinor below planned", (r: any) => { r.previewEvidence.preview.totalMinor = "49"; }],
+    ["preview totalMinor above planned", (r: any) => { r.previewEvidence.preview.totalMinor = "51"; }],
+    ["preview totalMinor missing", (r: any) => { delete r.previewEvidence.preview.totalMinor; }],
+    ["maxShippingMinor below planned", (r: any) => { r.previewEvidence.preview.maxShippingMinor = "49"; }],
+    ["maxShippingMinor zero", (r: any) => { r.previewEvidence.preview.maxShippingMinor = "0"; }],
+    ["maxShippingMinor malformed", (r: any) => { r.previewEvidence.preview.maxShippingMinor = "x"; }],
+    ["maxShippingMinor missing", (r: any) => { delete r.previewEvidence.preview.maxShippingMinor; }],
+    ["maxPaymentMinor below planned", (r: any) => { r.previewEvidence.preview.maxPaymentMinor = "49"; }],
+    ["maxPaymentMinor malformed", (r: any) => { r.previewEvidence.preview.maxPaymentMinor = "x"; }],
+    ["maxPaymentMinor missing", (r: any) => { delete r.previewEvidence.preview.maxPaymentMinor; }],
+  ])("refuses evidence where %s", (_l, mutate) => {
+    expect(adaptReadyToFreezeContract(mutateReady(mutate), bindings()).ok).toBe(false);
+  });
+
+  it("accepts maxima that exactly equal the planned amount", () => {
+    const ready = mutateReady((r) => {
+      r.previewEvidence.preview.maxShippingMinor = "50";
+      r.previewEvidence.preview.maxPaymentMinor = "50";
+    });
+    const r = adaptReadyToFreezeContract(ready, bindings());
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.financialColumns.plannedShippingMinor).toBe("50");
+  });
+});
+
+describe("S-3: v0 bogus-gateway and test flags", () => {
+  it.each([
+    ["row gateway shopify_payments", () => bindings({ gateway: "shopify_payments" })],
+    ["row gateway manual", () => bindings({ gateway: "manual" })],
+    ["row gateway gift_card", () => bindings({ gateway: "gift_card" })],
+  ])("refuses %s", (_l, b) => {
+    expect(adaptReadyToFreezeContract(makeReady(), b()).ok).toBe(false);
+  });
+
+  it.each([
+    ["allocation gateway manual", (r: any) => {
+      r.previewEvidence.allocation.gateway = "manual";
+      r.requestPayload.transactions[0].gateway = "manual";
+      r.requestHash = sha256Hex(canonicalJson(r.requestPayload));
+    }],
+    ["order.test false", (r: any) => { r.previewEvidence.order.test = false; }],
+    ["order.test missing", (r: any) => { delete r.previewEvidence.order.test; }],
+    ["parentTest false", (r: any) => { r.previewEvidence.allocation.parentTest = false; }],
+    ["parentTest missing", (r: any) => { delete r.previewEvidence.allocation.parentTest; }],
+    ["parentKind AUTHORIZATION", (r: any) => { r.previewEvidence.allocation.parentKind = "AUTHORIZATION"; }],
+    ["parentStatus PENDING", (r: any) => { r.previewEvidence.allocation.parentStatus = "PENDING"; }],
+  ])("refuses evidence where %s", (_l, mutate) => {
+    expect(adaptReadyToFreezeContract(mutateReady(mutate), bindings()).ok).toBe(false);
+  });
+});
+
+describe("S-5: required evaluator evidence", () => {
+  it.each([
+    ["name missing", (r: any) => { delete r.previewEvidence.order.name; }],
+    ["name null", (r: any) => { r.previewEvidence.order.name = null; }],
+    ["name empty", (r: any) => { r.previewEvidence.order.name = ""; }],
+    ["name a number", (r: any) => { r.previewEvidence.order.name = 4002; }],
+    ["shippingPaidMinor missing", (r: any) => { delete r.previewEvidence.order.shippingPaidMinor; }],
+    ["shippingPaidMinor malformed", (r: any) => { r.previewEvidence.order.shippingPaidMinor = "0.5"; }],
+    ["shippingPaidMinor differs from source", (r: any) => { r.previewEvidence.order.shippingPaidMinor = "51"; }],
+  ])("refuses evidence where %s", (_l, mutate) => {
+    expect(adaptReadyToFreezeContract(mutateReady(mutate), bindings()).ok).toBe(false);
+  });
+
+  it("the secondary name is evidence, never confused with the primary name", () => {
+    const ready = makeReady();
+    expect(ready.previewEvidence.order.name).toBe("#4002");
+    expect(ready.previewEvidence.order.name).not.toBe(PRIMARY_NAME);
+    const r = adaptReadyToFreezeContract(ready, bindings());
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.contract.wireVariables.input.note).toBe(EVALUATOR_NOTE);
+  });
+});
+
+describe("S-4: snapshot discipline over discarded properties", () => {
+  it("drops unsupported undefined/function-valued properties yet still freezes exactly the snapshot data", () => {
+    for (const extra of [undefined, () => true, Symbol("s")]) {
+      // requestHash stays the evaluator's hash over the JSON-visible data —
+      // the unsupported key is invisible to JSON.stringify and so never
+      // reaches the snapshot the adapter validates, hashes and stores.
+      const ready = makeReady();
+      (ready.requestPayload as any).allowOverRefunding = extra;
+      const r = adaptReadyToFreezeContract(ready, bindings());
+      if (!r.ok) throw new Error(`${String(extra)} refused: ${r.reason}`);
+      const input = r.contract.wireVariables.input as any;
+      // The unsupported key never reaches the stored request, the stored
+      // request IS what the hash covered, and the financial values are the
+      // bound ones.
+      expect("allowOverRefunding" in input).toBe(false);
+      expect(input.shipping.amount).toBe("0.50");
+      expect(input.transactions[0].amount).toBe("0.50");
+      expect(r.contract.wireHash).toBe(
+        computeWireHash(r.contract.documentSha256, r.contract.wireVariables),
+      );
+      expect(ready.requestHash).toBe(sha256Hex(canonicalJson(input)));
+    }
+  });
+
+  it("a hash computed over the raw pre-snapshot object never validates the stored snapshot", () => {
+    // canonicalJson over the RAW object includes the discarded key — the
+    // evaluator's hash is over JSON data only, so this hash is foreign.
+    const ready = makeReady();
+    (ready.requestPayload as any).allowOverRefunding = undefined;
+    ready.requestHash = sha256Hex(canonicalJson(ready.requestPayload));
+    expect(adaptReadyToFreezeContract(ready, bindings()).ok).toBe(false);
   });
 });
 

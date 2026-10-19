@@ -22,6 +22,7 @@
 import { getCurrencyPrecision } from "./money";
 import { canonicalJson, minorToDecimal } from "./shipping-shadow.server";
 import {
+  HASH_64_PATTERN,
   MARKER_PREFIX,
   ORDER_GID_PATTERN,
   ORDER_TRANSACTION_GID_PATTERN,
@@ -41,7 +42,13 @@ import {
 const ORDER_GID_RE = new RegExp(ORDER_GID_PATTERN);
 const ORDER_TRANSACTION_GID_RE = new RegExp(ORDER_TRANSACTION_GID_PATTERN);
 const PLANNED_SHIPPING_MINOR_RE = new RegExp(PLANNED_SHIPPING_MINOR_PATTERN);
+const HASH_64_RE = new RegExp(HASH_64_PATTERN);
 const MINOR_RE = /^\d{1,40}$/;
+
+/** The only gateway v0 freezes: the dev-store Bogus Gateway, on a proven test
+ *  order (8.1 gateway allowlist). Production-gateway support is a separate
+ *  decision and is never reached through this adapter. */
+const GATEWAY_BOGUS_TEST = "bogus";
 
 /** Everything about the claimed row the freeze needs to prove equivalence
  *  against. Values are the row's immutable identity plus the financial
@@ -132,16 +139,26 @@ function isEvaluatorNote(note: unknown, marker: string, primaryOrderName: string
  *    the minor pattern, and equals the payload's transaction amount
  *    converted at the bound currency's established precision;
  *  - ready.currencyCode equals bindings.currencyCode;
- *  - ready.sourceShippingMinor is a minor string >= the planned amount
- *    (the refund can never exceed what was paid);
- *  - ready.requestHash, when present, equals sha256Hex(canonicalJson(
- *    requestPayload)) — the evaluator's own hash, recomputed;
+ *  - REFUND_ALL (8.1): ready.sourceShippingMinor is a minor string exactly
+ *    equal to the planned amount — the refund is the entire paid shipping,
+ *    never less or more;
+ *  - ready.requestHash is mandatory: a 64-hex sha256 equal to
+ *    sha256Hex(canonicalJson(requestPayload)) recomputed on the snapshot —
+ *    the evaluator's own hash, verified, never trusted;
  *  - previewEvidence.order.id/currencyCode equal the row's
- *    sourceOrderId/currencyCode (the row's primaryOrderName is bound by
- *    the note template instead), and
+ *    sourceOrderId/currencyCode, order.name is the secondary's nonempty
+ *    display name (the row's primaryOrderName is bound by the note
+ *    template instead), order.shippingPaidMinor equals sourceShippingMinor,
+ *    order.taxesIncluded is exactly false, order.shippingTaxMinor is "0"
+ *    and order.test is true — v0 freezes zero-tax test orders only;
  *    previewEvidence.allocation.parentTransactionId/gateway equal the
  *    row's parentTransactionId/gateway (the same values the transaction
- *    carries); the parent is a SUCCESS CAPTURE or SALE;
+ *    carries), the gateway is the v0 bogus test gateway, parentTest is
+ *    true, and the parent is a SUCCESS CAPTURE or SALE;
+ *  - previewEvidence.preview carries zero shipping tax, shippingMinor and
+ *    totalMinor equal to the planned amount, and maxShippingMinor /
+ *    maxPaymentMinor that are well-formed minor units at least the planned
+ *    amount;
  *  - the requestPayload passes the accepted S1-B1 validateRefundInput with
  *    the full row binding (exact key sets, strict positivity, precision,
  *    kind 'REFUND', notify/fullRefund false, orderId equality);
@@ -190,8 +207,8 @@ export function adaptReadyToFreezeContract(
   ) {
     return fail("row parentTransactionId is not a valid OrderTransaction GID");
   }
-  if (typeof b.gateway !== "string" || b.gateway.length === 0) {
-    return fail("row gateway must be a non-empty string");
+  if (b.gateway !== GATEWAY_BOGUS_TEST) {
+    return fail("row gateway is not the v0 bogus test gateway");
   }
   if (typeof b.currencyCode !== "string") {
     return fail(`row currencyCode ${JSON.stringify(b.currencyCode)} has no established precision`);
@@ -218,32 +235,37 @@ export function adaptReadyToFreezeContract(
   if (snapResult.kind !== "READY") return fail("evaluator result is not READY");
 
   const ready = snapResult;
+  if (!isMinorString(ready.plannedRefundMinor)) {
+    return fail("evaluator plannedRefundMinor is missing or malformed");
+  }
   if (ready.plannedRefundMinor !== b.plannedShippingMinor) {
     return fail("evaluator plannedRefundMinor differs from the row's planned amount");
   }
   if (ready.currencyCode !== b.currencyCode) {
     return fail("evaluator currencyCode differs from the row currency");
   }
+  // REFUND_ALL (8.1): the planned refund IS the entire paid shipping amount.
+  // A READY that would move less — or more — than the source paid never
+  // reaches a frozen contract (S-1).
   if (!isMinorString(ready.sourceShippingMinor)) {
     return fail("evaluator sourceShippingMinor is missing or malformed");
   }
-  if (BigInt(ready.sourceShippingMinor) < BigInt(b.plannedShippingMinor)) {
-    return fail("evaluator plans to refund more shipping than was paid");
+  if (ready.sourceShippingMinor !== ready.plannedRefundMinor) {
+    return fail("REFUND_ALL requires sourceShippingMinor to equal the planned amount");
   }
 
   const payload = ready.requestPayload;
   if (!isObject(payload)) return fail("evaluator requestPayload is missing or not an object");
 
-  // ── The evaluator's own requestHash, when it is present, must match the
-  //    payload under the one canonical serializer (never a second hashing
-  //    implementation). ──
-  if (ready.requestHash !== undefined) {
-    if (
-      typeof ready.requestHash !== "string" ||
-      ready.requestHash !== sha256Hex(canonicalJson(payload))
-    ) {
-      return fail("evaluator requestHash does not match its requestPayload");
-    }
+  // ── The evaluator's own requestHash is mandatory (S-4): a well-formed
+  //    sha256 recomputed over the snapshot payload under the one canonical
+  //    serializer — verified, never trusted, and never skipped. ──
+  if (
+    typeof ready.requestHash !== "string" ||
+    !HASH_64_RE.test(ready.requestHash) ||
+    ready.requestHash !== sha256Hex(canonicalJson(payload))
+  ) {
+    return fail("evaluator requestHash is missing, malformed or does not match its requestPayload");
   }
 
   // ── Financial evidence binds the same identities the payload carries ──
@@ -256,22 +278,40 @@ export function adaptReadyToFreezeContract(
   const tx = isObject(payload) && Array.isArray(payload.transactions) ? payload.transactions[0] : undefined;
   const txObj = isObject(tx) ? tx : undefined;
   if (eo.id !== b.sourceOrderId) return fail("evidence order id differs from the row sourceOrderId");
-  // evidence.order.name is the SECONDARY's display name — it does not carry
-  // the primary name; the primary is bound by the note template below.
-  if (eo.name !== undefined && typeof eo.name !== "string") {
-    return fail("evidence order name is malformed");
+  // evidence.order.name is the SECONDARY's display name — required evaluator
+  // evidence (S-5), but it does not carry the primary name; the primary is
+  // bound by the note template below.
+  if (typeof eo.name !== "string" || eo.name.length === 0) {
+    return fail("evidence order name is missing or malformed");
   }
   if (eo.currencyCode !== b.currencyCode) {
     return fail("evidence currencyCode differs from the row currency");
   }
-  if (eo.shippingPaidMinor !== undefined && eo.shippingPaidMinor !== ready.sourceShippingMinor) {
-    return fail("evidence shippingPaidMinor differs from sourceShippingMinor");
+  // The paid-shipping evidence must equal the evaluator's own source amount
+  // (S-5) — it is the REFUND_ALL amount by S-1.
+  if (!isMinorString(eo.shippingPaidMinor) || eo.shippingPaidMinor !== ready.sourceShippingMinor) {
+    return fail("evidence shippingPaidMinor is missing or differs from sourceShippingMinor");
+  }
+  // S-2/S-3: v0 freezes only zero-shipping-tax refunds on dev-store test
+  // orders — the flags must be present with exactly these values; nothing
+  // is defaulted.
+  if (eo.taxesIncluded !== false) {
+    return fail("evidence order taxesIncluded is not exactly false");
+  }
+  if (eo.shippingTaxMinor !== "0") {
+    return fail("evidence order shippingTaxMinor is not \"0\"");
+  }
+  if (eo.test !== true) {
+    return fail("evidence order is not flagged test");
   }
   if (ea.parentTransactionId !== b.parentTransactionId || ea.parentTransactionId !== txObj?.parentId) {
     return fail("evidence parentTransactionId does not bind the payload's parentId");
   }
-  if (ea.gateway !== b.gateway || ea.gateway !== txObj?.gateway) {
+  if (ea.gateway !== GATEWAY_BOGUS_TEST || ea.gateway !== b.gateway || ea.gateway !== txObj?.gateway) {
     return fail("evidence gateway does not bind the payload's gateway");
+  }
+  if (ea.parentTest !== true) {
+    return fail("evidence parent transaction is not flagged test");
   }
   if (
     (ea.parentKind !== "CAPTURE" && ea.parentKind !== "SALE") ||
@@ -281,11 +321,26 @@ export function adaptReadyToFreezeContract(
   }
   const preview = isObject(evidence.preview) ? evidence.preview : undefined;
   if (preview === undefined) return fail("evaluator previewEvidence is missing its preview");
+  // S-2: zero-tax preview whose shipping component and total both equal the
+  // planned amount, over a source that could cover it.
+  if (preview.shippingTaxMinor !== "0") {
+    return fail("evidence preview carries a shipping-tax component");
+  }
   if (preview.suggestedTransactionMinor !== b.plannedShippingMinor) {
     return fail("evidence suggestedTransactionMinor differs from the planned amount");
   }
   if (preview.shippingMinor !== b.plannedShippingMinor) {
     return fail("evidence previewShippingMinor differs from the planned amount");
+  }
+  if (preview.totalMinor !== b.plannedShippingMinor) {
+    return fail("evidence preview totalMinor differs from the planned amount");
+  }
+  const planned = BigInt(b.plannedShippingMinor);
+  if (!isMinorString(preview.maxShippingMinor) || BigInt(preview.maxShippingMinor) < planned) {
+    return fail("evidence maxShippingMinor is malformed or below the planned amount");
+  }
+  if (!isMinorString(preview.maxPaymentMinor) || BigInt(preview.maxPaymentMinor) < planned) {
+    return fail("evidence maxPaymentMinor is malformed or below the planned amount");
   }
 
   // ── The payload itself, fully bound to the row (shape, formats, exact
