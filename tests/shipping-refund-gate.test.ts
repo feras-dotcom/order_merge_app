@@ -703,3 +703,204 @@ describe("mutation-gap regression (T)", () => {
     expect(r.field).toBe("admissionCutoffAt");
   });
 });
+
+
+// ── Early-year instants (Date.UTC two-digit-year defect) ─────────────────
+// Expected instants come from a fixed civil→epoch conversion (Howard
+// Hinnant's days_from_civil), anchored below to published constants — never
+// from the parser under test or Date.UTC(year, …), which is the bug.
+const daysFromCivil = (y0: number, m: number, d: number): number => {
+  const y = m <= 2 ? y0 - 1 : y0;
+  const era = Math.floor(y / 400);
+  const yoe = y - era * 400;
+  const doy = Math.floor((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1;
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+  return era * 146097 + doe - 719468;
+};
+const civilMs = (
+  y: number, mo: number, d: number, h = 0, mi = 0, s = 0, ms = 0, offMin = 0,
+): number =>
+  daysFromCivil(y, mo, d) * 86_400_000 + h * 3_600_000 + mi * 60_000 + s * 1000 + ms - offMin * 60_000;
+const at = (ms: number) => new Date(ms);
+
+describe("independent civil-time oracle", () => {
+  it("is anchored to published epoch constants", () => {
+    expect(civilMs(1970, 1, 1)).toBe(0);
+    expect(civilMs(2000, 1, 1)).toBe(946_684_800_000);
+    expect(civilMs(1, 1, 1)).toBe(-62_135_596_800_000);
+    expect(civilMs(100, 1, 1)).toBe(-59_011_459_200_000);
+  });
+});
+
+describe("early-year instants are exact (S1-C1 corrective delta)", () => {
+  const EARLY_VALID: ReadonlyArray<readonly [string, number]> = [
+    ["0001-01-01T00:00:00Z", civilMs(1, 1, 1)],
+    ["0004-02-29T00:00:00Z", civilMs(4, 2, 29)], // real leap day in year 4
+    ["0099-12-31T23:59:59Z", civilMs(99, 12, 31, 23, 59, 59)],
+    ["0100-01-01T00:00:00Z", civilMs(100, 1, 1)],
+    ["0050-06-15T12:00:00Z", civilMs(50, 6, 15, 12)],
+    ["0099-12-31T23:30:00-01:00", civilMs(100, 1, 1, 0, 30)], // crosses into year 0100
+    ["0100-01-01T00:30:00+01:00", civilMs(99, 12, 31, 23, 30)], // crosses into year 0099
+    ["0001-01-01T23:00:00-01:00", civilMs(1, 1, 2)], // offset stays within year 1
+  ];
+  it.each(EARLY_VALID)("%s normalizes to its represented instant in every slot", (s, ms) => {
+    expect(open({ admissionEnabledAt: s }).admissionEpochAt.getTime()).toBe(ms);
+    expect(
+      open({
+        approval: { approvedAt: s, revokedAt: null, merchantOptInEpoch: EPOCHS.merchant, ackVersion: REQUIRED_ACK_VERSION },
+      }).approvalApprovedAt.getTime(),
+    ).toBe(ms);
+    expect(open({ dispatchEnabled: true, dispatchEnabledAt: s }).dispatchEnabledAt?.getTime()).toBe(ms);
+    const g = open({
+      activation: { ...live().activation, enabledAt: new Date(ms) },
+      approval: { approvedAt: EPOCHS.approved, revokedAt: null, merchantOptInEpoch: s, ackVersion: REQUIRED_ACK_VERSION },
+    });
+    expect(g.approvalOptInEpoch.getTime()).toBe(ms);
+  });
+
+  const EARLY_REFUSED = [
+    "0000-01-01T00:00:00Z", // year 0 cannot exist in TIMESTAMP(3) storage
+    "0000-02-29T00:00:00Z",
+    "0000-12-31T23:59:59.999Z",
+    // Year-0000 sources whose offset lands the result in representable year
+    // 0001 — the source string itself is refused regardless.
+    "0000-12-31T23:30:00-01:00",
+    "0000-01-01T00:30:00-01:00",
+    // Source year 0001 whose UTC result falls in year 0000 — unrepresentable.
+    "0001-01-01T00:30:00+01:00",
+    "0001-01-01T00:00:00+00:01",
+    // Symmetric upper bound: a -00:01 offset pushes year 9999 into 10000,
+    // which serializes as the unrepresentable expanded form "+010000-…".
+    "9999-12-31T23:59:59.999-00:01",
+  ];
+  it.each(EARLY_REFUSED)("refuses %s in every gate-carrying slot", (s) => {
+    const g1 = computeShippingGate(live({ admissionEnabledAt: s }));
+    if (g1.open) throw new Error(`admissionEpochAt accepted ${s}`);
+    const g2 = computeShippingGate(live({ approval: { ...live().approval!, approvedAt: s } }));
+    if (g2.open) throw new Error(`approvalApprovedAt accepted ${s}`);
+    const g3 = computeShippingGate(execLive({ dispatchEnabledAt: s }));
+    if (g3.open) throw new Error(`dispatchEnabledAt accepted ${s}`);
+    const d = admitShippingRefund(live(), s);
+    if (d.admitted) throw new Error(`operationCreatedAt accepted ${s}`);
+    const r = recheckShippingGate({ ...observed(), admissionEpochAt: s }, live(), "OBSERVE");
+    expect(r.equal).toBe(false);
+  });
+});
+
+describe("early-year admission cutoff cannot be bypassed", () => {
+  const E50 = {
+    merchant: at(civilMs(50, 1, 1)),
+    rollout: at(civilMs(50, 1, 2)),
+    switch: at(civilMs(50, 1, 3)),
+    admission: at(civilMs(50, 1, 4)),
+    approved: at(civilMs(50, 1, 5)),
+    dispatch: at(civilMs(50, 1, 6)),
+  };
+  const live50 = (over: Partial<ShippingGateLiveState> = {}): ShippingGateLiveState =>
+    live({
+      activation: {
+        ...live().activation,
+        shippingEnabledAt: E50.switch,
+        shippingRolloutAt: E50.rollout,
+        enabledAt: E50.merchant,
+      },
+      admissionEnabledAt: E50.admission,
+      approval: { ...live().approval!, approvedAt: E50.approved, merchantOptInEpoch: E50.merchant },
+      ...over,
+    });
+  const exec50 = (over: Partial<ShippingGateLiveState> = {}) =>
+    live50({ dispatchEnabled: true, dispatchEnabledAt: E50.dispatch, ...over });
+
+  it("a year-0040 combine is never admitted under a year-0050 cutoff (the defect put it in 1940)", () => {
+    for (const st of [live50(), exec50()]) {
+      const d = admitShippingRefund(st, "0040-01-01T00:00:00Z");
+      if (d.admitted) throw new Error(`year-0040 combine admitted as ${d.lane}`);
+      expect(d.code).toBe("OPERATION_PREDATES_ADMISSION_CUTOFF");
+    }
+  });
+
+  it("the year-0050 cutoff is stored at the represented instant and boundaries hold at 1 ms", () => {
+    const d = admitShippingRefund(exec50(), at(civilMs(50, 1, 7)));
+    if (!d.admitted) throw new Error(d.code);
+    expect(d.snapshot.merchantEpochAt.getTime()).toBe(civilMs(50, 1, 1));
+    expect(d.snapshot.rolloutEpochAt.getTime()).toBe(civilMs(50, 1, 2));
+    expect(d.snapshot.switchEpochAt.getTime()).toBe(civilMs(50, 1, 3));
+    expect(d.snapshot.activationCutoffAt.getTime()).toBe(civilMs(50, 1, 3));
+    expect(d.snapshot.admissionEpochAt.getTime()).toBe(civilMs(50, 1, 4));
+    expect(d.snapshot.admissionCutoffAt.getTime()).toBe(civilMs(50, 1, 5));
+    expect(d.snapshot.approvalApprovedAt.getTime()).toBe(civilMs(50, 1, 5));
+    expect(d.snapshot.approvalOptInEpoch.getTime()).toBe(civilMs(50, 1, 1));
+    expect(d.lane).toBe("EXECUTE");
+    expect(d.snapshot.dispatchEpochAtAdmission?.getTime()).toBe(civilMs(50, 1, 6));
+    // String operationCreatedAt at the exact early-year boundaries.
+    const before = admitShippingRefund(exec50(), "0050-01-05T23:59:59.999Z");
+    if (!before.admitted) throw new Error("admission rejected below dispatch epoch");
+    expect(before.lane).toBe("OBSERVE");
+    const onCutoff = admitShippingRefund(live50(), "0050-01-05T00:00:00Z");
+    if (!onCutoff.admitted) throw new Error("combine exactly on the admission cutoff refused");
+    const justBefore = admitShippingRefund(live50(), "0050-01-04T23:59:59.999Z");
+    if (justBefore.admitted) throw new Error("admitted 1ms before the year-0050 cutoff");
+  });
+
+  it("a year-0050 snapshot rechecks equal against live year-0050 Dates — including through JSON", () => {
+    const d = admitShippingRefund(exec50(), at(civilMs(50, 1, 7)));
+    if (!d.admitted) throw new Error(d.code);
+    const r = recheckShippingGate(d.snapshot, exec50(), "EXECUTE");
+    if (!r.equal) throw new Error(`equal year-0050 epochs changed: ${r.code} ${r.field}`);
+    const json = JSON.parse(JSON.stringify(d.snapshot)) as typeof d.snapshot;
+    expect(json.admissionEpochAt as unknown).toBe("0050-01-04T00:00:00.000Z");
+    const rj = recheckShippingGate(json, exec50(), "EXECUTE");
+    if (!rj.equal) throw new Error(`JSON round-trip changed the recheck: ${rj.code} ${rj.field}`);
+  });
+
+  it("a year-1950 live state never compares equal to a year-0050 stored snapshot", () => {
+    const e1950 = {
+      merchant: at(civilMs(1950, 1, 1)),
+      rollout: at(civilMs(1950, 1, 2)),
+      switch: at(civilMs(1950, 1, 3)),
+      admission: at(civilMs(1950, 1, 4)),
+      approved: at(civilMs(1950, 1, 5)),
+      dispatch: at(civilMs(1950, 1, 6)),
+    };
+    const live1950 = live50({
+      activation: {
+        ...live().activation,
+        shippingEnabledAt: e1950.switch,
+        shippingRolloutAt: e1950.rollout,
+        enabledAt: e1950.merchant,
+      },
+      admissionEnabledAt: e1950.admission,
+      approval: { ...live().approval!, approvedAt: e1950.approved, merchantOptInEpoch: e1950.merchant },
+      dispatchEnabled: true,
+      dispatchEnabledAt: e1950.dispatch,
+    });
+    const d = admitShippingRefund(exec50(), at(civilMs(50, 1, 7)));
+    if (!d.admitted) throw new Error(d.code);
+    const snap0050 = JSON.parse(JSON.stringify(d.snapshot));
+    const r = recheckShippingGate(snap0050, live1950, "EXECUTE");
+    if (r.equal) throw new Error("a year-0050 snapshot equalled a year-1950 live state");
+    expect(r.code).toBe("GATE_CHANGED");
+  });
+});
+
+describe("non-boolean dispatch switch with a NULL epoch (G4c/G4h)", () => {
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["0", 0],
+    ["'false'", "false"],
+    ["'true'", "true"],
+  ])("dispatchEnabled %s + null epoch → DISPATCH_CONTROL_INVALID", (_l, sw) => {
+    const g = computeShippingGate(live({ dispatchEnabled: sw as never, dispatchEnabledAt: null }));
+    if (g.open) throw new Error("non-boolean dispatch switch with null epoch opened the gate");
+    expect(g.code).toBe("DISPATCH_CONTROL_INVALID");
+    const d = admitShippingRefund(live({ dispatchEnabled: sw as never, dispatchEnabledAt: null }), OP_AFTER_DISPATCH);
+    if (d.admitted) throw new Error(`non-boolean dispatch switch admitted ${d.lane}`);
+    expect(d.code).toBe("DISPATCH_CONTROL_INVALID");
+  });
+  it("false + explicit null remains the valid disabled case", () => {
+    const d = admitShippingRefund(live(), OP_AFTER_ADMISSION);
+    if (!d.admitted) throw new Error(d.code);
+    expect(d.lane).toBe("OBSERVE");
+  });
+});

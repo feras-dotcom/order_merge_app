@@ -246,12 +246,35 @@ const normInstant = (value: unknown): Date | null => {
   ) {
     return null;
   }
-  let ms = Date.UTC(year, month - 1, day, hour, minute, second, fracS === undefined ? 0 : Number(fracS.padEnd(3, "0")));
+  // Year 0000 is refused: it cannot be stored in a TIMESTAMP(3) column
+  // (PostgreSQL writes 1 BC as `0001-…BC`, not `0000-…`), so no string in
+  // this module's grammar can ever be a stored epoch of year zero.
+  if (year < 1) return null;
+  // Date.UTC(year, …) silently maps years 0–99 onto 1900–1999. Build the
+  // day-of-epoch with a safe reference year instead, then set the real
+  // year — setUTCFullYear uses the full year verbatim and preserves the
+  // time fields already baked in.
+  const civil = new Date(
+    Date.UTC(
+      2000, 0, 1,
+      hour, minute, second,
+      fracS === undefined ? 0 : Number(fracS.padEnd(3, "0")),
+    ),
+  );
+  civil.setUTCFullYear(year, month - 1, day);
+  let ms = civil.getTime();
   if (zoneS !== "Z") {
     const off = (offSignS === "-" ? -1 : 1) * (offH * 3600_000 + offM * 60_000);
     ms -= off;
   }
-  return new Date(ms);
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  // An offset can push a year-0001 input's UTC instant into year 0000
+  // (or a year-9999 input into year 10000). Both results serialize to a
+  // form this grammar and TIMESTAMP(3) cannot store (`0000-…`/`+010000-…`),
+  // so they refuse like a literal year-0000 source.
+  if (d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) return null;
+  return d;
 };
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
