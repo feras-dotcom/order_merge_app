@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { canonicalJson, evaluateShadowSource, readOnlyAdmin } from "../app/lib/shipping-shadow.server";
+import { canonicalJson, evaluateShadowSource, minorToDecimal, readOnlyAdmin } from "../app/lib/shipping-shadow.server";
 import type { AdminClient } from "../app/lib/graphql.server";
 import {
   REFUND_DOCUMENT_SHA256,
@@ -450,6 +450,140 @@ describe("negative cases", () => {
     ["a null hash", (r: any) => { r.requestHash = null; }],
   ])("refuses a tampered requestHash: %s", (_l, mutate) => {
     expect(adaptReadyToFreezeContract(mutateReady(mutate), bindings()).ok).toBe(false);
+  });
+});
+
+describe("B-1 snapshot integrity", () => {
+  /** A payload whose amounts are computed on read: the first `t` reads
+   *  return the good amount, later reads the bad one. requestHash is the
+   *  evaluator-style hash of the good payload (what a caller computed when
+   *  it first observed the values). */
+  const accessorReady = (shipThreshold: number, txThreshold: number): any => {
+    const r = makeReady();
+    let sr = 0;
+    let tr = 0;
+    Object.defineProperty(r.requestPayload.shipping, "amount", {
+      get: () => (sr++ < shipThreshold ? "0.50" : "9.99"),
+      enumerable: true,
+    });
+    Object.defineProperty(r.requestPayload.transactions[0], "amount", {
+      get: () => (tr++ < txThreshold ? "0.50" : "9.99"),
+      enumerable: true,
+    });
+    r.requestHash = sha256Hex(
+      canonicalJson({
+        ...r.requestPayload,
+        shipping: { amount: "0.50", fullRefund: false },
+        transactions: [{ ...r.requestPayload.transactions[0], amount: "0.50" }],
+      }),
+    );
+    return r;
+  };
+
+  it("computed-on-read amounts can never freeze values that were not validated", () => {
+    // The (7, 6) pair is the exact reproduction from the independent
+    // review: under the old validate-then-clone order it returned ok:true
+    // with frozen amounts 9.99 while plannedShippingMinor stayed 50.
+    for (let st = 0; st <= 14; st++) {
+      for (let tt = 0; tt <= 14; tt++) {
+        const r = adaptReadyToFreezeContract(
+          accessorReady(st, tt),
+          bindings(),
+        );
+        if (!r.ok) continue;
+        const input = r.contract.wireVariables.input;
+        expect(input.shipping.amount).toBe("0.50");
+        expect(input.transactions[0].amount).toBe("0.50");
+        // Independent assertion against the planned amount, not a builder.
+        expect(input.shipping.amount).toBe(minorToDecimal("50", 2));
+        expect(r.financialColumns.plannedShippingMinor).toBe("50");
+      }
+    }
+  });
+
+  it.each([
+    ["throwing getter on note", (r: any) => {
+      Object.defineProperty(r.requestPayload, "note", {
+        get: () => { throw new Error("boom"); },
+        enumerable: true,
+      });
+    }],
+    ["throwing getter on shipping amount", (r: any) => {
+      Object.defineProperty(r.requestPayload.shipping, "amount", {
+        get: () => { throw new Error("boom"); },
+        enumerable: true,
+      });
+    }],
+    ["a Proxy whose read fails", (r: any) => {
+      r.requestPayload = new Proxy(r.requestPayload, {
+        get: () => { throw new Error("proxy read failed"); },
+      });
+    }],
+    ["a circular payload", (r: any) => {
+      r.requestPayload.self = r.requestPayload;
+    }],
+    ["a BigInt amount", (r: any) => {
+      r.requestPayload.shipping.amount = 50n as any;
+    }],
+    ["a function in the payload", (r: any) => {
+      r.requestPayload.shipping.amount = (() => "0.50") as any;
+    }],
+    ["an undefined notify", (r: any) => {
+      r.requestPayload.notify = undefined;
+    }],
+  ])("returns ok:false, never throws, for %s", (_l, mutate) => {
+    const ready = mutateReady(mutate);
+    let r: ReturnType<typeof adaptReadyToFreezeContract>;
+    expect(() => {
+      r = adaptReadyToFreezeContract(ready, bindings());
+    }).not.toThrow();
+    expect(r!.ok).toBe(false);
+  });
+
+  it("a benign Proxy that reads as plain data is snapshotted to plain data", () => {
+    const ready = makeReady();
+    ready.requestPayload = new Proxy(ready.requestPayload, {});
+    const r = adaptReadyToFreezeContract(ready, bindings());
+    if (!r.ok) throw new Error(r.reason);
+    // The contract contains the values the snapshot validated — plain data
+    // with no Proxy identity carried through.
+    expect(Object.getPrototypeOf(r.contract.wireVariables.input)).toBe(
+      Object.prototype,
+    );
+    expect(r.contract.wireVariables.input.note).toBe(EVALUATOR_NOTE);
+    expect(r.contract.wireVariables.input.shipping.amount).toBe("0.50");
+  });
+
+  it("non-index properties on the transactions array cannot reach the contract", () => {
+    const ready = mutateReady((r) => {
+      (r.requestPayload.transactions as any).extra = { allowOverRefunding: true };
+      r.requestHash = sha256Hex(canonicalJson(r.requestPayload));
+    });
+    const r = adaptReadyToFreezeContract(ready, bindings());
+    if (!r.ok) throw new Error(r.reason);
+    const stored = r.contract.wireVariables.input.transactions as any;
+    expect("extra" in stored).toBe(false);
+    expect(stored.length).toBe(1);
+    expect(stored[0].amount).toBe("0.50");
+    expect(Object.isFrozen(stored)).toBe(true);
+  });
+
+  it("post-call mutation of the READY result or the bindings cannot change the contract", () => {
+    const ready = makeReady();
+    const b = bindings();
+    const r = adaptReadyToFreezeContract(ready, b);
+    if (!r.ok) throw new Error(r.reason);
+    ready.requestPayload.shipping.amount = "99.99";
+    ready.requestPayload.transactions[0].amount = "99.99";
+    ready.requestPayload.note = "tampered";
+    ready.plannedRefundMinor = "9999";
+    (b as any).plannedShippingMinor = "9999";
+    (b as any).idempotencyKey = "123e4567-e89b-42d3-a456-426614174999";
+    const input = r.contract.wireVariables.input;
+    expect(input.shipping.amount).toBe("0.50");
+    expect(input.note).toBe(EVALUATOR_NOTE);
+    expect(r.contract.wireVariables.idempotencyKey).toBe(KEY);
+    expect(r.financialColumns.plannedShippingMinor).toBe("50");
   });
 });
 

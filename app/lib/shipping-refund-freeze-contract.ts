@@ -148,17 +148,39 @@ function isEvaluatorNote(note: unknown, marker: string, primaryOrderName: string
  *  - the note is the evaluator's exact template with the row's marker and
  *    primary name — verbatim, never regenerated.
  *
- * The evaluator result and the bindings are never mutated; the returned
- * input is a deep-frozen deep copy, so later writes to the caller's
+ * The evaluator result and the bindings are detached into ONE plain-JSON
+ * snapshot before any check runs, then never read again: the values proven
+ * below are byte for byte the values frozen into the contract (B-1).
+ * Neither caller object is mutated, and later writes to the caller's
  * objects cannot alter the contract.
  */
 export function adaptReadyToFreezeContract(
   result: unknown,
   bindings: FreezeBindings,
 ): FreezeAdaptation {
+  // ── One stable snapshot before anything is read (B-1) ──
+  // Caller objects are not trustworthy plain data: accessor properties can
+  // return a different value on each read, getters and Proxy traps can
+  // throw, and any copy taken AFTER validation (structuredClone or
+  // otherwise) can disagree with the values that were validated. A single
+  // guarded JSON round trip taken up front yields detached data: every
+  // check, hash and stored value below is computed on this snapshot, and
+  // nothing reads the caller's objects again. A value that cannot be
+  // represented as JSON — a throwing getter, a circular structure, a
+  // BigInt, a Proxy whose reads fail — refuses; it never throws out of
+  // this function.
+  let snapResult: unknown;
+  let snapBindings: unknown;
+  try {
+    snapResult = JSON.parse(JSON.stringify(result));
+    snapBindings = JSON.parse(JSON.stringify(bindings));
+  } catch {
+    return fail("inputs are not plain JSON data");
+  }
+
   // ── Bindings must themselves be well-formed ──
-  if (!isObject(bindings)) return fail("freeze bindings are not an object");
-  const b = bindings;
+  if (!isObject(snapBindings)) return fail("freeze bindings are not an object");
+  const b = snapBindings;
   if (typeof b.sourceOrderId !== "string" || !ORDER_GID_RE.test(b.sourceOrderId)) {
     return fail("row sourceOrderId is not a valid order GID");
   }
@@ -171,8 +193,10 @@ export function adaptReadyToFreezeContract(
   if (typeof b.gateway !== "string" || b.gateway.length === 0) {
     return fail("row gateway must be a non-empty string");
   }
-  const precision =
-    typeof b.currencyCode === "string" ? getCurrencyPrecision(b.currencyCode) : null;
+  if (typeof b.currencyCode !== "string") {
+    return fail(`row currencyCode ${JSON.stringify(b.currencyCode)} has no established precision`);
+  }
+  const precision = getCurrencyPrecision(b.currencyCode);
   if (precision === null) {
     return fail(`row currencyCode ${JSON.stringify(b.currencyCode)} has no established precision`);
   }
@@ -190,10 +214,10 @@ export function adaptReadyToFreezeContract(
   }
 
   // ── READY shape ──
-  if (!isObject(result)) return fail("evaluator result is not an object");
-  if (result.kind !== "READY") return fail("evaluator result is not READY");
+  if (!isObject(snapResult)) return fail("evaluator result is not an object");
+  if (snapResult.kind !== "READY") return fail("evaluator result is not READY");
 
-  const ready = result;
+  const ready = snapResult;
   if (ready.plannedRefundMinor !== b.plannedShippingMinor) {
     return fail("evaluator plannedRefundMinor differs from the row's planned amount");
   }
@@ -290,9 +314,10 @@ export function adaptReadyToFreezeContract(
     return fail("payload amounts do not equal minorToDecimal(plannedShippingMinor, precision)");
   }
 
-  // ── Build the stored contract from an exact deep copy — the evaluator's
-  //    object is never frozen or altered in place. ──
-  const input = structuredClone(payload) as unknown as ShippingRefundInput;
+  // ── The stored input IS the validated snapshot payload — detached from
+  //    the caller's object since the first read, so it carries exactly the
+  //    values that were proven and hashed above. ──
+  const input = payload as unknown as ShippingRefundInput;
   const wireVariables = buildWireVariables(b.idempotencyKey, input);
   const contract: FrozenWireContract = {
     documentSha256: REFUND_DOCUMENT_SHA256,
