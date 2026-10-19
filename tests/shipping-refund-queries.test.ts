@@ -94,7 +94,10 @@ describe("document registry (12.1, 3.2 rules 8 and 9)", () => {
     expect(Q_AGREEMENTS.document).toContain("agreements(first: 50, after: $after)");
     expect(DETAIL_IDS_PER_REQUEST).toBe(5);
     expect(DETAIL_REQUESTS_PER_EVALUATION).toBe(2);
+    expect(DETAIL_CONNECTION_FIRST).toBe(10);
     expect(PLAIN_ARRAY_COMPLETENESS_LIMIT).toBe(50);
+    expect(AGREEMENTS_PAGE_SIZE).toBe(50);
+    expect(AGREEMENTS_MAX_PAGES).toBe(5);
     expect(QUERY_COST_ACCEPTANCE_LIMIT).toBe(500);
   });
 });
@@ -133,6 +136,9 @@ describe("Q-APPID validator", () => {
       { data: { currentAppInstallation: null } },
       { data: { currentAppInstallation: { app: null } } },
       { data: { currentAppInstallation: { app: { id: "not-a-gid" } } } },
+      { data: { currentAppInstallation: { app: { id: "gid://shopify/App/" } } } },
+      { data: { currentAppInstallation: { app: { id: "gid://shopify/App/abc" } } } },
+      { data: { currentAppInstallation: { app: { id: "gid://shopify/App/777/extra" } } } },
       { data: { currentAppInstallation: { app: { id: 123 } } } },
       { data: {} },
       {},
@@ -181,8 +187,13 @@ describe("Q-RECHECK validator", () => {
     ["wrong source id", { source: order("gid://shopify/Order/9999") }],
     ["null primary", { primary: null }],
     ["wrong primary id", { primary: { id: "gid://shopify/Order/9999" } }],
-    ["refunds at the bound", { source: order(SOURCE_GID, { refunds: new Array(50).fill({ id: "x" }) }) }],
+    ["refunds at the bound", { source: order(SOURCE_GID, { refunds: new Array(50).fill({ id: "gid://shopify/Refund/1" }) }) }],
+    ["a refund element with a non-GID id", { source: order(SOURCE_GID, { refunds: [{ id: "x" }] }) }],
+    ["a refund element without an id", { source: order(SOURCE_GID, { refunds: [{ note: "n" }] }) }],
+    ["duplicated refund ids", { source: order(SOURCE_GID, { refunds: [{ id: "gid://shopify/Refund/1" }, { id: "gid://shopify/Refund/1" }] }) }],
     ["transactions at the bound", { source: order(SOURCE_GID, { transactions: new Array(50).fill({}) }) }],
+    ["a transaction with a non-GID id", { source: order(SOURCE_GID, { transactions: [{ id: "x" }] }) }],
+    ["duplicated transaction ids", { source: order(SOURCE_GID, { transactions: [{ id: "gid://shopify/OrderTransaction/1" }, { id: "gid://shopify/OrderTransaction/1" }] }) }],
     ["refunds not an array", { source: order(SOURCE_GID, { refunds: { nodes: [] } }) }],
     ["transactions null", { source: order(SOURCE_GID, { transactions: null }) }],
   ])("rejects %s", (_label, overrides) => {
@@ -228,8 +239,13 @@ describe("Q-RECONCILE validator", () => {
   it.each([
     ["order absent", { data: { order: null } }],
     ["wrong order id", { data: { order: { ...body([], []).data.order, id: PRIMARY_GID } } }],
-    ["refunds at the bound", body(new Array(50).fill(refund("x")))],
+    ["refunds at the bound", body(new Array(50).fill(refund("gid://shopify/Refund/7")))],
+    ["a refund element with a non-GID id", body([{ id: "x" }])],
+    ["duplicated refund ids", body([refund(REFUND_GID), refund(REFUND_GID)])],
     ["transactions at the bound", body([], new Array(50).fill({}))],
+    ["a transaction element with a non-GID id", body([], [{ id: "x" }])],
+    ["duplicated transaction ids", body([], [{ id: "gid://shopify/OrderTransaction/1" }, { id: "gid://shopify/OrderTransaction/1" }])],
+    ["a non-object transaction element", body([], ["txn!"])],
     ["refunds null", body(null)],
     ["a refund element without an id", body([{ note: "x" }])],
     ["a non-object refund element", body(["refund!"])],
@@ -246,7 +262,9 @@ describe("Q-REFUND-DETAIL bounds and response", () => {
     processedAt: "2030-01-05T10:00:00Z",
     order: { id: SOURCE_GID },
     totalRefundedSet: { presentmentMoney: { amount: "0.50", currencyCode: "USD" } },
-    duties: { amountSet: { presentmentMoney: { amount: "0.00", currencyCode: "USD" } } },
+    // Refund.duties is a nullable [RefundDuty!] list (F19) — a real array,
+    // not the MoneyBag the money fields are.
+    duties: [],
     refundShippingLines: { nodes: [], pageInfo: { hasNextPage: false } },
     refundLineItems: { nodes: [], pageInfo: { hasNextPage: false } },
     orderAdjustments: { nodes: [], pageInfo: { hasNextPage: false } },
@@ -259,7 +277,9 @@ describe("Q-REFUND-DETAIL bounds and response", () => {
   it("refuses more than 5 ids per request and more than 2 requests per evaluation", () => {
     expect(validateDetailRequestIds(ids).ok).toBe(true);
     expect(validateDetailRequestIds([...ids, "gid://shopify/Refund/4", "gid://shopify/Refund/5"]).ok).toBe(true);
-    expect(validateDetailRequestIds([...ids, "a", "b", "c"]).ok).toBe(false);
+    expect(validateDetailRequestIds([...ids, "gid://shopify/Refund/4", "gid://shopify/Refund/5", "gid://shopify/Refund/6"]).ok).toBe(false);
+    expect(validateDetailRequestIds(["a", "b"]).ok).toBe(false);
+    expect(validateDetailRequestIds(["gid://shopify/Order/1"]).ok).toBe(false);
     expect(validateDetailRequestIds([]).ok).toBe(false);
     expect(validateDetailRequestIds([...ids, ids[0]]).ok).toBe(false);
     expect(validateDetailRequestIds("gid://shopify/Refund/1").ok).toBe(false);
@@ -285,6 +305,9 @@ describe("Q-REFUND-DETAIL bounds and response", () => {
     ["hasNextPage true", { data: { nodes: ids.map((id) => detailNode(id, { transactions: { nodes: [], pageInfo: { hasNextPage: true } } })) } }],
     ["hasNextPage missing", { data: { nodes: ids.map((id) => detailNode(id, { orderAdjustments: { nodes: [], pageInfo: {} } })) } }],
     ["nodes array missing", { data: { nodes: ids.map((id) => detailNode(id, { refundLineItems: { pageInfo: { hasNextPage: false } } })) } }],
+    ["duties null", { data: { nodes: ids.map((id) => detailNode(id, { duties: null })) } }],
+    ["duties an object", { data: { nodes: ids.map((id) => detailNode(id, { duties: { amountSet: {} } })) } }],
+    ["duties missing", { data: { nodes: ids.map((id) => detailNode(id, { duties: undefined })) } }],
     ["no data", {}],
     ["top-level errors", { errors: [{ message: "x" }], data: { nodes: ids.map((id) => detailNode(id)) } }],
   ])("rejects %s", (_label, b) => {
@@ -326,8 +349,10 @@ describe("Q-AGREEMENTS pagination bounds", () => {
     refund: { id: REFUND_GID },
     ...over,
   });
+  // The approved Q-AGREEMENTS document selects only `agreements` under `order`
+  // — no `order.id` — so fixtures model exactly that selection set.
   const page = (nodes: unknown, pageInfo: unknown) => ({
-    data: { order: { id: SOURCE_GID, agreements: { nodes, pageInfo } } },
+    data: { order: { agreements: { nodes, pageInfo } } },
   });
 
   it("accepts a well-formed page, mid-page and final", () => {
@@ -344,12 +369,15 @@ describe("Q-AGREEMENTS pagination bounds", () => {
   });
 
   it.each([
+    ["a null order", { data: { order: null } }],
+    ["order not an object", { data: { order: "x" } }],
     ["missing pageInfo", page([agreement()], undefined)],
     ["non-boolean hasNextPage", page([], { hasNextPage: "false" })],
     ["hasNextPage without endCursor", page([agreement()], { hasNextPage: true, endCursor: null })],
     ["untyped agreement node", page([{ id: "x" }], { hasNextPage: false, endCursor: null })],
-    ["agreements not a connection", { data: { order: { id: SOURCE_GID, agreements: [] } } }],
-    ["wrong order id", { data: { order: { id: PRIMARY_GID, agreements: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } }],
+    ["an agreement node with a non-string id", page([{ __typename: "RefundAgreement", id: 7 }], { hasNextPage: false, endCursor: null })],
+    ["agreements not a connection", { data: { order: { agreements: [] } } }],
+    ["agreements missing", { data: { order: {} } }],
   ])("rejects %s", (_label, b) => {
     expect(validateAgreementsPage(b, { sourceOrderId: SOURCE_GID }).ok).toBe(false);
   });

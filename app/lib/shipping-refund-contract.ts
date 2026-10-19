@@ -32,6 +32,7 @@ import { getCurrencyPrecision } from "./money";
 export const ORDER_GID_PATTERN = "^gid://shopify/Order/[0-9]+$";
 export const ORDER_TRANSACTION_GID_PATTERN = "^gid://shopify/OrderTransaction/[0-9]+$";
 export const REFUND_GID_PATTERN = "^gid://shopify/Refund/[0-9]+$";
+export const APP_GID_PATTERN = "^gid://shopify/App/[0-9]+$";
 export const CURRENCY_CODE_PATTERN = "^[A-Z]{3}$";
 export const HASH_64_PATTERN = "^[0-9a-f]{64}$";
 export const PLANNED_SHIPPING_MINOR_PATTERN = "^[1-9][0-9]{0,39}$";
@@ -62,7 +63,12 @@ const HASH_64_RE = new RegExp(HASH_64_PATTERN);
  * identifies which contract produced the row; the pinned API version is part
  * of it so a re-pinned build produces a different value. (The specification
  * names the column but never fixes its literal value — this is the build's
- * chosen constant and is pinned by a test.)
+ * chosen constant and is pinned to an independent literal by a test.)
+ *
+ * The earlier S1-A PostgreSQL fixture rows used the test-only label
+ * 'refundCreate@2026-04' (tests/shipping-refund-schema-pg.test.ts): that
+ * string only fed CHECK-bound inserts on a disposable database and was never
+ * the production version authority — this constant is.
  */
 export const REFUND_MUTATION_VERSION = "MergeShipShippingRefund@2026-04";
 
@@ -209,8 +215,12 @@ export interface ShippingRefundWireVariables {
  * Deterministic: same marker and order id produce the same note.
  */
 export function buildRefundNote(marker: string, sourceOrderId: string): string {
-  if (!isValidMarker(marker)) {
-    throw new Error("refund contract: note requires a valid MS-SHIPREFUND-<uuid> marker");
+  // §5.1 requires the generated marker to embed a UUIDv4. The marker CHECK is
+  // deliberately looser (MS-SHIPREFUND-[0-9a-f-]{36}) and isValidMarker mirrors
+  // it for shape parity; the build side additionally requires the strict v4
+  // suffix so a CHECK-legal but non-UUID marker can never be frozen.
+  if (!isValidMarker(marker) || !isStrictUuidV4(marker.slice(MARKER_PREFIX.length))) {
+    throw new Error("refund contract: note requires an MS-SHIPREFUND-<uuidv4> marker");
   }
   if (typeof sourceOrderId !== "string" || !ORDER_GID_RE.test(sourceOrderId)) {
     throw new Error(`refund contract: malformed source order id ${JSON.stringify(sourceOrderId)}`);
@@ -321,6 +331,12 @@ function isPositiveDecimal(value: string): boolean {
   return BigInt(value.replace(".", "")) > 0n;
 }
 
+/** Fractional digit count of a WIRE_AMOUNT_PATTERN-conforming decimal string. */
+function fractionDigits(value: string): number {
+  const dot = value.indexOf(".");
+  return dot === -1 ? 0 : value.length - dot - 1;
+}
+
 /**
  * Fail-closed validator for a RefundInput-shaped value. Mirrors the shape
  * trigger's exact key sets and the CHECK rules that are expressible without
@@ -328,9 +344,12 @@ function isPositiveDecimal(value: string): boolean {
  * transaction, kind strictly 'REFUND' (a JSON null or any other value
  * refuses), decimal format and strict positivity, amount equality between
  * shipping and the transaction, orderId equality, and the marker inside the
- * note. When `expected` is supplied it additionally binds the row-level
- * equalities the wire CHECKs enforce (orderId, parentId, gateway, currency,
- * minor amount at the currency's own precision).
+ * note. The decimal amounts must always carry exactly the precision the
+ * established ISO 4217 table assigns to input.currency — that application
+ * invariant (5.3) holds with or without an `expected` binding, and an
+ * unknown currency fails closed. When `expected` is supplied it additionally
+ * binds the row-level equalities the wire CHECKs enforce (orderId, parentId,
+ * gateway, currency, minor amount at the currency's own precision).
  */
 export function validateRefundInput(
   input: unknown,
@@ -363,6 +382,12 @@ export function validateRefundInput(
   if (typeof i.currency !== "string" || !CURRENCY_CODE_RE.test(i.currency)) {
     return fail("input.currency is not a valid currency code");
   }
+  // The currency must have an established ISO 4217 precision; the precision
+  // itself is enforced against both amounts below.
+  const inputPrecision = getCurrencyPrecision(i.currency);
+  if (inputPrecision === null) {
+    return fail(`input.currency ${JSON.stringify(i.currency)} has no established precision`);
+  }
 
   const sh = i.shipping;
   const allowedShipping = ["fullRefund", "amount"];
@@ -374,6 +399,11 @@ export function validateRefundInput(
   if (s.fullRefund !== false) return fail("shipping.fullRefund must be exactly false");
   if (!isDecimalAmount(s.amount) || !isPositiveDecimal(s.amount)) {
     return fail("shipping.amount is not a strictly positive decimal string");
+  }
+  if (fractionDigits(s.amount) !== inputPrecision) {
+    return fail(
+      `shipping.amount must carry exactly ${inputPrecision} fractional digit(s) for ${i.currency}`,
+    );
   }
 
   if (!Array.isArray(i.transactions) || i.transactions.length !== 1) {
@@ -399,6 +429,11 @@ export function validateRefundInput(
   if (!isDecimalAmount(t.amount) || !isPositiveDecimal(t.amount)) {
     return fail("transaction.amount is not a strictly positive decimal string");
   }
+  if (fractionDigits(t.amount) !== inputPrecision) {
+    return fail(
+      `transaction.amount must carry exactly ${inputPrecision} fractional digit(s) for ${i.currency}`,
+    );
+  }
   if (t.amount !== s.amount) return fail("transaction.amount must equal shipping.amount");
 
   if (expected) {
@@ -414,10 +449,21 @@ export function validateRefundInput(
     if (expected.currencyCode !== undefined && i.currency !== expected.currencyCode) {
       return fail("input.currency does not match the row currencyCode");
     }
-    if (expected.plannedShippingMinor !== undefined && expected.currencyCode !== undefined) {
-      const precision = getCurrencyPrecision(expected.currencyCode);
+    if (expected.plannedShippingMinor !== undefined) {
+      // Format first: a malformed expected value is a validation failure, not
+      // a BigInt throw. The precision comes from the row currency when given,
+      // otherwise from the already validated input.currency.
+      if (
+        typeof expected.plannedShippingMinor !== "string" ||
+        !PLANNED_SHIPPING_MINOR_RE.test(expected.plannedShippingMinor)
+      ) {
+        return fail("expected.plannedShippingMinor must match the minor-unit pattern");
+      }
+      const precision = getCurrencyPrecision(
+        expected.currencyCode !== undefined ? expected.currencyCode : i.currency,
+      );
       if (precision === null) {
-        return fail(`no established precision for currency ${expected.currencyCode}`);
+        return fail("no established precision for the bound currency");
       }
       const required = minorToDecimal(expected.plannedShippingMinor, precision);
       if (s.amount !== required) {
@@ -436,8 +482,11 @@ export function buildWireVariables(
   idempotencyKey: string,
   input: ShippingRefundInput,
 ): ShippingRefundWireVariables {
-  if (!isValidIdempotencyKey(idempotencyKey)) {
-    throw new Error("refund contract: idempotencyKey must match the UUID pattern");
+  // §5.1: the key generated at claim is a UUIDv4, so the freeze builder
+  // requires the strict v4 form even though the database CHECK (and
+  // isValidIdempotencyKey, which mirrors it) accepts the loose UUID shape.
+  if (!isStrictUuidV4(idempotencyKey)) {
+    throw new Error("refund contract: idempotencyKey must be a strict UUIDv4");
   }
   const check = validateRefundInput(input);
   if (!check.ok) throw new Error(`refund contract: ${check.reason}`);
@@ -464,8 +513,10 @@ export function computeWireHash(
   if (extra.length) throw new Error(`refund contract: variables has forbidden keys: ${extra.join(",")}`);
   const missing = missingKeys(variables, ["idempotencyKey", "input"]);
   if (missing.length) throw new Error(`refund contract: variables is missing keys: ${missing.join(",")}`);
-  if (!isValidIdempotencyKey(variables.idempotencyKey)) {
-    throw new Error("refund contract: variables.idempotencyKey must match the UUID pattern");
+  // Same strict-v4 policy as the freeze builder: a row whose key only
+  // satisfies the looser CHECK never recomputes successfully at T3.
+  if (!isStrictUuidV4(variables.idempotencyKey)) {
+    throw new Error("refund contract: variables.idempotencyKey must be a strict UUIDv4");
   }
   const check = validateRefundInput(variables.input);
   if (!check.ok) throw new Error(`refund contract: ${check.reason}`);

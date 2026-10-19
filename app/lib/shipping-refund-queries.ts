@@ -19,7 +19,17 @@
 
 import { createHash } from "node:crypto";
 
-import { ORDER_GID_PATTERN } from "./shipping-refund-contract";
+import {
+  APP_GID_PATTERN,
+  ORDER_GID_PATTERN,
+  ORDER_TRANSACTION_GID_PATTERN,
+  REFUND_GID_PATTERN,
+} from "./shipping-refund-contract";
+
+const ORDER_GID_RE = new RegExp(ORDER_GID_PATTERN);
+const ORDER_TRANSACTION_GID_RE = new RegExp(ORDER_TRANSACTION_GID_PATTERN);
+const REFUND_GID_RE = new RegExp(REFUND_GID_PATTERN);
+const APP_GID_RE = new RegExp(APP_GID_PATTERN);
 
 // ── Document identity ─────────────────────────────────────────────────────────
 
@@ -324,8 +334,8 @@ export function validateDetailRequestIds(ids: unknown): QueryCheck {
     );
   }
   for (const id of ids) {
-    if (typeof id !== "string" || id.length === 0) {
-      return checkFail("detail request ids must be non-empty strings");
+    if (typeof id !== "string" || !REFUND_GID_RE.test(id)) {
+      return checkFail("detail request ids must be Refund GIDs");
     }
   }
   if (new Set(ids).size !== ids.length) return checkFail("detail request ids must be unique");
@@ -364,7 +374,7 @@ export function validateAppIdentity(body: unknown): QueryCheck & { readonly appI
   if (!isObject(install) || !isObject(install.app) || typeof install.app.id !== "string") {
     return checkFail("currentAppInstallation.app.id is missing — attribution unavailable");
   }
-  if (!install.app.id.startsWith("gid://shopify/App/")) {
+  if (!APP_GID_RE.test(install.app.id)) {
     return checkFail(`unexpected app id shape ${JSON.stringify(install.app.id)}`);
   }
   return { ok: true, appId: install.app.id };
@@ -379,8 +389,30 @@ function orderField(data: Record<string, unknown>, key: string, expectedId: stri
   if (order.id !== expectedId) {
     return checkFail(`${key}.id ${JSON.stringify(order.id)} does not equal the requested ${expectedId}`);
   }
-  if (typeof order.id !== "string" || !new RegExp(ORDER_GID_PATTERN).test(order.id)) {
+  if (typeof order.id !== "string" || !ORDER_GID_RE.test(order.id)) {
     return checkFail(`${key}.id is not an order GID`);
+  }
+  return checkOk;
+}
+
+/**
+ * A plain-array field whose elements are objects carrying a unique typed id
+ * (`refunds` / `transactions` on Q-RECHECK and Q-RECONCILE). Completeness is
+ * still the <50 bound; every element must be an object with a GID of the
+ * expected resource type, and a duplicated id is never a complete read.
+ */
+function validateBoundedIdList(value: unknown, label: string, re: RegExp): QueryCheck {
+  const bounds = validatePlainArrayField(value, label);
+  if (!bounds.ok) return bounds;
+  const seen = new Set<string>();
+  for (const [i, el] of (value as unknown[]).entries()) {
+    if (!isObject(el) || typeof el.id !== "string" || !re.test(el.id)) {
+      return checkFail(`${label}[${i}] is not an object with a valid id`);
+    }
+    if (seen.has(el.id)) {
+      return checkFail(`${label}[${i}] duplicates id ${JSON.stringify(el.id)}`);
+    }
+    seen.add(el.id);
   }
   return checkOk;
 }
@@ -388,8 +420,8 @@ function orderField(data: Record<string, unknown>, key: string, expectedId: stri
 /**
  * Q-RECHECK (12.1): both orders must be present and equal the requested ids
  * (an absent source or primary is a transient or review outcome, never a
- * pass), and the source's `refunds`/`transactions` are plain arrays whose
- * length proves completeness (< 50).
+ * pass), and the source's `refunds`/`transactions` are bounded arrays of
+ * elements whose unique typed ids prove the list is real.
  */
 export function validateExecRecheck(
   body: unknown,
@@ -402,18 +434,22 @@ export function validateExecRecheck(
   const pri = orderField(r.data, "primary", expected.primaryOrderId);
   if (!pri.ok) return pri;
   const source = r.data.source as Record<string, unknown>;
-  const refunds = validatePlainArrayField(source.refunds, "source.refunds");
+  const refunds = validateBoundedIdList(source.refunds, "source.refunds", REFUND_GID_RE);
   if (!refunds.ok) return refunds;
-  const transactions = validatePlainArrayField(source.transactions, "source.transactions");
+  const transactions = validateBoundedIdList(
+    source.transactions,
+    "source.transactions",
+    ORDER_TRANSACTION_GID_RE,
+  );
   if (!transactions.ok) return transactions;
   return checkOk;
 }
 
 /**
  * Q-RECONCILE (12.1.2): the secondary's refund list. The order must be
- * present and equal sourceOrderId; `refunds` and `transactions` are plain
- * arrays whose length proves completeness (< 50). Elements are checked
- * only for the fields the callers rely on (each refund id is a string).
+ * present and equal sourceOrderId; `refunds` and `transactions` are bounded
+ * arrays of elements with unique typed ids — a malformed or duplicated id
+ * means the list cannot prove completeness.
  */
 export function validateRefundList(
   body: unknown,
@@ -424,14 +460,13 @@ export function validateRefundList(
   const ord = orderField(r.data, "order", expected.sourceOrderId);
   if (!ord.ok) return ord;
   const order = r.data.order as Record<string, unknown>;
-  const refunds = validatePlainArrayField(order.refunds, "order.refunds");
+  const refunds = validateBoundedIdList(order.refunds, "order.refunds", REFUND_GID_RE);
   if (!refunds.ok) return refunds;
-  for (const [i, refund] of (order.refunds as unknown[]).entries()) {
-    if (!isObject(refund) || typeof refund.id !== "string" || refund.id.length === 0) {
-      return checkFail(`order.refunds[${i}] is not a refund object with an id`);
-    }
-  }
-  const transactions = validatePlainArrayField(order.transactions, "order.transactions");
+  const transactions = validateBoundedIdList(
+    order.transactions,
+    "order.transactions",
+    ORDER_TRANSACTION_GID_RE,
+  );
   if (!transactions.ok) return transactions;
   return checkOk;
 }
@@ -477,6 +512,12 @@ export function validateRefundDetailResponse(
     if (!isObject(node.order) || node.order.id !== expected.sourceOrderId) {
       return checkFail(`${label}: order.id does not equal the row's sourceOrderId`);
     }
+    // `duties` is a nullable [RefundDuty!] list (F19): anything that is not an
+    // array — null, a bare object, a number — is unproven completeness, never
+    // an empty list a classifier could read as "no duties".
+    if (!Array.isArray(node.duties)) {
+      return checkFail(`${label}.duties: expected an array, got ${node.duties === null ? "null" : typeof node.duties}`);
+    }
     for (const conn of ["refundShippingLines", "refundLineItems", "orderAdjustments", "transactions"] as const) {
       const c = validateCompleteConnection(node[conn], `${label}.${conn}`);
       if (!c.ok) return c;
@@ -494,12 +535,14 @@ export function validateRefundDetailResponse(
 }
 
 /**
- * One Q-AGREEMENTS page (12.1): the order must equal sourceOrderId and the
- * `agreements` connection must be a well-formed connection page — a nodes
- * array of typed agreement objects and a pageInfo with a boolean
- * hasNextPage (true is legal here; the caller paginates up to
- * AGREEMENTS_MAX_PAGES via endCursor). Anything malformed is "completeness
- * unproven".
+ * One Q-AGREEMENTS page (12.1): the order must be present (a null order is a
+ * transient or review outcome, never a pass) and the `agreements` connection
+ * must be a well-formed connection page — a nodes array of typed agreement
+ * objects and a pageInfo with a boolean hasNextPage (true is legal here; the
+ * caller paginates up to AGREEMENTS_MAX_PAGES via endCursor). Anything
+ * malformed is "completeness unproven". The document binds the order through
+ * its $source variable and does not select `id`, so no order.id check is
+ * possible here — the document's own selection set defines the shape.
  */
 export function validateAgreementsPage(
   body: unknown,
@@ -507,9 +550,12 @@ export function validateAgreementsPage(
 ): QueryCheck {
   const r = dataField(body);
   if (!("data" in r)) return r;
-  const ord = orderField(r.data, "order", expected.sourceOrderId);
-  if (!ord.ok) return ord;
-  const order = r.data.order as Record<string, unknown>;
+  void expected; // the document binds the order via $source; no id is selected
+  const order = r.data.order;
+  if (order === null || order === undefined) {
+    return checkFail("order is null — transient or review, never a pass");
+  }
+  if (!isObject(order)) return checkFail("order is not an object");
   const agreements = order.agreements;
   if (!isObject(agreements)) return checkFail("order.agreements is not a connection object");
   if (!Array.isArray(agreements.nodes)) return checkFail("order.agreements.nodes is not an array");

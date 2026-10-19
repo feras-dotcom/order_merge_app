@@ -5,11 +5,22 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../app/lib/shipping-shadow.server";
 import { sha256Hex } from "../app/lib/shipping-refund-contract";
 import {
+  APP_GID_PATTERN,
+  CURRENCY_CODE_PATTERN,
+  HASH_64_PATTERN,
+  IDEMPOTENCY_KEY_PATTERN,
   IDEMPOTENCY_KEY_PLACEHOLDER,
+  MARKER_PATTERN,
   MARKER_PREFIX,
+  ORDER_GID_PATTERN,
+  ORDER_TRANSACTION_GID_PATTERN,
+  PLANNED_SHIPPING_MINOR_PATTERN,
   REFUND_DOCUMENT_SHA256,
   REFUND_DOCUMENT_TEMPLATE_SHA256,
+  REFUND_GID_PATTERN,
   REFUND_MUTATION_VERSION,
+  STRICT_UUIDV4_PATTERN,
+  WIRE_AMOUNT_PATTERN,
   buildFrozenWireContract,
   buildRefundInput,
   buildWireVariables,
@@ -128,6 +139,34 @@ describe("key and marker generation (5.1)", () => {
     expect(isValidIdempotencyKey("123e4567e89b42d3a456426614174000")).toBe(false);
     expect(isValidMarker(`${MARKER_PREFIX}not-a-uuid`)).toBe(false);
   });
+
+  it.each([
+    ["a uuid v1", "123e4567-e89b-12d3-a456-426614174000"],
+    ["the nil uuid", "00000000-0000-0000-0000-000000000000"],
+    ["an uppercase uuid", "123E4567-E89B-42D3-A456-426614174000"],
+    ["a bad variant nibble", "123e4567-e89b-42d3-c456-426614174000"],
+    ["a non-uuid", "not-a-uuid"],
+  ])("the freeze builder refuses %s as the idempotency key (§5.1)", (_label, key) => {
+    // The database CHECK accepts the loose UUID shape; the application builder
+    // requires strict RFC-4122 v4.
+    const input = buildRefundInput(GOOD);
+    expect(() => buildWireVariables(key, input)).toThrow(/strict UUIDv4/);
+    expect(() =>
+      buildFrozenWireContract({ ...GOOD, idempotencyKey: key }),
+    ).toThrow(/strict UUIDv4/);
+    expect(() =>
+      computeWireHash(REFUND_DOCUMENT_SHA256, { idempotencyKey: key, input } as any),
+    ).toThrow(/strict UUIDv4/);
+  });
+
+  it.each([
+    ["a CHECK-legal non-UUID marker", `${MARKER_PREFIX}${"-".repeat(36)}`],
+    ["a marker embedding a uuid v1", `${MARKER_PREFIX}123e4567-e89b-12d3-a456-426614174000`],
+    ["a marker embedding a nil uuid", `${MARKER_PREFIX}00000000-0000-0000-0000-000000000000`],
+  ])("the input builder refuses %s (§5.1)", (_label, marker) => {
+    expect(isValidMarker(marker)).toBe(true); // CHECK parity stays loose
+    expect(() => buildRefundInput({ ...GOOD, marker })).toThrow(/marker/);
+  });
 });
 
 describe("buildRefundInput (10.4)", () => {
@@ -241,6 +280,31 @@ describe("validateRefundInput (shape-trigger parity)", () => {
     expect(validateRefundInput(candidate).ok).toBe(false);
   });
 
+  it("enforces the currency's established precision with no expected binding", () => {
+    // USD requires exactly two fractional digits.
+    const usd = malformed((i: any) => { i.shipping.amount = "0.5"; i.transactions[0].amount = "0.5"; });
+    expect(validateRefundInput(usd).ok).toBe(false);
+    const usd4 = malformed((i: any) => { i.shipping.amount = "0.5000"; i.transactions[0].amount = "0.5000"; });
+    expect(validateRefundInput(usd4).ok).toBe(false);
+    // A zero-decimal currency must send no fractional part at all.
+    const jpy = malformed((i: any) => { i.currency = "JPY"; i.shipping.amount = "0.50"; i.transactions[0].amount = "0.50"; });
+    expect(validateRefundInput(jpy).ok).toBe(false);
+    const jpyGood = malformed((i: any) => { i.currency = "JPY"; i.shipping.amount = "50"; i.transactions[0].amount = "50"; });
+    expect(validateRefundInput(jpyGood).ok).toBe(true);
+    // 3- and 4-decimal currencies carry their own precision.
+    const jodGood = malformed((i: any) => { i.currency = "JOD"; i.shipping.amount = "0.050"; i.transactions[0].amount = "0.050"; });
+    expect(validateRefundInput(jodGood).ok).toBe(true);
+    const clf = malformed((i: any) => { i.currency = "CLF"; i.shipping.amount = "0.0050"; i.transactions[0].amount = "0.0050"; });
+    expect(validateRefundInput(clf).ok).toBe(true);
+    const clf3 = malformed((i: any) => { i.currency = "CLF"; i.shipping.amount = "0.005"; i.transactions[0].amount = "0.005"; });
+    expect(validateRefundInput(clf3).ok).toBe(false);
+    // Unknown and precision-less currencies fail closed.
+    const zzz = malformed((i: any) => { i.currency = "ZZZ"; });
+    expect(validateRefundInput(zzz).ok).toBe(false);
+    const xxx = malformed((i: any) => { i.currency = "XXX"; });
+    expect(validateRefundInput(xxx).ok).toBe(false);
+  });
+
   it("rejects row-binding mismatches when expected values are supplied", () => {
     const input = good();
     for (const expected of [
@@ -253,6 +317,22 @@ describe("validateRefundInput (shape-trigger parity)", () => {
     ]) {
       expect(validateRefundInput(input, expected).ok).toBe(false);
     }
+  });
+
+  it("partial expected bindings never skip the minor-amount check", () => {
+    const input = good();
+    // plannedShippingMinor alone binds against the input's own currency.
+    expect(validateRefundInput(input, { plannedShippingMinor: "50" }).ok).toBe(true);
+    expect(validateRefundInput(input, { plannedShippingMinor: "51" }).ok).toBe(false);
+    // Malformed expected values are validation failures, never thrown.
+    for (const minor of ["050", "abc", "0", "-1", "0.5", "", "1".padEnd(41, "0"), 50, null]) {
+      const r = validateRefundInput(input, { plannedShippingMinor: minor as any });
+      expect(r.ok).toBe(false);
+    }
+    // The same holds when the row currency is also supplied.
+    expect(
+      validateRefundInput(input, { plannedShippingMinor: "abc", currencyCode: "USD" }).ok,
+    ).toBe(false);
   });
 });
 
@@ -316,6 +396,74 @@ describe("wireHash (10.2)", () => {
     expect(() =>
       computeWireHash(REFUND_DOCUMENT_SHA256, { input } as any),
     ).toThrow(/missing keys/);
+  });
+
+  it("cannot hash an invalid financial input that bypassed the builder (M-2)", () => {
+    const input: any = JSON.parse(JSON.stringify(buildRefundInput(GOOD)));
+    input.shipping.amount = input.transactions[0].amount = "0.5"; // wrong USD precision
+    expect(() =>
+      computeWireHash(REFUND_DOCUMENT_SHA256, { idempotencyKey: KEY, input }),
+    ).toThrow();
+    const input2: any = JSON.parse(JSON.stringify(buildRefundInput(GOOD)));
+    input2.currency = "ZZZ"; // unknown currency
+    expect(() =>
+      computeWireHash(REFUND_DOCUMENT_SHA256, { idempotencyKey: KEY, input: input2 }),
+    ).toThrow();
+    const input3: any = JSON.parse(JSON.stringify(buildRefundInput(GOOD)));
+    input3.currency = "JPY"; // still carries a 2-decimal amount for a 0-decimal currency
+    expect(() =>
+      computeWireHash(REFUND_DOCUMENT_SHA256, { idempotencyKey: KEY, input: input3 }),
+    ).toThrow();
+    const input4: any = JSON.parse(JSON.stringify(buildRefundInput(GOOD)));
+    input4.shipping.amount = input4.transactions[0].amount = "0.5000"; // 4 decimals for USD
+    expect(() =>
+      buildWireVariables(KEY, input4),
+    ).toThrow();
+  });
+});
+
+describe("independent regression pins (specification literals)", () => {
+  it("pins the contract version and the 5.3 patterns to their spec literals", () => {
+    expect(REFUND_MUTATION_VERSION).toBe("MergeShipShippingRefund@2026-04");
+    expect(ORDER_GID_PATTERN).toBe("^gid://shopify/Order/[0-9]+$");
+    expect(ORDER_TRANSACTION_GID_PATTERN).toBe("^gid://shopify/OrderTransaction/[0-9]+$");
+    expect(REFUND_GID_PATTERN).toBe("^gid://shopify/Refund/[0-9]+$");
+    expect(APP_GID_PATTERN).toBe("^gid://shopify/App/[0-9]+$");
+    expect(CURRENCY_CODE_PATTERN).toBe("^[A-Z]{3}$");
+    expect(HASH_64_PATTERN).toBe("^[0-9a-f]{64}$");
+    expect(PLANNED_SHIPPING_MINOR_PATTERN).toBe("^[1-9][0-9]{0,39}$");
+    expect(MARKER_PATTERN).toBe("^MS-SHIPREFUND-[0-9a-f-]{36}$");
+    expect(MARKER_PREFIX).toBe("MS-SHIPREFUND-");
+    expect(IDEMPOTENCY_KEY_PATTERN).toBe(
+      "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    );
+    expect(STRICT_UUIDV4_PATTERN).toBe(
+      "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    );
+    expect(WIRE_AMOUNT_PATTERN).toBe("^(0\\.[0-9]{1,4}|[1-9][0-9]*(\\.[0-9]{1,4})?)$");
+    expect(IDEMPOTENCY_KEY_PLACEHOLDER).toBe("__IDEMPOTENCY_KEY__");
+  });
+
+  it("wireHash equals the sha256 of a hand-written canonical request literal", () => {
+    // The canonical JSON below is written out by hand in sorted-key order
+    // (10.2): it does not go through canonicalJson or any module constant, so
+    // it pins the hashing contract independently of the implementation.
+    const canonicalLiteral =
+      '{"documentSha256":"10c8b9ce918f20febb8c58cb36227547834a5421d914fa23b92e76272f4d77cf",' +
+      '"variables":{"idempotencyKey":"123e4567-e89b-42d3-a456-426614174000",' +
+      '"input":{"currency":"USD",' +
+      '"note":"MS-SHIPREFUND-123e4567-e89b-42d3-a456-426614174000 MergeShip shipping refund (cancelled combined order gid://shopify/Order/4002)",' +
+      '"notify":false,"orderId":"gid://shopify/Order/4002",' +
+      '"shipping":{"amount":"0.50","fullRefund":false},' +
+      '"transactions":[{"amount":"0.50","gateway":"bogus","kind":"REFUND","orderId":"gid://shopify/Order/4002","parentId":"gid://shopify/OrderTransaction/9001"}]}}}';
+    const c = buildFrozenWireContract({ ...GOOD, idempotencyKey: KEY });
+    expect(sha256Hex(canonicalLiteral)).toBe(c.wireHash);
+    // The result is also pinned to a fixed value, not derived from the code.
+    expect(c.wireHash).toBe("7129bbcd9968bb9de8cc69919eff4b82001935d506c0020599f3c7ed691f762a");
+    // And canonicalJson agrees with the literal for the same payload.
+    expect(canonicalJson({ documentSha256: c.documentSha256, variables: c.wireVariables })).toBe(
+      canonicalLiteral,
+    );
   });
 });
 
