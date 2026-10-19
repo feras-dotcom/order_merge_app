@@ -460,3 +460,246 @@ describe("purity and determinism", () => {
     expect(bad.code).toBe("ADMISSION_EPOCH_INVALID");
   });
 });
+
+describe("proven-null revocation (D-1)", () => {
+  it("explicit null opens; every non-null value — including missing and undefined — closes as APPROVAL_REVOKED", () => {
+    const g = open();
+    expect(g.approvalApprovedAt).toBeDefined();
+    const { revokedAt: _omitted, ...noRevoked } = live().approval!;
+    for (const appr of [
+      noRevoked, // property absent entirely
+      { ...live().approval!, revokedAt: undefined },
+      { ...live().approval!, revokedAt: EPOCHS.dispatch },
+      { ...live().approval!, revokedAt: new Date("x") },
+      { ...live().approval!, revokedAt: "2030-01-06T00:00:00Z" },
+      { ...live().approval!, revokedAt: "garbage" },
+      { ...live().approval!, revokedAt: 0 },
+      { ...live().approval!, revokedAt: false },
+      { ...live().approval!, revokedAt: {} },
+    ]) {
+      const r = computeShippingGate(live({ approval: appr as never }));
+      if (r.open) throw new Error(`admission opened on unproven revocation: ${JSON.stringify(appr)}`);
+      expect(r.code).toBe("APPROVAL_REVOKED");
+      const d = admitShippingRefund(live({ approval: appr as never }), OP_AFTER_DISPATCH);
+      if (d.admitted) throw new Error("admitted on unproven revocation");
+      expect(d.code).toBe("APPROVAL_REVOKED");
+    }
+  });
+});
+
+describe("strict instant parsing (D-2)", () => {
+  // Inputs the old regex+Date.parse silently rolled into valid instants.
+  const NONEXISTENT = [
+    "2030-02-30T12:00:00Z",
+    "2030-02-31T00:00:00Z",
+    "2030-04-31T00:00:00Z",
+    "2030-06-31T00:00:00Z",
+    "2030-11-31T00:00:00Z",
+    "2029-02-29T00:00:00Z", // non-leap year
+    "2100-02-29T00:00:00Z", // divisible by 100, not 400
+    "2030-01-01T24:00:00Z", // hour 24 — JavaScript rolls it to the next day
+    "2030-01-01T00:60:00Z",
+    "2030-01-01T00:00:60Z",
+    "2030-01-01T25:00:00Z",
+    "2030-00-01T00:00:00Z",
+    "2030-13-01T00:00:00Z",
+    "2030-01-00T00:00:00Z",
+    "2030-01-32T00:00:00Z",
+    "2030-01-01T00:00:00+24:00",
+    "2030-01-01T00:00:00+05:60",
+    "2030-01-01T00:00:00+99:99",
+    "2030-01-01T00:00:00.9999Z", // sub-ms precision must not be truncated
+    "2030-01-01T00:00:00.0009Z",
+    "2030-01-01T00:00:00", // missing zone
+    "2030-01-01 00:00:00Z",
+    "2030-01-01T00:00:00.Z",
+    "2030-1-01T00:00:00Z",
+    "",
+  ];
+  it.each(NONEXISTENT)("refuses %s in every gate-carrying slot", (s) => {
+    const states: Array<[string, ShippingGateLiveState]> = [
+      ["admissionEpochAt", live({ admissionEnabledAt: s })],
+      ["approvalApprovedAt", live({ approval: { ...live().approval!, approvedAt: s } })],
+      ["approvalOptInEpoch", live({ approval: { ...live().approval!, merchantOptInEpoch: s } })],
+      ["dispatchEpochAt", live({ dispatchEnabled: true, dispatchEnabledAt: s })],
+    ];
+    for (const [slot, st] of states) {
+      const g = computeShippingGate(st);
+      if (g.open) throw new Error(`${slot} accepted ${s}`);
+    }
+    const d = admitShippingRefund(live(), s);
+    if (d.admitted) throw new Error(`operationCreatedAt accepted ${s}`);
+    expect(d.code).toBe("OPERATION_CREATED_AT_INVALID");
+    // And through a stored snapshot: no malformed instant passes recheck.
+    const snap = observed();
+    const r = recheckShippingGate({ ...snap, admissionEpochAt: s }, live(), "OBSERVE");
+    expect(r.equal).toBe(false);
+  });
+
+  it("a nonexistent dispatch epoch can never select EXECUTE, and a nonexistent epoch never opens admission", () => {
+    const d = admitShippingRefund(
+      live({ dispatchEnabled: true, dispatchEnabledAt: "2030-02-30T00:00:00Z" }),
+      OP_AFTER_DISPATCH,
+    );
+    if (d.admitted) throw new Error("nonexistent dispatch epoch admitted a combine");
+    expect(d.code).toBe("DISPATCH_EPOCH_INVALID");
+    const g = computeShippingGate(live({ admissionEnabledAt: "2030-04-31T00:00:00Z" }));
+    if (g.open) throw new Error("nonexistent admission epoch opened the gate");
+    expect(g.code).toBe("ADMISSION_EPOCH_INVALID");
+  });
+
+  it("accepts legitimate instants: leap days, offsets, fractional seconds, year bounds", () => {
+    for (const s of [
+      "2028-02-29T00:00:00Z",
+      "2000-02-29T00:00:00Z", // divisible by 400 — a real leap day
+      "2030-01-04T05:30:00+05:30", // == 2030-01-04T00:00:00Z
+      "2030-01-03T19:00:00-05:00", // == 2030-01-04T00:00:00Z
+      "2030-01-04T00:00:00+00:00",
+      "2030-01-04T00:00:00-00:00",
+      "2030-01-04T00:00:00.1Z",
+      "2030-01-04T00:00:00.999Z",
+      "0001-01-01T00:00:00Z",
+      "9999-12-31T23:59:59.999Z",
+    ]) {
+      const g = computeShippingGate(live({ admissionEnabledAt: s }));
+      if (!g.open) throw new Error(`refused a valid instant ${s}`);
+    }
+    // An offset that shifts the UTC date is a legitimate instant, not an
+    // invalid calendar date: 2030-01-01T01:00:00+02:00 == 2029-12-31T23:00Z.
+    const g = open({ admissionEnabledAt: "2030-01-01T01:00:00+02:00" });
+    expect(g.admissionEpochAt.toISOString()).toBe("2029-12-31T23:00:00.000Z");
+  });
+
+  it("exact millisecond comparison survives parsing at the admission cutoff", () => {
+    const g = open();
+    expect(g.admissionCutoffAt.toISOString()).toBe("2030-01-05T00:00:00.000Z");
+    const before = admitShippingRefund(live(), "2030-01-04T23:59:59.999Z");
+    if (before.admitted) throw new Error("admitted one ms before the parsed cutoff");
+    expect(before.code).toBe("OPERATION_PREDATES_ADMISSION_CUTOFF");
+    const on = admitShippingRefund(live(), "2030-01-05T00:00:00.000Z");
+    if (!on.admitted) throw new Error("refused exactly on the cutoff");
+    expect(on.lane).toBe("OBSERVE");
+  });
+});
+
+describe("Phase 1 activation semantics preserved (D-2b)", () => {
+  // The canonical predicate accepts only Date-valued epochs; ISO-looking
+  // strings must close the gate, not be normalized into Dates.
+  it.each([
+    ["merchant epoch string", { enabledAt: "2030-01-01T00:00:00Z" }],
+    ["rollout epoch string", { shippingRolloutAt: "2030-01-02T00:00:00Z" }],
+    ["switch epoch string", { shippingEnabledAt: "2030-01-03T00:00:00Z" }],
+    ["merchant epoch number", { enabledAt: 1893456000000 }],
+    ["merchant epoch malformed string", { enabledAt: "2030-02-30T00:00:00Z" }],
+  ])("%s → ACTIVATION_GATE_CLOSED", (_l, over) => {
+    const g = computeShippingGate(
+      live({ activation: { ...live().activation, ...over } as never }),
+    );
+    if (g.open) throw new Error("string/number activation epoch opened the gate");
+    expect(g.code).toBe("ACTIVATION_GATE_CLOSED");
+  });
+});
+
+describe("dispatch switch/epoch consistency (N-1)", () => {
+  it.each([
+    ["false + valid epoch", false, EPOCHS.dispatch],
+    ["false + invalid epoch", false, "garbage"],
+    ["false + undefined epoch", false, undefined],
+    ["'true' string + epoch", "true", EPOCHS.dispatch],
+    ["1 + epoch", 1, EPOCHS.dispatch],
+    ["undefined + epoch", undefined, EPOCHS.dispatch],
+    ["null + epoch", null, EPOCHS.dispatch],
+  ])("dispatchEnabled %s → DISPATCH_CONTROL_INVALID", (_l, sw, ep) => {
+    const g = computeShippingGate(live({ dispatchEnabled: sw as never, dispatchEnabledAt: ep as never }));
+    if (g.open) throw new Error("contradictory dispatch control opened the gate");
+    expect(g.code).toBe("DISPATCH_CONTROL_INVALID");
+    const d = admitShippingRefund(live({ dispatchEnabled: sw as never, dispatchEnabledAt: ep as never }), OP_AFTER_DISPATCH);
+    if (d.admitted) throw new Error(`contradictory dispatch control admitted ${d.lane}`);
+    expect(d.code).toBe("DISPATCH_CONTROL_INVALID");
+  });
+  it("a leftover dispatch epoch never selects EXECUTE while the switch is false (M4 regression)", () => {
+    // Mutation proof: if lane selection ever used dispatchEnabledAt without
+    // checking dispatchEnabled, this case yields EXECUTE instead of refusing.
+    const d = admitShippingRefund(
+      live({ dispatchEnabled: false, dispatchEnabledAt: EPOCHS.dispatch }),
+      OP_AFTER_DISPATCH,
+    );
+    if (d.admitted) throw new Error(`admitted ${d.lane} on a disabled switch with a leftover epoch`);
+    expect(d.code).toBe("DISPATCH_CONTROL_INVALID");
+  });
+  it("false + explicit null stays the valid disabled case (OBSERVE)", () => {
+    const d = admitShippingRefund(live(), OP_AFTER_ADMISSION);
+    if (!d.admitted) throw new Error("not admitted");
+    expect(d.lane).toBe("OBSERVE");
+    expect(d.snapshot.dispatchEpochAtAdmission).toBeNull();
+  });
+});
+
+describe("explicit-null dispatch epoch in OBSERVE snapshots (N-2)", () => {
+  it("missing or undefined dispatchEpochAtAdmission is SNAPSHOT_INVALID for either lane", () => {
+    const obs = observed();
+    const { dispatchEpochAtAdmission: _x, ...partial } = obs;
+    for (const stored of [partial, { ...obs, dispatchEpochAtAdmission: undefined }]) {
+      const r = recheckShippingGate(stored, live(), "OBSERVE");
+      if (r.equal) throw new Error("missing dispatch epoch passed OBSERVE recheck");
+      expect(r.code).toBe("SNAPSHOT_INVALID");
+      expect(r.field).toBe("dispatchEpochAtAdmission");
+      // Distinguish "missing property" from "present but unparseable": the
+      // 4.4 NULL-equals-NULL rule demands an explicit null, so the refusal
+      // names the missing-property case, not a malformed instant.
+      expect(r.detail).toContain("missing");
+      const rx = recheckShippingGate(stored, execLive(), "EXECUTE");
+      if (rx.equal) throw new Error("missing dispatch epoch passed EXECUTE recheck");
+      expect(rx.code).toBe("SNAPSHOT_INVALID");
+    }
+    expect(recheckShippingGate(obs, live(), "OBSERVE").equal).toBe(true);
+  });
+});
+
+describe("mutation-gap regression (T)", () => {
+  it("stored approvalOptInEpoch alone is compared (no merchantEpochAt confound)", () => {
+    // Live state is IDENTICAL except the stored snapshot records a different
+    // opt-in epoch — nothing earlier in the compare order can differ.
+    const snap = observed();
+    const r = recheckShippingGate(
+      { ...snap, approvalOptInEpoch: t("2030-01-01T00:00:00.001Z") },
+      live(),
+      "OBSERVE",
+    );
+    if (r.equal) throw new Error("stored approvalOptInEpoch drift not detected");
+    expect(r.code).toBe("GATE_CHANGED");
+    expect(r.field).toBe("approvalOptInEpoch");
+  });
+
+  it("a stored activationCutoffAt that keeps the admission cutoff consistent is still invalid", () => {
+    // Tamper activationCutoffAt and recompute the SECONDARY derived cutoff
+    // consistently — only the activation-maximum rule can catch this row.
+    const snap = observed();
+    const tamperedAct = t("2030-01-03T00:00:00.001Z"); // still below admissionEpochAt
+    const consistentAdmission = new Date(
+      Math.max(tamperedAct.getTime(), snap.admissionEpochAt.getTime(), snap.approvalApprovedAt.getTime()),
+    );
+    // sanity: the secondary check cannot be the one that fails
+    expect(consistentAdmission.getTime()).toBe(snap.admissionCutoffAt.getTime());
+    const r = recheckShippingGate(
+      { ...snap, activationCutoffAt: tamperedAct, admissionCutoffAt: consistentAdmission },
+      live(),
+      "OBSERVE",
+    );
+    if (r.equal) throw new Error("activation cutoff inconsistency not detected");
+    expect(r.code).toBe("SNAPSHOT_INVALID");
+    expect(r.field).toBe("activationCutoffAt");
+  });
+
+  it("a stored admissionCutoffAt tampered alone is invalid, not merely unequal to live", () => {
+    const snap = observed();
+    const r = recheckShippingGate(
+      { ...snap, admissionCutoffAt: t("2030-01-05T00:00:00.001Z") },
+      live(),
+      "OBSERVE",
+    );
+    if (r.equal) throw new Error("admission cutoff tamper not detected");
+    expect(r.code).toBe("SNAPSHOT_INVALID");
+    expect(r.field).toBe("admissionCutoffAt");
+  });
+});

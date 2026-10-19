@@ -27,15 +27,21 @@ export type ActivationInput = Parameters<typeof shippingActivationCutoff>[0];
  * version an approval's `ackVersion` must equal.
  *
  * Authority: the specification declares this a code constant but assigns it
- * no literal — the acknowledgement text it versions is a G-MERCHANT
- * deliverable (stage 14, "acknowledgement copy and version") and is
- * operator-recorded until then (4.3). The value is resolved from the
- * accepted repository code: the S1-A schema suite uses exactly one
- * acknowledgement version, "v1", for `ShippingExecuteApproval.ackVersion`
- * and the `approvalAckVersion` snapshot column. Any other literal would
- * contradict that accepted code. Bumping this constant invalidates every
- * approval by design (4.4), so a correction is a one-line reviewed change
- * with a built-in safety effect.
+ * no literal. The acknowledgement text it versions is a G-MERCHANT
+ * deliverable (stage 14, "acknowledgement copy and version"), and where it
+ * is stored is PD3 — until then it is operator-recorded (4.3). The S1-A
+ * schema suite's literal "v1" is raw-SQL fixture data exercising format and
+ * constraint checks; nothing in accepted code or the specification makes it
+ * the merchant-disclosure version. "v1" is retained here as a PROVISIONAL
+ * internal development value only: it is technically safe because no
+ * approval setter exists, an empty approval table means no shops, and
+ * matching is exact. Before any production-facing approval setter or
+ * disclosure flow is implemented, an approved disclosure artifact — its
+ * text, a version identifier, a content hash and an approval record — must
+ * exist; version identifiers must never be reused (reverting the constant
+ * would re-validate approvals recorded under it), and the setter must
+ * stamp the version from this constant, never an operator-entered string.
+ * Bumping this constant invalidates every approval by design (4.4).
  */
 export const REQUIRED_ACK_VERSION = "v1";
 
@@ -43,12 +49,16 @@ export const REQUIRED_ACK_VERSION = "v1";
 
 /** Timestamp-carrying fields accept a Date or a strict ISO-8601 instant
  *  (what the JSON operation payload and a Prisma TIMESTAMP(3) both yield).
- *  Anything else — numbers, null, malformed text — fails closed. */
+ *  Anything else — numbers, null, malformed text — fails closed.
+ *  `revokedAt` deliberately admits ONLY `null` for "not revoked" because
+ *  the gate cannot prove a missing or undefined value means SQL NULL. */
 export type InstantInput = Date | string | null | undefined;
 
 export interface ShippingApprovalInput {
   readonly approvedAt: InstantInput;
-  readonly revokedAt: InstantInput;
+  /** Must be exactly `null` for the approval to be valid; missing,
+   *  undefined and every other value fail closed. */
+  readonly revokedAt: Date | string | null;
   readonly merchantOptInEpoch: InstantInput;
   readonly ackVersion: unknown;
 }
@@ -60,7 +70,9 @@ export interface ShippingGateLiveState {
   /** ShippingExecuteControl.admissionEnabled / .admissionEnabledAt. */
   readonly admissionEnabled: boolean;
   readonly admissionEnabledAt: InstantInput;
-  /** ShippingExecuteControl.dispatchEnabled / .dispatchEnabledAt. */
+  /** ShippingExecuteControl.dispatchEnabled / .dispatchEnabledAt. The 4.2
+   *  invariant is enforced both ways: true needs a valid instant, false
+   *  needs an explicitly null epoch, anything else fails closed. */
   readonly dispatchEnabled: boolean;
   readonly dispatchEnabledAt: InstantInput;
   /** The shop's ShippingExecuteApproval row, or null when none exists. */
@@ -118,8 +130,9 @@ export type GateClosureCode =
   | "ADMISSION_DISABLED"              // admissionEnabled is not true
   | "ADMISSION_EPOCH_INVALID"         // enabled but epoch missing/invalid
   | "DISPATCH_EPOCH_INVALID"          // enabled but epoch missing/invalid
+  | "DISPATCH_CONTROL_INVALID"        // switch not boolean, or epoch not NULL while off
   | "APPROVAL_MISSING"                // no approval row for the shop
-  | "APPROVAL_REVOKED"                // revokedAt set
+  | "APPROVAL_REVOKED"                // revokedAt is not proven NULL
   | "APPROVAL_APPROVED_AT_INVALID"    // approvedAt missing or malformed
   | "APPROVAL_OPT_IN_EPOCH_INVALID"   // merchantOptInEpoch malformed
   | "APPROVAL_OPT_IN_EPOCH_MISMATCH"  // approval predates live opt-in epoch
@@ -188,19 +201,57 @@ export type ShippingGateRecheck =
 // ── Instant normalization (exact millisecond semantics) ──────────────────
 
 const INSTANT_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+/** Days in a 1-based month of a proleptic Gregorian year. */
+const daysInMonth = (year: number, month: number): number =>
+  month === 2
+    ? year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+      ? 29
+      : 28
+    : [4, 6, 9, 11].includes(month)
+      ? 30
+      : 31;
 
 /** Normalize an instant to a fresh Date, or null when it is not a valid
- *  Date or strict ISO-8601 instant with an explicit zone. Never returns an
- *  alias of the caller's object. */
+ *  Date or a strict ISO-8601 instant. A string must name a REAL calendar
+ *  date: component ranges and leap years are checked on the string's own
+ *  local fields before the zone offset is applied — Date.parse alone would
+ *  silently roll a nonexistent day (2030-02-30) into a valid instant.
+ *  At most three fractional digits (TIMESTAMP(3) granularity); more is
+ *  rejected rather than truncated. Never returns an alias of the caller's
+ *  object. */
 const normInstant = (value: unknown): Date | null => {
-  const ms =
-    value instanceof Date
-      ? value.getTime()
-      : typeof value === "string" && INSTANT_RE.test(value)
-        ? Date.parse(value)
-        : Number.NaN;
-  return Number.isFinite(ms) ? new Date(ms) : null;
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? new Date(ms) : null;
+  }
+  if (typeof value !== "string") return null;
+  const m = INSTANT_RE.exec(value);
+  if (m === null) return null;
+  const [, yS, moS, dS, hS, miS, sS, fracS, zoneS, offSignS, offHS, offMS] = m;
+  const year = Number(yS);
+  const month = Number(moS);
+  const day = Number(dS);
+  const hour = Number(hS);
+  const minute = Number(miS);
+  const second = Number(sS);
+  const offH = Number(offHS ?? 0);
+  const offM = Number(offMS ?? 0);
+  if (
+    month < 1 || month > 12 ||
+    day < 1 || day > daysInMonth(year, month) ||
+    hour > 23 || minute > 59 || second > 59 ||
+    offH > 23 || offM > 59
+  ) {
+    return null;
+  }
+  let ms = Date.UTC(year, month - 1, day, hour, minute, second, fracS === undefined ? 0 : Number(fracS.padEnd(3, "0")));
+  if (zoneS !== "Z") {
+    const off = (offSignS === "-" ? -1 : 1) * (offH * 3600_000 + offM * 60_000);
+    ms -= off;
+  }
+  return new Date(ms);
 };
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -230,15 +281,18 @@ export function computeShippingGate(live: ShippingGateLiveState): ShippingGateEv
   }
 
   // ── Phase 1 activation (canonical predicate, 4.1) ──
+  // The epoch values are passed through UNCHANGED so the accepted predicate
+  // decides on the original types — it accepts only Date-valued epochs, and
+  // pre-normalizing a string here would open a gate Phase 1 keeps closed.
   const act = isObject(live.activation) ? live.activation : ({} as ActivationInput);
   const activation: ActivationInput = {
     shippingAdjustmentsEnabled: act.shippingAdjustmentsEnabled as boolean,
-    shippingEnabledAt: normInstant(act.shippingEnabledAt),
+    shippingEnabledAt: act.shippingEnabledAt,
     shippingAllowShops: act.shippingAllowShops as string[],
     shop: act.shop as string,
-    shippingRolloutAt: normInstant(act.shippingRolloutAt),
+    shippingRolloutAt: act.shippingRolloutAt,
     shopEnabled: act.shopEnabled as boolean,
-    enabledAt: normInstant(act.enabledAt),
+    enabledAt: act.enabledAt,
   };
   const activationCutoff = shippingActivationCutoff(activation);
   if (activationCutoff === null) {
@@ -275,15 +329,29 @@ export function computeShippingGate(live: ShippingGateLiveState): ShippingGateEv
     );
   }
 
-  // ── Dispatch control consistency (4.2): the epoch is required while the
-  //    switch is on. An on-switch without a valid epoch is a state the
-  //    control CHECK forbids; it closes admission rather than degrading. ──
+  // ── Dispatch control consistency (4.2), both directions of the CHECK:
+  //    the epoch is a valid instant exactly while the switch is on. A
+  //    non-boolean switch or an epoch that is not explicitly null while the
+  //    switch is off is a contradictory state the control CHECK forbids; it
+  //    closes admission rather than silently degrading to OBSERVE. ──
   const dispatchEpoch = normInstant(live.dispatchEnabledAt);
-  if (live.dispatchEnabled === true && dispatchEpoch === null) {
+  if (live.dispatchEnabled === true) {
+    if (dispatchEpoch === null) {
+      return closed(
+        "DISPATCH_EPOCH_INVALID",
+        "dispatchControl",
+        "dispatch is enabled but dispatchEnabledAt is missing or invalid",
+      );
+    }
+  } else if (
+    live.dispatchEnabled !== false ||
+    live.dispatchEnabledAt !== null ||
+    dispatchEpoch !== null
+  ) {
     return closed(
-      "DISPATCH_EPOCH_INVALID",
+      "DISPATCH_CONTROL_INVALID",
       "dispatchControl",
-      "dispatch is enabled but dispatchEnabledAt is missing or invalid",
+      `dispatch switch is ${JSON.stringify(live.dispatchEnabled)} with dispatchEnabledAt ${live.dispatchEnabledAt === null ? "NULL" : "non-null"} — the epoch must be a valid instant exactly while the switch is on`,
     );
   }
 
@@ -292,8 +360,15 @@ export function computeShippingGate(live: ShippingGateLiveState): ShippingGateEv
   if (approval === null) {
     return closed("APPROVAL_MISSING", "approval", "no execution approval exists for the shop");
   }
-  if (approval.revokedAt !== null && approval.revokedAt !== undefined) {
-    return closed("APPROVAL_REVOKED", "approval", "the shop's approval is revoked");
+  // `revokedAt IS NULL` (4.4): only an explicitly null revocation field
+  // proves the approval is live. A missing or undefined property — e.g. a
+  // raw-query row that omitted the column — is unproven, not revoked-proof.
+  if (approval.revokedAt !== null) {
+    return closed(
+      "APPROVAL_REVOKED",
+      "approval",
+      `the shop's approval revocation is not proven null (revokedAt is ${approval.revokedAt === undefined ? "missing or undefined" : "set"})`,
+    );
   }
   const approvedAt = normInstant(approval.approvedAt);
   if (approvedAt === null) {
@@ -311,7 +386,7 @@ export function computeShippingGate(live: ShippingGateLiveState): ShippingGateEv
       "approval merchantOptInEpoch is missing or invalid",
     );
   }
-  const merchantEpoch = activation.enabledAt as Date;
+  const merchantEpoch = act.enabledAt as Date;
   if (optInEpoch.getTime() !== merchantEpoch.getTime()) {
     return closed(
       "APPROVAL_OPT_IN_EPOCH_MISMATCH",
@@ -340,15 +415,15 @@ export function computeShippingGate(live: ShippingGateLiveState): ShippingGateEv
   return {
     open: true,
     merchantEpochAt: new Date(merchantEpoch.getTime()),
-    rolloutEpochAt: new Date((activation.shippingRolloutAt as Date).getTime()),
-    switchEpochAt: new Date((activation.shippingEnabledAt as Date).getTime()),
+    rolloutEpochAt: new Date((act.shippingRolloutAt as Date).getTime()),
+    switchEpochAt: new Date((act.shippingEnabledAt as Date).getTime()),
     activationCutoffAt: new Date(activationCutoff.getTime()),
     admissionEpochAt: new Date(admissionEpoch.getTime()),
     approvalApprovedAt: new Date(approvedAt.getTime()),
     approvalOptInEpoch: new Date(optInEpoch.getTime()),
     approvalAckVersion: approval.ackVersion as string,
     admissionCutoffAt: admissionCutoff,
-    dispatchEnabledAt: live.dispatchEnabled === true && dispatchEpoch !== null ? dispatchEpoch : null,
+    dispatchEnabledAt: dispatchEpoch,
   };
 }
 
@@ -487,7 +562,13 @@ export function recheckShippingGate(
   }
   s.approvalAckVersion = ack;
   const dispatch = stored.dispatchEpochAtAdmission;
-  if (dispatch === null || dispatch === undefined) {
+  if (dispatch === undefined) {
+    return invalidSnapshot(
+      "dispatchEpochAtAdmission",
+      "stored dispatchEpochAtAdmission is missing — an OBSERVE row must carry an explicit NULL",
+    );
+  }
+  if (dispatch === null) {
     s.dispatchEpochAtAdmission = null;
   } else {
     const v = normInstant(dispatch);
