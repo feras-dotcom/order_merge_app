@@ -33,7 +33,13 @@ const EVALUATOR_NOTE = `MergeShip shipping adjustment ${MARKER} — shipping ref
 /** A READY result modeled exactly on evaluateShadowSource's construction
  *  (requestPayload, previewEvidence and requestHash mirror its fields). */
 function makeReady(
-  opts: { currencyCode?: string; amount?: string; minor?: string } = {},
+  opts: {
+    currencyCode?: string;
+    amount?: string;
+    minor?: string;
+    maxShippingMinor?: string;
+    maxPaymentMinor?: string;
+  } = {},
 ): any {
   const currencyCode = opts.currencyCode ?? "USD";
   const amount = opts.amount ?? "0.50";
@@ -83,8 +89,8 @@ function makeReady(
         shippingMinor: minor,
         shippingTaxMinor: "0",
         totalMinor: minor,
-        maxShippingMinor: "800",
-        maxPaymentMinor: "5000",
+        maxShippingMinor: opts.maxShippingMinor ?? "800",
+        maxPaymentMinor: opts.maxPaymentMinor ?? "5000",
         suggestedTransactionMinor: minor,
       },
       allocation: {
@@ -487,37 +493,59 @@ describe("S-1: REFUND_ALL requires source === planned === row planned amount", (
     expect(r.financialColumns.plannedShippingMinor).toBe("800");
   });
 
+  /** One changed field on an otherwise genuine 800/800 READY; the paid
+   *  shipping evidence stays consistent with the changed source so no other
+   *  gate can do the refusing. */
+  const s1Variant = (source: unknown): any => {
+    const r = real();
+    if (source === undefined) delete r.sourceShippingMinor;
+    else r.sourceShippingMinor = source;
+    r.previewEvidence.order.shippingPaidMinor = source;
+    r.previewEvidence.order.shippingOriginalMinor = source;
+    return r;
+  };
+  const REFUND_ALL_REASON = /REFUND_ALL requires sourceShippingMinor to equal the planned amount/;
+  const SOURCE_MALFORMED_REASON = /evaluator sourceShippingMinor is missing or malformed/;
+
   it.each([
     ["source 900 > planned 800", "900"],
     ["source 799 < planned 800", "799"],
-  ])("refuses a fabricated READY with %s", (_l, source) => {
-    const ready = mutateReady((r) => {
-      // Evidence agrees with the fabricated source — only S-1 equality can
-      // catch that the refund would not cover the paid shipping.
-      r.sourceShippingMinor = source;
-      r.previewEvidence.order.shippingPaidMinor = source;
-      r.previewEvidence.order.shippingOriginalMinor = source;
-    });
-    expect(adaptReadyToFreezeContract(ready, realBindings()).ok).toBe(false);
+    ["source '0' (refund-all of nothing paid)", "0"],
+    ["source '0800' (leading zero)", "0800"],
+  ])("refuses a fabricated READY with %s at the REFUND_ALL equality", (_l, source) => {
+    const r = adaptReadyToFreezeContract(s1Variant(source), realBindings());
+    if (r.ok) throw new Error("accepted a non-REFUND_ALL READY");
+    expect(r.reason).toMatch(REFUND_ALL_REASON);
   });
 
   it.each([
-    ["missing", (r: any) => { delete r.sourceShippingMinor; }],
-    ["null", (r: any) => { r.sourceShippingMinor = null; }],
-    ["a number", (r: any) => { r.sourceShippingMinor = 800; }],
-    ["a decimal string", (r: any) => { r.sourceShippingMinor = "8.00"; }],
-    ["empty", (r: any) => { r.sourceShippingMinor = ""; }],
-  ])("refuses a READY whose sourceShippingMinor is %s", (_l, mutate) => {
-    expect(adaptReadyToFreezeContract(mutateReady(mutate), realBindings()).ok).toBe(false);
+    ["missing", undefined],
+    ["null", null],
+    ["a number", 800],
+    ["a decimal string", "8.00"],
+    ["a negative string", "-800"],
+    ["empty", ""],
+  ])("refuses a READY whose sourceShippingMinor is %s at the minor-format check", (_l, source) => {
+    const r = adaptReadyToFreezeContract(s1Variant(source), realBindings());
+    if (r.ok) throw new Error("accepted a malformed sourceShippingMinor");
+    expect(r.reason).toMatch(SOURCE_MALFORMED_REASON);
   });
 
-  it("refuses a planned amount that is not a minor string", () => {
-    expect(
-      adaptReadyToFreezeContract(
-        mutateReady((r) => { r.plannedRefundMinor = "8.00"; }),
-        realBindings(),
-      ).ok,
-    ).toBe(false);
+  it.each([
+    ["a decimal string", "8.00", /missing or malformed/],
+    ["a number", 800, /missing or malformed/],
+    ["null", null, /missing or malformed/],
+    ["missing", undefined, /missing or malformed/],
+    ["empty", "", /missing or malformed/],
+    ["a negative string", "-800", /missing or malformed/],
+    ["a leading-zero string", "0800", /differs from the row/],
+  ])("refuses a READY whose plannedRefundMinor is %s", (_l, planned, reason) => {
+    const bad = real();
+    if (planned === undefined) delete bad.plannedRefundMinor;
+    else bad.plannedRefundMinor = planned;
+    const r = adaptReadyToFreezeContract(bad, realBindings());
+    if (r.ok) throw new Error("accepted a malformed plannedRefundMinor");
+    expect(r.reason).toMatch(reason);
   });
 });
 
@@ -554,6 +582,46 @@ describe("S-2: zero-tax and preview-total consistency", () => {
     if (!r.ok) throw new Error(r.reason);
     expect(r.financialColumns.plannedShippingMinor).toBe("50");
   });
+
+  it("maxima use BigInt: one minor unit below a >2^53 planned amount refuses", () => {
+    // 2^53 + 1 cannot be represented by Number: Number("9007199254740993")
+    // rounds to ...992, so a Number comparison would wrongly ACCEPT a maximum
+    // one unit below the planned amount. BigInt must refuse it.
+    const big = "9007199254740993"; // 2^53 + 1 minor units
+    const bigMinor = {
+      currencyCode: "USD",
+      minor: big,
+      amount: "90071992547409.93",
+      // Both maxima default far above the planned amount; each case drops one.
+      maxShippingMinor: "99999999999999999999",
+      maxPaymentMinor: "99999999999999999999",
+    };
+    const bigBindings = () => bindings({ plannedShippingMinor: big });
+    for (const key of ["maxShippingMinor", "maxPaymentMinor"]) {
+      const equal = adaptReadyToFreezeContract(
+        makeReady({ ...bigMinor, [key]: "9007199254740993" }),
+        bigBindings(),
+      );
+      if (!equal.ok) throw new Error(`${key} equal refused: ${equal.reason}`);
+      expect(equal.financialColumns.plannedShippingMinor).toBe("9007199254740993");
+      // One minor unit below — indistinguishable under Number, refuse under BigInt.
+      const below = adaptReadyToFreezeContract(
+        makeReady({ ...bigMinor, [key]: "9007199254740992" }),
+        bigBindings(),
+      );
+      if (below.ok) throw new Error(`accepted ${key} one minor below a >2^53 planned amount`);
+      expect(below.reason).toMatch(new RegExp(key));
+      // Zero and malformed still refuse on the same path.
+      for (const v of ["0", "9007199254740992.0", 900719925474099, null]) {
+        const r = adaptReadyToFreezeContract(
+          makeReady({ ...bigMinor, [key]: v as unknown as string }),
+          bigBindings(),
+        );
+        if (r.ok) throw new Error(`accepted ${key}=${String(v)}`);
+        expect(r.reason).toMatch(new RegExp(key));
+      }
+    }
+  });
 });
 
 describe("S-3: v0 bogus-gateway and test flags", () => {
@@ -563,6 +631,21 @@ describe("S-3: v0 bogus-gateway and test flags", () => {
     ["row gateway gift_card", () => bindings({ gateway: "gift_card" })],
   ])("refuses %s", (_l, b) => {
     expect(adaptReadyToFreezeContract(makeReady(), b()).ok).toBe(false);
+  });
+
+  it("refuses a fully consistent non-bogus freeze: row, allocation and payload all 'manual'", () => {
+    // Every gateway agrees, so only the literal 'bogus' restriction can
+    // refuse this — removing it must let this exact request freeze.
+    for (const gw of ["manual", "gift_card", "shopify_payments", "cash"]) {
+      const ready = mutateReady((r) => {
+        r.previewEvidence.allocation.gateway = gw;
+        r.requestPayload.transactions[0].gateway = gw;
+        r.requestHash = sha256Hex(canonicalJson(r.requestPayload));
+      });
+      const r = adaptReadyToFreezeContract(ready, bindings({ gateway: gw }));
+      if (r.ok) throw new Error(`accepted a ${gw}-gateway freeze`);
+      expect(r.reason).toMatch(/bogus/);
+    }
   });
 
   it.each([
