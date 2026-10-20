@@ -876,9 +876,22 @@ export type OperationClaimValidation =
       readonly cancelledAtInvalid?: CancelledAtInvalid;
     };
 
-/** ≤64 printable characters of the raw `cancelledAt` value (7.2.1). */
+/** ≤64 printable characters of the raw `cancelledAt` value (7.2.1). Any
+ *  failure to represent the value — a BigInt, a circular structure, a
+ *  throwing toJSON or Proxy trap, or JSON too deep for the recursive
+ *  stringifier — produces the deterministic placeholder `"<" + typeof + ">"`
+ *  instead of throwing: malformed cancellation evidence must always yield a
+ *  terminal-safe CANCELLED_AT_INVALID classification, never an exception
+ *  escaping the pure validator (7.2.2). `String(value)` is deliberately not
+ *  used: it invokes caller-controlled toString code, which can throw. */
 const cancelledAtPreview = (value: unknown): string => {
-  const base = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value));
+  let base: string;
+  try {
+    const s = typeof value === "string" ? value : JSON.stringify(value);
+    base = typeof s === "string" ? s : `<${typeof value}>`;
+  } catch {
+    base = `<${typeof value}>`;
+  }
   return base.slice(0, 64).replace(/[^\x20-\x7E]/g, "?");
 };
 
@@ -887,19 +900,24 @@ const nonemptyText = (v: unknown): v is string =>
 
 /**
  * Validate one operation and its one selected secondary before any
- * ShippingRefund insert (7.2.1). Pure and deterministic: `dbWall` is the
- * explicitly supplied database-clock instant — the process clock is never
- * consulted — and no argument is mutated.
+ * ShippingRefund insert (7.2.1). Pure, deterministic and total — it throws
+ * for no argument: `dbWall` is the explicitly supplied database-clock
+ * instant (the process clock is never consulted), no argument is mutated,
+ * and every caller-owned property is read AT MOST ONCE into a local inside
+ * a guarded access. Only the captured locals are validated, compared and
+ * returned — a getter or Proxy can never substitute a different value into
+ * `values` after validation, and a throwing read refuses safely under that
+ * field's existing UNCLAIMABLE classification rather than escaping.
  *
  * Evaluation order is fixed: `parseCancelledAt` runs FIRST (its
  * classification is retained on every outcome), then the copied fields in
  * the order operation shape, `shop`, `mergeOperationId`, `primaryOrderId`,
- * `primaryOrderName`, `operationCreatedAt`, secondary shape,
- * `sourceOrderId` and secondary≠primary. A field failure yields
- * `UNCLAIMABLE` even when `cancelledAt` was invalid, because the terminal
- * CANCELLED_AT_INVALID row carries the same NOT NULL and CHECK columns; the
- * cancelledAt reason is still reported for diagnostics. Only when every
- * copied field is valid does a cancelledAt defect yield
+ * `primaryOrderName`, `operationCreatedAt`, secondary shape (including an
+ * unreadable `cancelledAt`), `sourceOrderId` and secondary≠primary. A field
+ * failure yields `UNCLAIMABLE` even when `cancelledAt` was invalid, because
+ * the terminal CANCELLED_AT_INVALID row carries the same NOT NULL and CHECK
+ * columns; the cancelledAt reason is still reported for diagnostics. Only
+ * when every copied field is valid does a cancelledAt defect yield
  * `CANCELLED_AT_INVALID`.
  */
 export function validateOperationForClaim(
@@ -907,10 +925,40 @@ export function validateOperationForClaim(
   secondary: unknown,
   dbWall: unknown,
 ): OperationClaimValidation {
-  const cancelledAtSource = isObject(secondary) ? secondary.cancelledAt : undefined;
-  const cancelled = parseCancelledAt(cancelledAtSource, dbWall);
+  // Capture `secondary.cancelledAt` once, first (its classification is
+  // retained on every outcome below). A read that throws — a getter or a
+  // Proxy trap — is remembered and reported at the secondary-shape step;
+  // the parse still runs with `undefined` so an invalid `dbWall` is still
+  // detected as control-input failure rather than operation evidence.
+  let secondaryObj: Record<string, unknown> | null;
+  try {
+    secondaryObj = isObject(secondary) ? secondary : null;
+  } catch {
+    secondaryObj = null;
+  }
+  let cancelledAtSource: unknown;
+  let cancelledAtUnreadable = false;
+  if (secondaryObj !== null) {
+    try {
+      cancelledAtSource = secondaryObj.cancelledAt;
+    } catch {
+      cancelledAtUnreadable = true;
+    }
+  }
+  let cancelled: CancelledAtResult;
+  try {
+    cancelled = parseCancelledAt(cancelledAtUnreadable ? undefined : cancelledAtSource, dbWall);
+  } catch {
+    // A `dbWall` the module cannot even read (e.g. a Proxy around a Date)
+    // is invalid control input, never a merchant-evidence defect.
+    cancelled = { invalid: DB_WALL_INVALID };
+  }
   const cancelledAtInvalid =
-    cancelled instanceof Date ? undefined : cancelled.invalid;
+    cancelled instanceof Date
+      ? undefined
+      : cancelledAtUnreadable && cancelled.invalid !== DB_WALL_INVALID
+        ? undefined
+        : cancelled.invalid;
 
   const fail = (
     field: ClaimField,
@@ -919,44 +967,91 @@ export function validateOperationForClaim(
   ): OperationClaimValidation =>
     ({ outcome: "UNCLAIMABLE", field, reason, detail, cancelledAtInvalid });
 
-  if (!isObject(operation)) {
+  let operationObj: Record<string, unknown> | null;
+  try {
+    operationObj = isObject(operation) ? operation : null;
+  } catch {
+    operationObj = null;
+  }
+  if (operationObj === null) {
     return fail("operation", "OPERATION_INVALID", "the operation record is not an object");
   }
-  if (!nonemptyText(operation.shop)) {
+  let shop: unknown;
+  try {
+    shop = operationObj.shop;
+  } catch {
+    return fail("shop", "SHOP_INVALID", "operation.shop could not be read");
+  }
+  if (!nonemptyText(shop)) {
     return fail("shop", "SHOP_INVALID", "operation.shop is missing or not a non-empty string");
   }
-  if (!nonemptyText(operation.id)) {
+  let mergeOperationId: unknown;
+  try {
+    mergeOperationId = operationObj.id;
+  } catch {
+    return fail("mergeOperationId", "MERGE_OPERATION_ID_INVALID", "operation.id could not be read");
+  }
+  if (!nonemptyText(mergeOperationId)) {
     return fail("mergeOperationId", "MERGE_OPERATION_ID_INVALID", "operation.id is missing or not a non-empty string");
   }
-  if (
-    typeof operation.primaryOrderId !== "string" ||
-    !ORDER_GID_CLAIM_RE.test(operation.primaryOrderId)
-  ) {
+  let primaryOrderId: unknown;
+  try {
+    primaryOrderId = operationObj.primaryOrderId;
+  } catch {
+    return fail("primaryOrderId", "PRIMARY_ORDER_ID_INVALID", "operation.primaryOrderId could not be read");
+  }
+  if (typeof primaryOrderId !== "string" || !ORDER_GID_CLAIM_RE.test(primaryOrderId)) {
     return fail("primaryOrderId", "PRIMARY_ORDER_ID_INVALID", "operation.primaryOrderId is not a well-formed order GID");
   }
-  if (!nonemptyText(operation.primaryOrderName)) {
+  let primaryOrderName: unknown;
+  try {
+    primaryOrderName = operationObj.primaryOrderName;
+  } catch {
+    return fail("primaryOrderName", "PRIMARY_ORDER_NAME_INVALID", "operation.primaryOrderName could not be read");
+  }
+  if (!nonemptyText(primaryOrderName)) {
     return fail("primaryOrderName", "PRIMARY_ORDER_NAME_INVALID", "operation.primaryOrderName is missing or not a non-empty string");
   }
-  const createdAt = normInstant(operation.createdAt);
+  let createdAtSource: unknown;
+  try {
+    createdAtSource = operationObj.createdAt;
+  } catch {
+    return fail("operationCreatedAt", "OPERATION_CREATED_AT_INVALID", "operation.createdAt could not be read");
+  }
+  let createdAt: Date | null;
+  try {
+    createdAt = normInstant(createdAtSource);
+  } catch {
+    createdAt = null;
+  }
   if (createdAt === null) {
     return fail("operationCreatedAt", "OPERATION_CREATED_AT_INVALID", "operation.createdAt is missing or invalid");
   }
-  if (!isObject(secondary)) {
+  if (secondaryObj === null) {
     return fail("secondary", "SECONDARY_INVALID", "the selected secondary is not an object");
   }
-  if (typeof secondary.id !== "string" || !ORDER_GID_CLAIM_RE.test(secondary.id)) {
+  if (cancelledAtUnreadable) {
+    return fail("secondary", "SECONDARY_INVALID", "secondary.cancelledAt could not be read");
+  }
+  let sourceOrderId: unknown;
+  try {
+    sourceOrderId = secondaryObj.id;
+  } catch {
+    return fail("sourceOrderId", "SOURCE_ORDER_ID_INVALID", "secondary.id could not be read");
+  }
+  if (typeof sourceOrderId !== "string" || !ORDER_GID_CLAIM_RE.test(sourceOrderId)) {
     return fail("sourceOrderId", "SOURCE_ORDER_ID_INVALID", "secondary.id is not a well-formed order GID");
   }
-  if (secondary.id === operation.primaryOrderId) {
+  if (sourceOrderId === primaryOrderId) {
     return fail("sourceOrderId", "SOURCE_EQUALS_PRIMARY", "secondary.id equals primaryOrderId");
   }
 
   const values: ClaimOperationValues = {
-    shop: operation.shop,
-    mergeOperationId: operation.id,
-    sourceOrderId: secondary.id,
-    primaryOrderId: operation.primaryOrderId,
-    primaryOrderName: operation.primaryOrderName,
+    shop,
+    mergeOperationId,
+    sourceOrderId,
+    primaryOrderId,
+    primaryOrderName,
     operationCreatedAt: createdAt,
     operationCreatedAtIso: createdAt.toISOString(),
   };

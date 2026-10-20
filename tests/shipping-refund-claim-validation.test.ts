@@ -417,6 +417,212 @@ describe("validateOperationForClaim — deterministic precedence", () => {
   });
 });
 
+// ── B-1: the claim contract binds exactly the values that were checked ────
+describe("validateOperationForClaim — capture-once (check-then-use)", () => {
+  /** Copy of `base` whose `key` returns `first` on its very first read and
+   *  `later` on every subsequent read. */
+  const flip = (
+    base: Record<string, unknown>,
+    key: string,
+    first: unknown,
+    later: unknown,
+  ): Record<string, unknown> => {
+    const o = { ...base };
+    let reads = 0;
+    Object.defineProperty(o, key, {
+      enumerable: true,
+      get: () => (++reads <= 1 ? first : later),
+    });
+    return o;
+  };
+
+  const SECONDARY_GID = GID(4002);
+  const PRIMARY_GID = GID(4001);
+  const OTHER_GID = GID(9009);
+
+  it.each([
+    ["primaryOrderId", { primaryOrderId: "gid://shopify/Product/1" }],
+    ["primaryOrderId", { primaryOrderId: SECONDARY_GID }],
+    ["primaryOrderId", { primaryOrderId: null }],
+    ["shop", { shop: null }],
+    ["shop", { shop: 7 }],
+    ["shop", { shop: "victim-shop.myshopify.com" }],
+    ["id", { id: "" }],
+    ["id", { id: {} }],
+    ["id", { id: "op_different" }],
+    ["primaryOrderName", { primaryOrderName: null }],
+    ["primaryOrderName", { primaryOrderName: 1001 }],
+    ["createdAt", { createdAt: new Date(NaN) }],
+    ["createdAt", { createdAt: "not a date" }],
+  ] as const)("operation.%s flipping to %o stays VALID with the validated value", (key, over) => {
+    const base = op();
+    const good = base[key as keyof typeof base];
+    for (const s of [secondary(), secondary({ cancelledAt: null })]) {
+      // a fresh flipping object per call: capture-once is per invocation
+      const o = flip(base, key, good, (over as Record<string, unknown>)[key]);
+      const r = run(o, s);
+      expect(r.outcome).not.toBe("UNCLAIMABLE");
+      if (r.outcome === "UNCLAIMABLE") continue;
+      const name: Record<string, string> = {
+        shop: "shop", id: "mergeOperationId", primaryOrderId: "primaryOrderId",
+        primaryOrderName: "primaryOrderName", createdAt: "operationCreatedAt",
+      };
+      const got = r.values[name[key] as keyof ClaimOperationValuesForTest];
+      if (good instanceof Date) {
+        expect((got as Date).getTime()).toBe(good.getTime());
+      } else {
+        expect(got).toBe(good);
+      }
+      expect(r.values.sourceOrderId).toBe(SECONDARY_GID);
+      expect(r.values.sourceOrderId).not.toBe(r.values.primaryOrderId);
+    }
+  });
+  type ClaimOperationValuesForTest = {
+    shop: string; mergeOperationId: string; sourceOrderId: string;
+    primaryOrderId: string; primaryOrderName: string;
+    operationCreatedAt: Date; operationCreatedAtIso: string;
+  };
+
+  it.each([
+    ["malformed", "'; DROP TABLE x;--"],
+    ["primary's GID", PRIMARY_GID],
+    ["null", null],
+    ["different valid GID", OTHER_GID],
+  ])("secondary.id valid once then %s: the claim carries the first, validated GID", (_l, later) => {
+    const o = op();
+    const sValid = flip(secondary(), "id", SECONDARY_GID, later);
+    const sInvalid = flip(secondary({ cancelledAt: null }), "id", SECONDARY_GID, later);
+    for (const [sec, want] of [[sValid, "VALID"], [sInvalid, "CANCELLED_AT_INVALID"]] as const) {
+      const r = run(o, sec);
+      expect(r.outcome).toBe(want);
+      if (r.outcome !== "UNCLAIMABLE") {
+        expect(r.values.sourceOrderId).toBe(SECONDARY_GID);
+        expect(r.values.sourceOrderId).not.toBe(r.values.primaryOrderId);
+      }
+    }
+  });
+
+  it("cancelledAt read once: a getter that sours later cannot change the classification", () => {
+    const s = flip(secondary(), "cancelledAt", SEC_CANCELLED, "garbage");
+    const r = run(op(), s);
+    expect(r.outcome).toBe("VALID");
+    if (r.outcome === "VALID") expect(r.sourceCancelledAtIso).toBe("2026-10-15T09:12:03.456Z");
+  });
+
+  it("throwing getters refuse under the field's UNCLAIMABLE classification", () => {
+    const thrower = (base: Record<string, unknown>, key: string) => {
+      const o = { ...base };
+      Object.defineProperty(o, key, { get: () => { throw new Error(`boom:${key}`); } });
+      return o;
+    };
+    const cases: [string, unknown, string][] = [
+      ["shop", "shop", "SHOP_INVALID"],
+      ["id", "mergeOperationId", "MERGE_OPERATION_ID_INVALID"],
+      ["primaryOrderId", "primaryOrderId", "PRIMARY_ORDER_ID_INVALID"],
+      ["primaryOrderName", "primaryOrderName", "PRIMARY_ORDER_NAME_INVALID"],
+      ["createdAt", "operationCreatedAt", "OPERATION_CREATED_AT_INVALID"],
+    ];
+    for (const [key, field, why] of cases) {
+      const r = run(thrower(op(), key), secondary());
+      expect(r, key).toMatchObject({ outcome: "UNCLAIMABLE", field, reason: why });
+    }
+    expect(run(op(), thrower(secondary(), "id"))).toMatchObject({
+      outcome: "UNCLAIMABLE", field: "sourceOrderId", reason: "SOURCE_ORDER_ID_INVALID",
+    });
+    expect(run(op(), thrower(secondary(), "cancelledAt"))).toMatchObject({
+      outcome: "UNCLAIMABLE", field: "secondary", reason: "SECONDARY_INVALID",
+    });
+  });
+
+  it("Proxy get traps and revoked proxies refuse safely (never claimable)", () => {
+    const revoked = (o: Record<string, unknown>) => {
+      const r = Proxy.revocable(o, {});
+      r.revoke();
+      return r.proxy;
+    };
+    const cases: [unknown, unknown, string, string][] = [
+      [new Proxy(op(), { get() { throw new Error("trap"); } }), secondary(), "shop", "SHOP_INVALID"],
+      [op(), new Proxy(secondary(), { get() { throw new Error("trap"); } }), "secondary", "SECONDARY_INVALID"],
+      [revoked(op()), secondary(), "operation", "OPERATION_INVALID"],
+      [op(), revoked(secondary()), "secondary", "SECONDARY_INVALID"],
+    ];
+    for (const [o, s, field, why] of cases) {
+      const r = run(o, s);
+      expect(r).toMatchObject({ outcome: "UNCLAIMABLE", field, reason: why });
+    }
+    // an unreadable wall is control-input failure, never a merchant defect
+    expect(() => run(op(), secondary(), new Proxy(new Date(), {}))).not.toThrow();
+    expect(run(op(), secondary(), new Proxy(new Date(), {}))).toMatchObject({
+      outcome: "UNCLAIMABLE", field: "dbWall", reason: "DB_WALL_INVALID",
+    });
+    expect(run(op(), secondary(), new Proxy(new Date(), {})))
+      .toMatchObject({ cancelledAtInvalid: "DB_WALL_INVALID" });
+  });
+});
+
+// ── B-2: malformed cancelledAt previews are bounded and never throw ───────
+describe("validateOperationForClaim — cancelledAt preview safety", () => {
+  const circular = () => { const o: Record<string, unknown> = {}; o.self = o; return o; };
+  const deepJson = (d: number) => JSON.parse("[".repeat(d) + "]".repeat(d));
+
+  it.each([
+    ["BigInt", 10n, "<bigint>"],
+    ["circular object", circular(), "<object>"],
+    ["throwing toJSON", { toJSON() { throw new Error("boom"); } }, "<object>"],
+    ["proxy throwing get", new Proxy({}, { get() { throw new Error("trap"); } }), "<object>"],
+    ["proxy throwing ownKeys", new Proxy({}, { ownKeys() { throw new Error("trap"); } }), "<object>"],
+    ["null-proto toJSON→undefined", Object.assign(Object.create(null), { toJSON: () => undefined }), "<object>"],
+    ["symbol", Symbol("s"), "<symbol>"],
+    ["function", () => "SECRET_TOKEN", "<function>"],
+    ["undefined", undefined, "<undefined>"],
+    ["deep JSON 3000", deepJson(3000), "<object>"],
+    ["deep JSON 20000", deepJson(20000), "<object>"],
+  ])("cancelledAt %s → CANCELLED_AT_INVALID (no throw)", (label, v, preview) => {
+    const sec = secondary({ cancelledAt: v });
+    if (v === undefined) delete (sec as Record<string, unknown>).cancelledAt;
+    const r = run(op(), sec);
+    expect(r, label).toMatchObject({ outcome: "CANCELLED_AT_INVALID", cancelledAtPreview: preview });
+    if (r.outcome === "CANCELLED_AT_INVALID") {
+      expect(r.cancelledAtInvalid).toBe(label === "undefined" ? "ABSENT" : "NOT_A_STRING");
+    }
+  });
+
+  it("existing preview behavior for ordinary invalid values is unchanged", () => {
+    const rows: [unknown, string, string][] = [
+      [null, "NOT_A_STRING", "null"],
+      [123, "NOT_A_STRING", "123"],
+      [-0, "NOT_A_STRING", "0"],
+      [Infinity, "NOT_A_STRING", "null"],
+      [{ at: "2026-10-15T09:12:03Z" }, "NOT_A_STRING", '{"at":"2026-10-15T09:12:03Z"}'],
+      ["bad\nline", "UNPARSEABLE", "bad?line"],
+      [` ${"x".repeat(200)}`, "UNPARSEABLE", ` ${"x".repeat(63)}`],
+      ["2026-02-30T00:00:00Z", "CALENDAR_INVALID", "2026-02-30T00:00:00Z"],
+    ];
+    for (const [v, why, preview] of rows) {
+      const r = run(op(), secondary({ cancelledAt: v }));
+      expect(r, JSON.stringify(v)).toMatchObject({
+        outcome: "CANCELLED_AT_INVALID", cancelledAtInvalid: why, cancelledAtPreview: preview,
+      });
+    }
+  });
+
+  it("CANCELLED_AT_INVALID never fabricates sourceCancelledAt", () => {
+    for (const v of [null, "garbage", 10n, circular()]) {
+      const r = run(op(), secondary({ cancelledAt: v }));
+      expect(r.outcome).toBe("CANCELLED_AT_INVALID");
+      if (r.outcome === "CANCELLED_AT_INVALID") {
+        expect("sourceCancelledAt" in r).toBe(false);
+        expect("sourceCancelledAtIso" in r).toBe(false);
+        expect(r.cancelledAtPreview.length).toBeLessThanOrEqual(64);
+        expect(/^[\x20-\x7E]*$/.test(r.cancelledAtPreview)).toBe(true);
+        // no unrelated operation or secondary data in the preview
+        expect(r.cancelledAtPreview).not.toContain("acme");
+        expect(r.cancelledAtPreview).not.toContain("4001");
+      }
+    }
+  });
+});
+
 // ── One order-GID pattern across validator, contract and migration ────────
 describe("ORDER_GID_PATTERN is the single §5.3/§7.2 pattern", () => {
   const MIGRATION = readFileSync(
