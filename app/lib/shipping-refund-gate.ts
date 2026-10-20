@@ -1,7 +1,7 @@
 // ── Shipping v0 Phase 2: execution gate and epoch snapshot ───────────────
-// docs/SHIPPING-PHASE2-DESIGN.md Revision 3.3, sections 4.1-4.5, 4.10, 7.5
-// and 8.3 — the pure admission/dispatch gate a future locked claim
-// transaction consults before any ShippingRefund row may be written.
+// docs/SHIPPING-PHASE2-DESIGN.md Revision 3.3, sections 4.1-4.5, 4.10, 7.2,
+// 7.2.1, 7.5 and 8.3 — the pure admission/dispatch gate a future locked
+// claim transaction consults before any ShippingRefund row may be written.
 //
 // Pure module: no I/O, no database, no Shopify, no timers, no global
 // mutable state. Every function is deterministic over its arguments and
@@ -689,4 +689,293 @@ export function recheckShippingGate(
     }
   }
   return { equal: true };
+}
+
+// ── Pre-claim validation (7.2.1): cancelledAt and copied claim columns ────
+//
+// Before any ShippingRefund row may be inserted, the values copied from the
+// operation are validated (7.2). Two failure classes are kept distinct:
+// an absent or invalid `cancelledAt` is representable later as the terminal
+// REVIEW_REQUIRED(CANCELLED_AT_INVALID) row with `sourceCancelledAt = NULL`
+// — but only when every identity, text and instant field is valid, because
+// that terminal row carries the same NOT NULL and CHECK columns. Any other
+// defect means no row can be formed at all (UNCLAIMABLE): required evidence
+// is never substituted, and no claimable result is returned with malformed
+// order identifiers or missing non-null fields.
+
+/** The §5.3 order-GID grammar, verbatim. The canonical JS definition is
+ *  `ORDER_GID_PATTERN` in shipping-refund-contract.ts; it cannot be imported
+ *  here because that module transitively imports the database and Shopify
+ *  layers and this module must stay pure (no I/O, no database, no Shopify).
+ *  A test asserts this value equals the contract constant, the §5.3 literal
+ *  and every S1-A CHECK occurrence; the future scanner consumes the same
+ *  literal in its SQL predicates. */
+export const ORDER_GID_PATTERN = "^gid://shopify/Order/[0-9]+$";
+const ORDER_GID_CLAIM_RE = new RegExp(ORDER_GID_PATTERN);
+
+// ── parseCancelledAt (7.2.1) ─────────────────────────────────────────────
+
+/** The §7.2.1 reason vocabulary for an invalid `cancelledAt` value. */
+export type CancelledAtReason =
+  | "ABSENT"           // the key is absent or its value is undefined
+  | "NOT_A_STRING"     // a non-string JSON value (number, boolean, null, array, object)
+  | "UNPARSEABLE"      // a string outside the strict instant grammar (whitespace, missing zone, wrong shape)
+  | "CALENDAR_INVALID" // grammar-correct but not a real calendar date, clock field or offset
+  | "OUT_OF_RANGE";    // a real instant outside [2000-01-01T00:00:00Z, dbWall + 5 minutes]
+
+/** `dbWall` is caller-supplied control input, not operation data: its
+ *  failure is reported under this out-of-vocabulary marker so it can never
+ *  be represented as the terminal CANCELLED_AT_INVALID row (7.2.1). */
+export const DB_WALL_INVALID = "DB_WALL_INVALID";
+export type CancelledAtInvalid = CancelledAtReason | typeof DB_WALL_INVALID;
+
+/** A validated instant (a fresh Date truncated to milliseconds), or a
+ *  structured invalid result. */
+export type CancelledAtResult = Date | { readonly invalid: CancelledAtInvalid };
+
+/** §7.2.1 rule 2: full ISO-8601 instant with seconds and an explicit zone;
+ *  1-9 fractional digits; no trimming is attempted. */
+const CANCELLED_AT_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+const CANCELLED_AT_FLOOR_MS = Date.UTC(2000, 0, 1);
+const CANCELLED_AT_SKEW_MS = 5 * 60_000;
+
+/**
+ * Validate a secondary's `cancelledAt` from the operation's JSON record
+ * (7.2.1). Pure and deterministic: it never reads the process clock —
+ * `dbWall` must be the explicitly supplied database-clock instant.
+ *
+ * Reason precedence for overlapping defects is the specification's check
+ * order: DB_WALL_INVALID (the range bound is undefined without a wall
+ * clock), then ABSENT, NOT_A_STRING, UNPARSEABLE, CALENDAR_INVALID and
+ * OUT_OF_RANGE — at most one reason is ever reported.
+ */
+export function parseCancelledAt(
+  value: unknown,
+  dbWall: unknown,
+): CancelledAtResult {
+  const wall = normInstant(dbWall);
+  if (wall === null) return { invalid: DB_WALL_INVALID };
+  if (value === undefined) return { invalid: "ABSENT" };
+  if (typeof value !== "string") return { invalid: "NOT_A_STRING" };
+  const m = CANCELLED_AT_RE.exec(value);
+  if (m === null) return { invalid: "UNPARSEABLE" };
+  const [, yS, moS, dS, hS, miS, sS, fracS, zoneS, offSignS, offHS, offMS] = m;
+  const year = Number(yS);
+  const month = Number(moS);
+  const day = Number(dS);
+  const hour = Number(hS);
+  const minute = Number(miS);
+  const second = Number(sS);
+  const offH = Number(offHS ?? 0);
+  const offM = Number(offMS ?? 0);
+  if (
+    month < 1 || month > 12 ||
+    day < 1 || day > daysInMonth(year, month) ||
+    hour > 23 || minute > 59 || second > 59 ||
+    offH > 23 || offM > 59
+  ) {
+    return { invalid: "CALENDAR_INVALID" };
+  }
+  // Fractional seconds allow 1-9 digits and are TRUNCATED to milliseconds —
+  // unlike the gate-epoch grammar above, which refuses more than three.
+  const fracMs = fracS === undefined ? 0 : Number((fracS + "000").slice(0, 3));
+  // Build the day-of-epoch on a safe reference year, then set the real year:
+  // Date.UTC(year, …) maps years 0-99 onto 1900-1999 while setUTCFullYear
+  // uses the full year verbatim (the S1-C1 defect).
+  const civil = new Date(Date.UTC(2000, 0, 1, hour, minute, second, fracMs));
+  civil.setUTCFullYear(year, month - 1, day);
+  let ms = civil.getTime();
+  if (zoneS !== "Z") {
+    const off = (offSignS === "-" ? -1 : 1) * (offH * 3600_000 + offM * 60_000);
+    ms -= off;
+  }
+  if (
+    !Number.isFinite(ms) ||
+    ms < CANCELLED_AT_FLOOR_MS ||
+    ms > wall.getTime() + CANCELLED_AT_SKEW_MS
+  ) {
+    return { invalid: "OUT_OF_RANGE" };
+  }
+  return new Date(ms);
+}
+
+// ── validateOperationForClaim (7.2.1) ────────────────────────────────────
+
+/** The constraint-sensitive fields a claim copies onto the ShippingRefund
+ *  row (`dbWall` is the clock input, not a copied column). */
+export type ClaimField =
+  | "dbWall"
+  | "operation"
+  | "secondary"
+  | "shop"
+  | "mergeOperationId"
+  | "primaryOrderId"
+  | "primaryOrderName"
+  | "operationCreatedAt"
+  | "sourceOrderId";
+
+export type ClaimFieldReason =
+  | "DB_WALL_INVALID"              // the database-clock input itself is missing/invalid
+  | "OPERATION_INVALID"            // the operation record is not an object
+  | "SECONDARY_INVALID"            // the selected secondary is not an object
+  | "SHOP_INVALID"                 // shop is missing or not a non-empty string
+  | "MERGE_OPERATION_ID_INVALID"   // the operation id is missing or not a non-empty string
+  | "PRIMARY_ORDER_ID_INVALID"     // primaryOrderId is not a well-formed order GID
+  | "PRIMARY_ORDER_NAME_INVALID"   // primaryOrderName is missing or not a non-empty string
+  | "OPERATION_CREATED_AT_INVALID" // the operation's created instant is missing/invalid
+  | "SOURCE_ORDER_ID_INVALID"      // the secondary's id is not a well-formed order GID
+  | "SOURCE_EQUALS_PRIMARY";       // the secondary's id equals primaryOrderId
+
+/** The validated values a claim may copy onto the row — all proven
+ *  representable in their NOT NULL/CHECK columns. */
+export interface ClaimOperationValues {
+  readonly shop: string;
+  readonly mergeOperationId: string;
+  readonly sourceOrderId: string;
+  readonly primaryOrderId: string;
+  readonly primaryOrderName: string;
+  readonly operationCreatedAt: Date;
+  /** `operationCreatedAt` as an ISO string — the value the claim binds
+   *  through the repository's naive-UTC discipline (7.2.1). */
+  readonly operationCreatedAtIso: string;
+}
+
+export type OperationClaimValidation =
+  | {
+      readonly outcome: "VALID";
+      readonly values: ClaimOperationValues;
+      /** The validated secondary cancellation instant (ms precision). */
+      readonly sourceCancelledAt: Date;
+      /** Its ISO form for the claim's naive-UTC bind. */
+      readonly sourceCancelledAtIso: string;
+    }
+  | {
+      /** `cancelledAt` alone is invalid: every other copied value is proven,
+       *  so the future caller may form the terminal
+       *  REVIEW_REQUIRED(CANCELLED_AT_INVALID) row with sourceCancelledAt
+       *  NULL (7.2.1). */
+      readonly outcome: "CANCELLED_AT_INVALID";
+      readonly reasonCode: "CANCELLED_AT_INVALID";
+      readonly cancelledAtInvalid: CancelledAtReason;
+      /** The raw value, truncated to 64 printable characters — the only
+       *  operation data 7.2.1 permits inside `reviewReason`. */
+      readonly cancelledAtPreview: string;
+      readonly values: ClaimOperationValues;
+    }
+  | {
+      /** No ShippingRefund row can be formed — not even a terminal one. */
+      readonly outcome: "UNCLAIMABLE";
+      readonly field: ClaimField;
+      readonly reason: ClaimFieldReason;
+      readonly detail: string;
+      /** The `cancelledAt` classification, retained for diagnostics even
+       *  though it cannot produce the terminal row while another field
+       *  blocks every insert. */
+      readonly cancelledAtInvalid?: CancelledAtInvalid;
+    };
+
+/** ≤64 printable characters of the raw `cancelledAt` value (7.2.1). */
+const cancelledAtPreview = (value: unknown): string => {
+  const base = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value));
+  return base.slice(0, 64).replace(/[^\x20-\x7E]/g, "?");
+};
+
+const nonemptyText = (v: unknown): v is string =>
+  typeof v === "string" && v.length > 0;
+
+/**
+ * Validate one operation and its one selected secondary before any
+ * ShippingRefund insert (7.2.1). Pure and deterministic: `dbWall` is the
+ * explicitly supplied database-clock instant — the process clock is never
+ * consulted — and no argument is mutated.
+ *
+ * Evaluation order is fixed: `parseCancelledAt` runs FIRST (its
+ * classification is retained on every outcome), then the copied fields in
+ * the order operation shape, `shop`, `mergeOperationId`, `primaryOrderId`,
+ * `primaryOrderName`, `operationCreatedAt`, secondary shape,
+ * `sourceOrderId` and secondary≠primary. A field failure yields
+ * `UNCLAIMABLE` even when `cancelledAt` was invalid, because the terminal
+ * CANCELLED_AT_INVALID row carries the same NOT NULL and CHECK columns; the
+ * cancelledAt reason is still reported for diagnostics. Only when every
+ * copied field is valid does a cancelledAt defect yield
+ * `CANCELLED_AT_INVALID`.
+ */
+export function validateOperationForClaim(
+  operation: unknown,
+  secondary: unknown,
+  dbWall: unknown,
+): OperationClaimValidation {
+  const cancelledAtSource = isObject(secondary) ? secondary.cancelledAt : undefined;
+  const cancelled = parseCancelledAt(cancelledAtSource, dbWall);
+  const cancelledAtInvalid =
+    cancelled instanceof Date ? undefined : cancelled.invalid;
+
+  const fail = (
+    field: ClaimField,
+    reason: ClaimFieldReason,
+    detail: string,
+  ): OperationClaimValidation =>
+    ({ outcome: "UNCLAIMABLE", field, reason, detail, cancelledAtInvalid });
+
+  if (!isObject(operation)) {
+    return fail("operation", "OPERATION_INVALID", "the operation record is not an object");
+  }
+  if (!nonemptyText(operation.shop)) {
+    return fail("shop", "SHOP_INVALID", "operation.shop is missing or not a non-empty string");
+  }
+  if (!nonemptyText(operation.id)) {
+    return fail("mergeOperationId", "MERGE_OPERATION_ID_INVALID", "operation.id is missing or not a non-empty string");
+  }
+  if (
+    typeof operation.primaryOrderId !== "string" ||
+    !ORDER_GID_CLAIM_RE.test(operation.primaryOrderId)
+  ) {
+    return fail("primaryOrderId", "PRIMARY_ORDER_ID_INVALID", "operation.primaryOrderId is not a well-formed order GID");
+  }
+  if (!nonemptyText(operation.primaryOrderName)) {
+    return fail("primaryOrderName", "PRIMARY_ORDER_NAME_INVALID", "operation.primaryOrderName is missing or not a non-empty string");
+  }
+  const createdAt = normInstant(operation.createdAt);
+  if (createdAt === null) {
+    return fail("operationCreatedAt", "OPERATION_CREATED_AT_INVALID", "operation.createdAt is missing or invalid");
+  }
+  if (!isObject(secondary)) {
+    return fail("secondary", "SECONDARY_INVALID", "the selected secondary is not an object");
+  }
+  if (typeof secondary.id !== "string" || !ORDER_GID_CLAIM_RE.test(secondary.id)) {
+    return fail("sourceOrderId", "SOURCE_ORDER_ID_INVALID", "secondary.id is not a well-formed order GID");
+  }
+  if (secondary.id === operation.primaryOrderId) {
+    return fail("sourceOrderId", "SOURCE_EQUALS_PRIMARY", "secondary.id equals primaryOrderId");
+  }
+
+  const values: ClaimOperationValues = {
+    shop: operation.shop,
+    mergeOperationId: operation.id,
+    sourceOrderId: secondary.id,
+    primaryOrderId: operation.primaryOrderId,
+    primaryOrderName: operation.primaryOrderName,
+    operationCreatedAt: createdAt,
+    operationCreatedAtIso: createdAt.toISOString(),
+  };
+  if (cancelled instanceof Date) {
+    return {
+      outcome: "VALID",
+      values,
+      sourceCancelledAt: cancelled,
+      sourceCancelledAtIso: cancelled.toISOString(),
+    };
+  }
+  if (cancelledAtInvalid === DB_WALL_INVALID) {
+    return fail("dbWall", "DB_WALL_INVALID", "the database wall-clock instant is missing or invalid");
+  }
+  return {
+    outcome: "CANCELLED_AT_INVALID",
+    reasonCode: "CANCELLED_AT_INVALID",
+    cancelledAtInvalid: cancelledAtInvalid as CancelledAtReason,
+    cancelledAtPreview: cancelledAtPreview(cancelledAtSource),
+    values,
+  };
 }
