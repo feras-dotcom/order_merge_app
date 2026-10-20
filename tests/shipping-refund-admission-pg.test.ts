@@ -51,6 +51,21 @@ describe.skipIf(!TEST_URL)(
     let db: PrismaClient;
     let db2: PrismaClient;
     let preflighted: PreflightedDatabase;
+    // The shared control singletons as they stood BEFORE this suite's first
+    // write — restored wholesale in afterAll (F2) so a later suite on the
+    // same disposable database (e.g. the S1-A schema suite) sees the state
+    // it expects regardless of test order or mid-suite failure.
+    let savedAppControl: {
+      shippingAdjustmentsEnabled: boolean;
+      shippingEnabledAt: Date | null;
+      shippingAllowShops: string[];
+    } | null;
+    let savedExecuteControl: {
+      admissionEnabled: boolean;
+      admissionEnabledAt: Date | null;
+      dispatchEnabled: boolean;
+      dispatchEnabledAt: Date | null;
+    } | null;
 
     beforeAll(async () => {
       // FIRST — before migrations or any write.
@@ -61,6 +76,23 @@ describe.skipIf(!TEST_URL)(
       });
       db = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
       db2 = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
+
+      // Capture the pre-suite shared control state for afterAll restore.
+      [savedAppControl] = await db.$queryRaw<{
+        shippingAdjustmentsEnabled: boolean;
+        shippingEnabledAt: Date | null;
+        shippingAllowShops: string[];
+      }[]>`
+        SELECT "shippingAdjustmentsEnabled", "shippingEnabledAt", "shippingAllowShops"
+        FROM "AppControl" WHERE "id" = 'control'`;
+      [savedExecuteControl] = await db.$queryRaw<{
+        admissionEnabled: boolean;
+        admissionEnabledAt: Date | null;
+        dispatchEnabled: boolean;
+        dispatchEnabledAt: Date | null;
+      }[]>`
+        SELECT "admissionEnabled", "admissionEnabledAt", "dispatchEnabled", "dispatchEnabledAt"
+        FROM "ShippingExecuteControl" WHERE "id" = 'control'`;
 
       // The two singletons: switch on at EPOCH with an empty allowlist —
       // each test appends its own shop; admission on, dispatch off.
@@ -79,8 +111,32 @@ describe.skipIf(!TEST_URL)(
     }, 120_000);
 
     afterAll(async () => {
-      await db?.$disconnect();
-      await db2?.$disconnect();
+      // F2: restore the shared control singletons to their pre-suite state —
+      // runs even when tests failed part-way through a mutation.
+      try {
+        if (savedAppControl) {
+          await db.$executeRaw`
+            UPDATE "AppControl" SET
+              "shippingAdjustmentsEnabled" = ${savedAppControl.shippingAdjustmentsEnabled},
+              "shippingEnabledAt" = ${savedAppControl.shippingEnabledAt},
+              "shippingAllowShops" = ${savedAppControl.shippingAllowShops}
+            WHERE "id" = 'control'`;
+        }
+        if (savedExecuteControl) {
+          await db.$executeRaw`
+            UPDATE "ShippingExecuteControl" SET
+              "admissionEnabled" = ${savedExecuteControl.admissionEnabled},
+              "admissionEnabledAt" = ${savedExecuteControl.admissionEnabledAt},
+              "dispatchEnabled" = ${savedExecuteControl.dispatchEnabled},
+              "dispatchEnabledAt" = ${savedExecuteControl.dispatchEnabledAt}
+            WHERE "id" = 'control'`;
+        } else {
+          await db.$executeRaw`DELETE FROM "ShippingExecuteControl" WHERE "id" = 'control'`;
+        }
+      } finally {
+        await db?.$disconnect();
+        await db2?.$disconnect();
+      }
     });
 
     const uniqueShop = () => `s1d-${randomUUID()}.myshopify.com`;
@@ -470,6 +526,186 @@ describe.skipIf(!TEST_URL)(
       }
     });
 
+    // ── F3: a committed change on EACH of the four locked gate rows ──────
+    // is observed by a claim waiting on the corresponding FOR SHARE lock.
+
+    it.each([
+      {
+        name: "AppControl (shipping switch off)",
+        lock: `SELECT "id" FROM "AppControl" WHERE "id" = 'control' FOR UPDATE`,
+        change: (shop: string) => Prisma.sql`
+          UPDATE "AppControl" SET
+            "shippingAdjustmentsEnabled" = false, "shippingEnabledAt" = NULL
+          WHERE "id" = 'control'`,
+      },
+      {
+        name: "Settings (merchant opt-in off)",
+        lock: `SELECT "id" FROM "Settings" WHERE "shop" = $shop FOR UPDATE`,
+        change: (shop: string) => Prisma.sql`
+          UPDATE "Settings" SET
+            "shippingAdjustmentEnabled" = false, "shippingAdjustmentEnabledAt" = NULL
+          WHERE "shop" = ${shop}`,
+      },
+      {
+        name: "ShippingExecuteApproval (revoked)",
+        lock: `SELECT "shop" FROM "ShippingExecuteApproval" WHERE "shop" = $shop FOR UPDATE`,
+        change: (shop: string) => Prisma.sql`
+          UPDATE "ShippingExecuteApproval" SET
+            "revokedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+          WHERE "shop" = ${shop}`,
+      },
+      {
+        name: "ShippingExecuteControl (admission off)",
+        lock: `SELECT "id" FROM "ShippingExecuteControl" WHERE "id" = 'control' FOR UPDATE`,
+        change: (shop: string) => Prisma.sql`
+          UPDATE "ShippingExecuteControl" SET
+            "admissionEnabled" = false, "admissionEnabledAt" = NULL
+          WHERE "id" = 'control'`,
+      },
+    ])("a committed gate change on $name mid-claim writes no row", async ({ lock, change }) => {
+      const shop = uniqueShop();
+      await seedGate(shop);
+      let locked: () => void = () => {};
+      const lockedP = new Promise<void>((r) => (locked = r));
+      const holder = db2.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(lock.replace("$shop", `'${shop}'`));
+        locked();
+        await tx.$executeRaw`SELECT pg_sleep(0.4)`;
+        await tx.$executeRaw`${change(shop)}`;
+      });
+      try {
+        await lockedP;
+        const res = await claimShippingRefund(
+          { operation: operation(shop), secondary: { id: nextOrder(), cancelledAt: CANCELLED } },
+          db,
+        );
+        await holder;
+        expect(res.claimed).toBe(false);
+        const [{ n }] = await rowCount(shop);
+        expect(n).toBe(0n);
+      } finally {
+        await holder.catch(() => {});
+        await db.$executeRaw`
+          UPDATE "AppControl" SET
+            "shippingAdjustmentsEnabled" = true, "shippingEnabledAt" = ${naive(EPOCH)}
+          WHERE "id" = 'control'`;
+        await db.$executeRaw`
+          UPDATE "ShippingExecuteControl" SET
+            "admissionEnabled" = true, "admissionEnabledAt" = ${naive(EPOCH)}
+          WHERE "id" = 'control'`;
+      }
+    });
+
+    it("a committed gate change mid-claim prevents a TERMINAL insertion too", async () => {
+      const shop = uniqueShop();
+      await seedGate(shop);
+      let locked: () => void = () => {};
+      const lockedP = new Promise<void>((r) => (locked = r));
+      const holder = db2.$transaction(async (tx) => {
+        await tx.$executeRaw`
+          SELECT "id" FROM "ShippingExecuteControl" WHERE "id" = 'control' FOR UPDATE`;
+        locked();
+        await tx.$executeRaw`SELECT pg_sleep(0.4)`;
+        await tx.$executeRaw`
+          UPDATE "ShippingExecuteControl" SET
+            "admissionEnabled" = false, "admissionEnabledAt" = NULL
+          WHERE "id" = 'control'`;
+      });
+      try {
+        await lockedP;
+        const res = await claimTerminalShippingRefund(
+          { operation: operation(shop), secondary: { id: nextOrder(), cancelledAt: CANCELLED } },
+          { status: "REVIEW_REQUIRED", reasonCode: "DATA_INVALID" },
+          db,
+        );
+        await holder;
+        expect(res.claimed).toBe(false);
+        const [{ n }] = await rowCount(shop);
+        expect(n).toBe(0n);
+      } finally {
+        await holder.catch(() => {});
+        await db.$executeRaw`
+          UPDATE "ShippingExecuteControl" SET
+            "admissionEnabled" = true, "admissionEnabledAt" = ${naive(EPOCH)}
+          WHERE "id" = 'control'`;
+      }
+    });
+
+    it("a lease that expires while renewal waits for the row lock loses ownership", async () => {
+      const shop = uniqueShop();
+      await seedGate(shop);
+      const res = await claimShippingRefund(
+        { operation: operation(shop), secondary: { id: nextOrder(), cancelledAt: CANCELLED } },
+        db,
+      );
+      expect(res.claimed).toBe(true);
+      if (!res.claimed || !res.leaseToken) return;
+
+      // A short lease; the holder takes the row lock past its expiry.
+      await db.$executeRaw`
+        UPDATE "ShippingRefund" SET
+          "leasedUntil" = clock_timestamp() AT TIME ZONE 'UTC' + interval '300 milliseconds'
+        WHERE "id" = ${res.rowId}`;
+      let locked: () => void = () => {};
+      const lockedP = new Promise<void>((r) => (locked = r));
+      const holder = db2.$transaction(async (tx) => {
+        await tx.$queryRaw`
+          SELECT "id" FROM "ShippingRefund" WHERE "id" = ${res.rowId} FOR UPDATE`;
+        locked();
+        await tx.$executeRaw`SELECT pg_sleep(1.0)`;
+      });
+      try {
+        await lockedP;
+        // The renewal waits on the row lock; by the time the conditional
+        // UPDATE runs the lease has expired, so the token check fails.
+        await expect(
+          renewQueuedShippingRefundLease(res.rowId, res.leaseToken, db),
+        ).rejects.toBeInstanceOf(OwnershipLostError);
+        await holder;
+        const [row] = await refundRow(res.rowId);
+        expect(row.leaseToken).toBe(res.leaseToken);
+      } finally {
+        await holder.catch(() => {});
+      }
+    });
+
+    it("a live foreign lease prevents the horizon abort; expiry re-enables it (F1)", async () => {
+      const shop = uniqueShop();
+      await seedGate(shop);
+      const res = await claimShippingRefund(
+        {
+          operation: operation(shop),
+          secondary: { id: nextOrder(), cancelledAt: "2020-01-02T00:00:00.000Z" },
+        },
+        db,
+      );
+      expect(res.claimed).toBe(true);
+      if (!res.claimed || !res.leaseToken) return;
+
+      // The claim lease is live: a second lease attempt is fenced BEFORE the
+      // horizon is considered — the row must stay QUEUED.
+      expect(await leaseQueuedShippingRefund(res.rowId, {}, db2)).toEqual({
+        leased: false,
+        reason: "LEASE_HELD",
+      });
+      let [row] = await refundRow(res.rowId);
+      expect(row.status).toBe("QUEUED");
+
+      // Once the lease expires the row can legitimately be acquired, and the
+      // horizon abort applies.
+      await db.$executeRaw`
+        UPDATE "ShippingRefund" SET
+          "leasedUntil" = clock_timestamp() AT TIME ZONE 'UTC' - interval '1 second'
+        WHERE "id" = ${res.rowId}`;
+      expect(await leaseQueuedShippingRefund(res.rowId, {}, db)).toEqual({
+        leased: false,
+        reason: "HORIZON_EXPIRED",
+      });
+      [row] = await refundRow(res.rowId);
+      expect(row.status).toBe("ABORTED");
+      expect(row.reasonCode).toBe("HORIZON_EXPIRED");
+    });
+
     // ── Lane selection (4.5, immutable at claim) ────────────────────────
 
     it("EXECUTE lane requires the dispatch epoch and carries it frozen", async () => {
@@ -752,6 +988,11 @@ describe.skipIf(!TEST_URL)(
       );
       expect(res.claimed).toBe(true);
       if (!res.claimed) return;
+      // F1: the claim's own lease is live — it must be released before the
+      // row can be acquired and the horizon evaluated.
+      await db.$executeRaw`
+        UPDATE "ShippingRefund" SET "leaseToken" = NULL, "leasedUntil" = NULL
+        WHERE "id" = ${res.rowId}`;
       const leased = await leaseQueuedShippingRefund(res.rowId, {}, db);
       expect(leased).toEqual({ leased: false, reason: "HORIZON_EXPIRED" });
       const [row] = await refundRow(res.rowId);
