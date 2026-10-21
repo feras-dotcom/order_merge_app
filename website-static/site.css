@@ -1137,14 +1137,6 @@ section[id] {
   font-size: 16px;
 }
 
-.guide-disclosure {
-  padding: 20px 22px;
-  border: 1px solid #c9d8ef;
-  border-radius: 14px;
-  background: var(--blue-soft);
-  color: var(--ink);
-}
-
 .guide-table-scroll {
   max-width: 100%;
   margin-top: 24px;
