@@ -835,8 +835,13 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
     FIXTURE_HELPER,
   ]);
   // The architecture test may name the setting in order to assert on it;
-  // mutation forms remain forbidden here as everywhere.
-  const MAY_ASSERT_ROLE = new Set(["tests/shipping-refund-trigger-manifest.test.ts"]);
+  // mutation forms remain forbidden here as everywhere. The fixture PG
+  // suite names it for the same reason — it asserts the helper never
+  // emits a mutation form.
+  const MAY_ASSERT_ROLE = new Set([
+    "tests/shipping-refund-trigger-manifest.test.ts",
+    "tests/shipping-refund-fixture-pg.test.ts",
+  ]);
 
   const roleMutationForms: RegExp[] = [
     // SET [LOCAL|SESSION] of the role — bare or quoted identifier.
@@ -1156,5 +1161,67 @@ describe("control defaults", () => {
     expect(MIGRATION_SQL).toContain('NOT "dispatchEnabled" OR "admissionEnabled"');
     expect(MIGRATION_SQL).toContain('("admissionEnabledAt" IS NOT NULL) = "admissionEnabled"');
     expect(MIGRATION_SQL).toContain('("dispatchEnabledAt" IS NOT NULL) = "dispatchEnabled"');
+  });
+});
+
+// ── 12.3.1 attribution pin (19.3): CONFIRMED has no runtime-mutable source ──
+
+describe("attribution CONFIRMED cannot be activated (12.3.1, 19.3)", () => {
+  it("no app/ or scripts/ source binds attributionStatus to anything but the pin", () => {
+    // Every `attributionStatus` binding in production sources must be a type
+    // annotation or the pinned `deps.attributionStatus ?? ATTRIBUTION_STATUS`
+    // default. No env var, Settings row, request value or literal may ever
+    // feed it — the "CONFIRMED" union member exists only so the injected
+    // test seam can exercise the 12.8.2 branch on fixtures.
+    const offenders: string[] = [];
+    for (const root of ["app", "scripts"]) {
+      for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
+        const text = significantText(readFileSync(f, "utf8"), "ts");
+        const rel = relative(REPO_ROOT, f).split("\\").join("/");
+        for (const m of text.matchAll(
+          /\battributionStatus\b\s*(?:\?\s*)?[:=](?![=>])\s*([^;,}\n]+)/g,
+        )) {
+          const rhs = (m[1] ?? "").trim();
+          const allowed =
+            /^AttributionStatus\b/.test(rhs) ||
+            /^deps\.attributionStatus\s*\?\?\s*ATTRIBUTION_STATUS\b/.test(rhs);
+          if (!allowed) {
+            offenders.push(`${rel}: attributionStatus bound to '${rhs.slice(0, 80)}'`);
+          }
+        }
+        // The environment must never reach attribution.
+        if (
+          /process\.env[\s\S]{0,160}attribution/i.test(text) ||
+          /attribution[\s\S]{0,160}process\.env/i.test(text)
+        ) {
+          offenders.push(`${rel}: env-driven attribution`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("the CONFIRMED literal exists only inside the gate module", () => {
+    // 'CONFIRMED' appears in exactly one file: the ATTRIBUTION_STATUS
+    // declaration itself and the G-AGREEMENT 12.8.2 evidence-outcome
+    // classifier (a different domain — it describes recorded fixture
+    // evidence, never the activation flag).
+    const offenders: string[] = [];
+    for (const root of ["app", "scripts"]) {
+      for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
+        const text = significantText(readFileSync(f, "utf8"), "ts");
+        const rel = relative(REPO_ROOT, f).split("\\").join("/");
+        if (/"CONFIRMED"|'CONFIRMED'/.test(text) &&
+            rel !== "app/lib/shipping-refund-gate.ts") {
+          offenders.push(rel);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("the pinned value itself is UNVERIFIED", async () => {
+    const gate = await import("../app/lib/shipping-refund-gate");
+    expect(gate.ATTRIBUTION_STATUS).toBe("UNVERIFIED");
   });
 });

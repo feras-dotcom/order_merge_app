@@ -511,7 +511,21 @@ describe.skipIf(!TEST_URL)(
       const shop = uniqueShop();
       await seedGate(shop, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
       const { primaryId, secondaryId, cancelledAt } = await seedOp({ shop });
-      const admin = fakeAdmin({}, { srcId: secondaryId, priId: primaryId, cancelledAt });
+      // S1-E carry-forward: baseline.capturedAt must follow the FINAL
+      // successful recheck, on the database clock. Each recheck read
+      // stamps the DB wall; the recorded capture must be >= the last one.
+      const recheckWalls: Date[] = [];
+      const admin = fakeAdmin(
+        {
+          recheck: async () => {
+            const [w] = await db.$queryRaw<{ wall: Date }[]>`
+              SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "wall"`;
+            recheckWalls.push(w.wall);
+            return undefined; // default body
+          },
+        },
+        { srcId: secondaryId, priId: primaryId, cancelledAt },
+      );
       await scan([shop], { adminFactory: async () => admin, sessionLoader: usableSession });
       const row = await refundRow(shop, secondaryId);
       expect(row.status).toBe("PREPARED");
@@ -533,6 +547,15 @@ describe.skipIf(!TEST_URL)(
       // The baseline: empty under STRICT_EMPTY.
       expect(row.preEvidence?.baseline?.refundCount).toBe(0);
       expect(row.preEvidence?.captureTransactionId).toBe(TXN_CAP);
+      // capturedAt is stamped AFTER the last successful recheck (the
+      // S1-E correction): at least two rechecks ran, and the recorded
+      // capture instant is at-or-after the last one's DB wall.
+      expect(recheckWalls.length).toBeGreaterThanOrEqual(2);
+      const capturedAt = Date.parse(row.preEvidence?.baseline?.capturedAt);
+      expect(Number.isFinite(capturedAt)).toBe(true);
+      expect(capturedAt).toBeGreaterThanOrEqual(
+        recheckWalls[recheckWalls.length - 1].getTime(),
+      );
       // No dispatch evidence.
       expect(row.dispatchToken).toBeNull();
       expect(row.dispatchedAt).toBeNull();
@@ -1185,9 +1208,14 @@ describe.skipIf(!TEST_URL)(
     }
 
     /** Gate open on the EXECUTE lane, a valid op fixture, and a due QUEUED
-     *  row claimed through the real claim path with its lease expired. */
-    async function seedDueRow(scratch: PrismaClient): Promise<DueFixture> {
-      const shop = uniqueShop();
+     *  row claimed through the real claim path with its lease expired.
+     *  Pass `existingShop` to seed a second due row into an already-gated
+     *  shop (same-cycle ordering regressions). */
+    async function seedDueRow(
+      scratch: PrismaClient,
+      existingShop?: string,
+    ): Promise<DueFixture> {
+      const shop = existingShop ?? uniqueShop();
       const wall = (
         await scratch.$queryRaw<{ wall: Date }[]>`
           SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "wall"`
@@ -1196,27 +1224,29 @@ describe.skipIf(!TEST_URL)(
       const primaryId = nextOrder();
       const secondaryId = nextOrder();
 
-      await scratch.$executeRaw`
-        UPDATE "AppControl" SET
-          "shippingAdjustmentsEnabled" = true,
-          "shippingEnabledAt" = ${naive(EPOCH)},
-          "shippingAllowShops" = array_append("shippingAllowShops", ${shop})
-        WHERE "id" = 'control'`;
-      await scratch.$executeRaw`
-        INSERT INTO "Settings" ("id", "shop", "shippingAdjustmentEnabled",
-          "shippingAdjustmentEnabledAt", "shippingRolloutAt", "shippingPolicy")
-        VALUES (${`set_${randomUUID()}`}, ${shop}, true, ${naive(EPOCH)}, ${naive(EPOCH)}, 'REFUND_ALL')`;
-      await scratch.$executeRaw`
-        UPDATE "ShippingExecuteControl" SET
-          "admissionEnabled" = true, "admissionEnabledAt" = ${naive(EPOCH)},
-          "dispatchEnabled" = true, "dispatchEnabledAt" = ${naive(EPOCH)}
-        WHERE "id" = 'control'`;
-      await scratch.$executeRaw`
-        INSERT INTO "ShippingExecuteApproval"
-          ("shop", "approvedAt", "approvedBy", "revokedAt", "merchantOptInEpoch",
-           "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor")
-        VALUES (${shop}, ${naive(EPOCH)}, 's1e-test', NULL,
-          ${naive(EPOCH)}, 'v1', ${naive(EPOCH)}, 'USD', '0')`;
+      if (existingShop === undefined) {
+        await scratch.$executeRaw`
+          UPDATE "AppControl" SET
+            "shippingAdjustmentsEnabled" = true,
+            "shippingEnabledAt" = ${naive(EPOCH)},
+            "shippingAllowShops" = array_append("shippingAllowShops", ${shop})
+          WHERE "id" = 'control'`;
+        await scratch.$executeRaw`
+          INSERT INTO "Settings" ("id", "shop", "shippingAdjustmentEnabled",
+            "shippingAdjustmentEnabledAt", "shippingRolloutAt", "shippingPolicy")
+          VALUES (${`set_${randomUUID()}`}, ${shop}, true, ${naive(EPOCH)}, ${naive(EPOCH)}, 'REFUND_ALL')`;
+        await scratch.$executeRaw`
+          UPDATE "ShippingExecuteControl" SET
+            "admissionEnabled" = true, "admissionEnabledAt" = ${naive(EPOCH)},
+            "dispatchEnabled" = true, "dispatchEnabledAt" = ${naive(EPOCH)}
+          WHERE "id" = 'control'`;
+        await scratch.$executeRaw`
+          INSERT INTO "ShippingExecuteApproval"
+            ("shop", "approvedAt", "approvedBy", "revokedAt", "merchantOptInEpoch",
+             "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor")
+          VALUES (${shop}, ${naive(EPOCH)}, 's1e-test', NULL,
+            ${naive(EPOCH)}, 'v1', ${naive(EPOCH)}, 'USD', '0')`;
+      }
 
       const opId = nextOpId();
       await scratch.$executeRaw`
@@ -1493,10 +1523,30 @@ describe.skipIf(!TEST_URL)(
           // Mid-cycle: the catalog is intact when the cycle checks it; the
           // drop lands inside the fake recheck read, between the cycle
           // check and the freeze. The freeze's recheck still refuses.
+          //
+          // S1-E carry-forward regression: a SECOND due row in the same
+          // shop proves Part A stops on the refusal — a cycle that merely
+          // recorded the outcome and continued would lease and read the
+          // second row.
+          const fx2 = await seedDueRow(scratch, fx.shop);
+          const stateOf = async (rowId: string) =>
+            (
+              await scratch.$queryRaw<any[]>`
+                SELECT * FROM "ShippingRefund" WHERE "id" = ${rowId}`
+            )[0];
+          const eventsOf = async (rowId: string) =>
+            scratch.$queryRaw<any[]>`
+              SELECT "fromStatus", "toStatus", "actor"
+              FROM "ShippingRefundEvent" WHERE "shippingRefundId" = ${rowId}
+              ORDER BY "at" ASC, "id" ASC`;
           await scratch.$executeRaw`
             UPDATE "ShippingRefund" SET
               "leasedUntil" = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second'
             WHERE "id" = ${fx.rowId}`;
+          const fx2Before = await stateOf(fx2.rowId);
+          const fx2EventsBefore = await eventsOf(fx2.rowId);
+          const fxBefore = await stateOf(fx.rowId);
+          const fxEventsBefore = await eventsOf(fx.rowId);
           let dropped = false;
           const logs: string[] = [];
           const admin = fakeAdmin(
@@ -1542,6 +1592,44 @@ describe.skipIf(!TEST_URL)(
             expect(
               (await rowEvents()).map((e) => `${e.fromStatus}->${e.toStatus}`),
             ).toEqual(["null->QUEUED"]);
+
+            // The second due row proves Part A stopped: exactly one of the
+            // two may have been read; the other must be byte-identical
+            // (not even leased) with an untouched journal.
+            const readSources = new Set(
+              admin.calls.flatMap((c) =>
+                Object.values(c.variables ?? {}).filter(
+                  (v): v is string => typeof v === "string",
+                ),
+              ),
+            );
+            const readSecondary = [fx, fx2].filter((f) =>
+              readSources.has(f.secondaryId),
+            );
+            expect(
+              readSecondary.length,
+              "the refusal must stop the shop cycle — at most one due row may have been read",
+            ).toBeLessThanOrEqual(1);
+            const untouched = readSecondary[0] === fx ? fx2 : fx;
+            const untouchedBefore =
+              untouched === fx2 ? fx2Before : fxBefore;
+            const untouchedEventsBefore =
+              untouched === fx2 ? fx2EventsBefore : fxEventsBefore;
+            expect(await stateOf(untouched.rowId)).toEqual(untouchedBefore);
+            expect(await eventsOf(untouched.rowId)).toEqual(
+              untouchedEventsBefore,
+            );
+            // And the read row, if any, also never froze.
+            if (readSecondary.length === 1) {
+              const touched = await stateOf(readSecondary[0].rowId);
+              expect(touched.status).toBe("QUEUED");
+              expect(touched.wireHash).toBeNull();
+              expect(
+                (await eventsOf(readSecondary[0].rowId)).map(
+                  (e) => `${e.fromStatus}->${e.toStatus}`,
+                ),
+              ).toEqual(["null->QUEUED"]);
+            }
           } finally {
             await scratch.$executeRawUnsafe(
               `CREATE TRIGGER shippingrefund_event_writer

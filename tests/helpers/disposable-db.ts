@@ -145,6 +145,17 @@ function verifiedIdentity(candidate: unknown): VerifiedServerIdentity {
   return v;
 }
 
+/** The frozen verified identity backing a brand — the same registry
+ *  membership withScratchDatabase uses. Exported so the §19.2.1 fixture
+ *  helper can re-verify, inside its transaction on the very connection
+ *  running the DDL, that the connection is the server and database the
+ *  brand was issued for. */
+export function preflightedIdentity(
+  candidate: unknown,
+): VerifiedServerIdentity {
+  return verifiedIdentity(candidate);
+}
+
 /**
  * Shared loopback-server policy for every disposable-database connection —
  * the provisioning script and the suites' preflight use the same rules:

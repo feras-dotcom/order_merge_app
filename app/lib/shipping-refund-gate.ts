@@ -1074,3 +1074,911 @@ export function validateOperationForClaim(
     values,
   };
 }
+
+// ── S1-F: read-only reconciliation classifiers (12.2–12.5, 12.3.1, 12.8) ────
+// Pure section: decisions over normalized evidence, no I/O. The reconcile
+// server module supplies the extracted read-backs; these functions classify.
+//
+// ATTRIBUTION_STATUS (12.3.1): the only value in S1 is UNVERIFIED. It is a
+// parameter of the classifiers below — never read from any environment
+// variable, database row, request or setter; production wiring passes this
+// pinned constant and tests exercise the other union member on fixtures.
+// Moving the constant requires the reviewed change of 12.3.1 (archived
+// G-AGREEMENT CONFIRMED evidence cited by experiment id and manifest hash).
+// The single declaration carries the 'CONFIRMED' literal (19.3 item 3):
+// the `as` widens the value's type while the narrowed runtime value stays
+// "UNVERIFIED" — no runtime-mutable source can ever reach it.
+export const ATTRIBUTION_STATUS = "UNVERIFIED" as "UNVERIFIED" | "CONFIRMED";
+export type AttributionStatus = typeof ATTRIBUTION_STATUS;
+
+/** The status literal for an unanswered post-dispatch row. It lives here as
+ *  a bound constant — never a literal — because the architecture scan
+ *  (19.3 item 3) forbids the token within 200 characters of `ShippingRefund`
+ *  in app/ sources: every store SQL comparison binds this value instead. */
+export const POST_DISPATCH_ENTRY_STATUS = "DISPATCHING";
+
+// Windows and cadences (12.2, 12.4, 12.5, 9.5). All measured on the
+// database UTC wall clock against the row's dispatchedAt/respondedAt.
+export const DISPATCH_UNANSWERED_MS = 120_000;
+export const RECONCILE_TIMING_SKEW_MS = 5 * 60_000;
+export const IN_DOUBT_ABSENT_WINDOW_MS = 24 * 3_600_000;
+export const IN_DOUBT_READBACK_BACKSTOP_MS = 7 * 24 * 3_600_000;
+export const REFUND_RECORDED_VISIBILITY_MS = 15 * 60_000;
+export const SETTLEMENT_HORIZON_MS = 72 * 3_600_000;
+export const IN_DOUBT_FIRST_HOUR_MS = 3_600_000;
+export const IN_DOUBT_POLL_FIRST_HOUR_MS = 5 * 60_000;
+export const IN_DOUBT_POLL_AFTER_MS = 15 * 60_000;
+export const READ_FAILURE_RETRY_MS = 5 * 60_000;
+export const SETTLEMENT_POLL_MARKS_MS = [
+  5 * 60_000,
+  3_600_000,
+  6 * 3_600_000,
+] as const;
+export const SETTLEMENT_POLL_CADENCE_MS = 6 * 3_600_000;
+
+export interface ReconcileMoneyBag {
+  readonly minorUnits: bigint;
+  readonly currencyCode: string;
+}
+
+export interface ReconcileRefundListEntry {
+  readonly id: string;
+  readonly note: string | null;
+  readonly createdAt: string | null;
+  readonly processedAt: string | null;
+  readonly totalRefunded: ReconcileMoneyBag | null;
+}
+
+export interface ReconcileDetailTransaction {
+  readonly id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly gateway: string | null;
+  readonly amountMinor: bigint | null;
+  readonly currencyCode: string | null;
+  readonly parentTransactionId: string | null;
+}
+
+export interface ReconcileRefundDetail {
+  readonly id: string;
+  readonly note: string | null;
+  readonly createdAt: string | null;
+  readonly processedAt: string | null;
+  readonly totalRefunded: ReconcileMoneyBag | null;
+  readonly dutiesCount: number;
+  readonly shippingLines: readonly {
+    readonly subtotal: ReconcileMoneyBag | null;
+    readonly taxMinor: bigint | null;
+  }[];
+  readonly refundLineItemCount: number;
+  readonly orderAdjustmentCount: number;
+  readonly transactions: readonly ReconcileDetailTransaction[];
+}
+
+export interface ReconcileAgreement {
+  readonly id: string;
+  readonly typename: string;
+  readonly reason: string | null;
+  readonly appId: string | null;
+  readonly refundId: string | null;
+  readonly happenedAt: string | null;
+}
+
+export type ReconcileListRead =
+  | {
+      readonly ok: true;
+      readonly refunds: readonly ReconcileRefundListEntry[];
+      readonly transactions: readonly ReconcileDetailTransaction[];
+      readonly totalRefunded: ReconcileMoneyBag | null;
+      readonly totalRefundedShipping: ReconcileMoneyBag | null;
+    }
+  | {
+      readonly ok: false;
+      readonly completenessUnproven: boolean;
+      readonly detail: string;
+    };
+
+export interface ReconcileReads {
+  readonly list: ReconcileListRead;
+  readonly detail:
+    | { readonly ok: true; readonly refund: ReconcileRefundDetail }
+    | { readonly ok: false; readonly detail: string }
+    | null;
+  readonly agreements:
+    | { readonly ok: true; readonly agreements: readonly ReconcileAgreement[] }
+    | { readonly ok: false; readonly detail: string }
+    | null;
+  readonly appId:
+    | { readonly ok: true; readonly id: string }
+    | { readonly ok: false; readonly detail: string }
+    | null;
+  readonly baselineFingerprintChanged?: boolean;
+}
+
+export interface ReconcileRowFacts {
+  readonly marker: string;
+  readonly dispatchedAt: Date;
+  readonly respondedAt: Date | null;
+  readonly refundId: string | null;
+  readonly plannedShippingMinor: string;
+  readonly currencyCode: string;
+  readonly parentTransactionId: string;
+  readonly gateway: string;
+  readonly baselineRefundIds: readonly string[];
+}
+
+export type ReconcileReviewCode =
+  | "ABSENT_AFTER_WINDOW"
+  | "EXTERNAL_REFUND"
+  | "DUPLICATE_SUSPECTED"
+  | "ANOMALY"
+  | "ATTRIBUTION_UNAVAILABLE"
+  | "ATTRIBUTION_MISMATCH"
+  | "ATTRIBUTION_UNVERIFIED"
+  | "SETTLEMENT_FAILED"
+  | "SETTLEMENT_TIMEOUT"
+  | "UNSUPPORTED_TXN_STATUS"
+  | "NOT_VISIBLE_AFTER_WINDOW"
+  | "READBACK_INCOMPLETE"
+  | "INCOMPLETE_AFTER_WINDOW"
+  | "BASELINE_UNVERIFIED";
+
+export type ReconcileLagKind =
+  | "reads"
+  | "visibility"
+  | "evidence"
+  | "attribution"
+  | "settlement"
+  | "not-visible";
+
+export type ReconcileDecision =
+  | { readonly action: "WAIT"; readonly lag: ReconcileLagKind; readonly detail: string }
+  | {
+      readonly action: "REVIEW";
+      readonly reasonCode: ReconcileReviewCode;
+      readonly detail: string;
+    }
+  | {
+      readonly action: "ADOPT";
+      readonly refundId: string;
+      readonly refundCreatedAt: string | null;
+      readonly settlementState: string;
+    }
+  | {
+      readonly action: "VERIFY";
+      readonly evidence: Record<string, unknown>;
+    };
+
+const wait = (lag: ReconcileLagKind, detail: string): ReconcileDecision => ({
+  action: "WAIT",
+  lag,
+  detail,
+});
+const review = (
+  reasonCode: ReconcileReviewCode,
+  detail: string,
+): ReconcileDecision => ({ action: "REVIEW", reasonCode, detail });
+
+export type TransactionStatusClass =
+  | "SUCCESS"
+  | "PENDING_CLASS"
+  | "FAILED_CLASS"
+  | "UNSUPPORTED";
+
+export function classifyTransactionStatus(
+  status: string,
+): TransactionStatusClass {
+  if (status === "SUCCESS") return "SUCCESS";
+  if (status === "PENDING" || status === "AWAITING_RESPONSE") {
+    return "PENDING_CLASS";
+  }
+  if (status === "FAILURE" || status === "ERROR") return "FAILED_CLASS";
+  return "UNSUPPORTED";
+}
+
+export type AttributionVerdict =
+  | { readonly kind: "ATTRIBUTED"; readonly agreementId: string }
+  | { readonly kind: "LAG"; readonly detail: string }
+  | { readonly kind: "MISMATCH"; readonly detail: string };
+
+/**
+ * 12.3 condition 3 over a complete, bounded agreement list: exactly one
+ * `RefundAgreement` with `reason = 'REFUND'` may link the refund, with
+ * `app.id` equal to the verified current app id and `happenedAt` inside
+ * `[dispatchedAt − 5 min, now]`. Any other RefundAgreement on the order
+ * whose `refund.id` is non-null and different is contradictory; a null
+ * refund link is lag (the link may not be visible yet).
+ */
+export function evaluateRefundAttribution(args: {
+  readonly refundId: string;
+  readonly agreements: ReconcileReads["agreements"];
+  readonly appId: ReconcileReads["appId"];
+  readonly windowStartMs: number;
+  readonly nowMs: number;
+}): AttributionVerdict {
+  if (args.appId === null || !args.appId.ok) {
+    return {
+      kind: "LAG",
+      detail: "Q-APPID unavailable — the verified current app id could not be read",
+    };
+  }
+  if (args.agreements === null || !args.agreements.ok) {
+    return {
+      kind: "LAG",
+      detail: "Q-AGREEMENTS incomplete or unavailable — attribution unproven",
+    };
+  }
+  const refundAgreements = args.agreements.agreements.filter(
+    (a) => a.typename === "RefundAgreement" && a.reason === "REFUND",
+  );
+  const linking = refundAgreements.filter((a) => a.refundId === args.refundId);
+  const other = refundAgreements.filter(
+    (a) => a.refundId !== null && a.refundId !== args.refundId,
+  );
+  if (other.length > 0) {
+    return {
+      kind: "MISMATCH",
+      detail:
+        `a RefundAgreement links a different refund ` +
+        `(${other.map((a) => a.refundId).join(", ")})`,
+    };
+  }
+  if (linking.length > 1) {
+    return {
+      kind: "MISMATCH",
+      detail: `${linking.length} RefundAgreements link refund ${args.refundId}`,
+    };
+  }
+  if (linking.length === 0) {
+    const dangling = refundAgreements.filter((a) => a.refundId === null);
+    return {
+      kind: "LAG",
+      detail:
+        dangling.length > 0
+          ? "a RefundAgreement with a missing refund link exists; attribution not yet proven"
+          : "no RefundAgreement links the refund yet",
+    };
+  }
+  const agreement = linking[0];
+  if (agreement.appId === null) {
+    return { kind: "MISMATCH", detail: "the linked RefundAgreement carries a null app" };
+  }
+  if (agreement.appId !== args.appId.id) {
+    return {
+      kind: "MISMATCH",
+      detail: `the linked RefundAgreement is attributed to ${agreement.appId}, not ${args.appId.id}`,
+    };
+  }
+  if (agreement.happenedAt === null) {
+    return { kind: "MISMATCH", detail: "the linked RefundAgreement has no happenedAt" };
+  }
+  const happened = Date.parse(agreement.happenedAt);
+  if (!Number.isFinite(happened)) {
+    return { kind: "MISMATCH", detail: "the linked RefundAgreement happenedAt is unparseable" };
+  }
+  if (happened < args.windowStartMs || happened > args.nowMs) {
+    return {
+      kind: "MISMATCH",
+      detail: "the linked RefundAgreement happenedAt falls outside the timing window",
+    };
+  }
+  return { kind: "ATTRIBUTED", agreementId: agreement.id };
+}
+
+/**
+ * Map an attribution verdict onto the outcome for the current
+ * ATTRIBUTION_STATUS (12.3.1): under UNVERIFIED even an exactly matching
+ * agreement is "not satisfied"; under CONFIRMED a missing agreement is
+ * UNAVAILABLE and a contradictory one is MISMATCH. `pastWindow` is the
+ * row's attribution window (dispatchedAt + 24 h for IN_DOUBT;
+ * respondedAt ?? dispatchedAt + 15 min for REFUND_RECORDED).
+ */
+export function attributionOutcome(
+  verdict: AttributionVerdict,
+  attributionStatus: AttributionStatus,
+  pastWindow: boolean,
+):
+  | { readonly satisfied: true }
+  | { readonly satisfied: false; readonly decision: ReconcileDecision } {
+  if (verdict.kind === "ATTRIBUTED") {
+    if (attributionStatus === "CONFIRMED") {
+      return { satisfied: true };
+    }
+    if (!pastWindow) {
+      return {
+        satisfied: false,
+        decision: wait(
+          "attribution",
+          "attributing agreement found but the attribution status is UNVERIFIED",
+        ),
+      };
+    }
+    return {
+      satisfied: false,
+      decision: review(
+        "ATTRIBUTION_UNVERIFIED",
+        `agreement ${verdict.agreementId} matches but the attribution status ` +
+          "is UNVERIFIED — automatic adoption is prohibited",
+      ),
+    };
+  }
+  // A contradiction is never a wait: under CONFIRMED it is the named
+  // mismatch review; under UNVERIFIED the same contradiction surfaces as
+  // unverified attribution (adoption is prohibited either way).
+  if (verdict.kind === "MISMATCH") {
+    return {
+      satisfied: false,
+      decision:
+        attributionStatus === "CONFIRMED"
+          ? review("ATTRIBUTION_MISMATCH", verdict.detail)
+          : review(
+              "ATTRIBUTION_UNVERIFIED",
+              `${verdict.detail} — attribution status is UNVERIFIED`,
+            ),
+    };
+  }
+  if (!pastWindow) {
+    return { satisfied: false, decision: wait("attribution", verdict.detail) };
+  }
+  if (attributionStatus === "CONFIRMED") {
+    return {
+      satisfied: false,
+      decision: review("ATTRIBUTION_UNAVAILABLE", verdict.detail),
+    };
+  }
+  return {
+    satisfied: false,
+    decision: review(
+      "ATTRIBUTION_UNVERIFIED",
+      `${verdict.detail} — attribution status is UNVERIFIED`,
+    ),
+  };
+}
+
+type EvidenceVerdict =
+  | { readonly ok: true; readonly transaction: ReconcileDetailTransaction }
+  | { readonly ok: false; readonly lag: boolean; readonly detail: string };
+
+function financialEvidence(
+  refund: ReconcileRefundDetail,
+  row: ReconcileRowFacts,
+): EvidenceVerdict {
+  const planned = BigInt(row.plannedShippingMinor);
+  if (refund.totalRefunded === null) {
+    return { ok: false, lag: true, detail: "refund totalRefundedSet not yet visible" };
+  }
+  if (
+    refund.totalRefunded.minorUnits !== planned ||
+    refund.totalRefunded.currencyCode !== row.currencyCode
+  ) {
+    return {
+      ok: false,
+      lag: false,
+      detail:
+        `refund total ${refund.totalRefunded.minorUnits} ` +
+        `${refund.totalRefunded.currencyCode} does not equal the planned ` +
+        `${planned} ${row.currencyCode}`,
+    };
+  }
+  if (refund.shippingLines.length === 0) {
+    return refund.totalRefunded.minorUnits === 0n
+      ? { ok: false, lag: true, detail: "refund shipping lines not yet listed" }
+      : { ok: false, lag: false, detail: "marker refund carries no shipping line" };
+  }
+  if (refund.shippingLines.length !== 1) {
+    return {
+      ok: false,
+      lag: false,
+      detail: `marker refund carries ${refund.shippingLines.length} shipping lines`,
+    };
+  }
+  const line = refund.shippingLines[0];
+  if (
+    line.subtotal === null ||
+    line.subtotal.minorUnits !== planned ||
+    line.subtotal.currencyCode !== row.currencyCode
+  ) {
+    return {
+      ok: false,
+      lag: false,
+      detail: "the marker refund's shipping line does not match the planned amount/currency",
+    };
+  }
+  if (line.taxMinor === null || line.taxMinor !== 0n) {
+    return { ok: false, lag: false, detail: "the marker refund's shipping line is taxed" };
+  }
+  if (refund.refundLineItemCount > 0) {
+    return { ok: false, lag: false, detail: "the marker refund carries refund line items" };
+  }
+  if (refund.orderAdjustmentCount > 0) {
+    return { ok: false, lag: false, detail: "the marker refund carries order adjustments" };
+  }
+  if (refund.dutiesCount > 0) {
+    return { ok: false, lag: false, detail: "the marker refund carries duties" };
+  }
+  if (refund.transactions.length === 0) {
+    return { ok: false, lag: true, detail: "the marker refund's transactions are not yet listed" };
+  }
+  if (refund.transactions.length !== 1) {
+    return {
+      ok: false,
+      lag: false,
+      detail: `the marker refund carries ${refund.transactions.length} transactions`,
+    };
+  }
+  const txn = refund.transactions[0];
+  if (txn.kind !== "REFUND") {
+    return { ok: false, lag: false, detail: `refund transaction kind is ${txn.kind}, not REFUND` };
+  }
+  if (txn.parentTransactionId !== row.parentTransactionId) {
+    return {
+      ok: false,
+      lag: false,
+      detail: "refund transaction's parent does not match the frozen parentTransactionId",
+    };
+  }
+  if (txn.gateway === null || txn.gateway !== row.gateway) {
+    return { ok: false, lag: false, detail: "refund transaction gateway does not match" };
+  }
+  if (
+    txn.amountMinor === null ||
+    txn.amountMinor !== planned ||
+    txn.currencyCode === null ||
+    txn.currencyCode !== row.currencyCode
+  ) {
+    return {
+      ok: false,
+      lag: false,
+      detail: "refund transaction amount or currency does not match the planned value",
+    };
+  }
+  return { ok: true, transaction: txn };
+}
+
+function timingVerdict(
+  refund: { readonly createdAt: string | null; readonly processedAt: string | null },
+  row: ReconcileRowFacts,
+  nowMs: number,
+): { readonly ok: true } | { readonly ok: false; readonly lag: boolean; readonly detail: string } {
+  const windowStart = row.dispatchedAt.getTime() - RECONCILE_TIMING_SKEW_MS;
+  if (refund.processedAt === null) {
+    return { ok: false, lag: true, detail: "refund processedAt not yet visible" };
+  }
+  const processed = Date.parse(refund.processedAt);
+  if (!Number.isFinite(processed)) {
+    return { ok: false, lag: false, detail: "refund processedAt is unparseable" };
+  }
+  if (processed < windowStart || processed > nowMs) {
+    return { ok: false, lag: false, detail: "refund processedAt falls outside the timing window" };
+  }
+  if (refund.createdAt !== null) {
+    const created = Date.parse(refund.createdAt);
+    if (!Number.isFinite(created)) {
+      return { ok: false, lag: false, detail: "refund createdAt is unparseable" };
+    }
+    if (created < windowStart || created > nowMs) {
+      return { ok: false, lag: false, detail: "refund createdAt falls outside the timing window" };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * IN_DOUBT read-back (12.5): adopt only the unique marker refund that
+ * satisfies every 12.3 condition including typed app attribution; a missing
+ * refund is never proof and every contradiction is an immediate review.
+ */
+export function classifyInDoubtReadback(
+  row: ReconcileRowFacts,
+  reads: ReconcileReads,
+  ctx: { readonly now: Date; readonly attributionStatus: AttributionStatus },
+): ReconcileDecision {
+  const nowMs = ctx.now.getTime();
+  const pastAbsent =
+    nowMs > row.dispatchedAt.getTime() + IN_DOUBT_ABSENT_WINDOW_MS;
+  const pastBackstop =
+    nowMs > row.dispatchedAt.getTime() + IN_DOUBT_READBACK_BACKSTOP_MS;
+
+  if (!reads.list.ok) {
+    if (reads.list.completenessUnproven || pastBackstop) {
+      return review("READBACK_INCOMPLETE", reads.list.detail);
+    }
+    return wait("reads", reads.list.detail);
+  }
+  const baseline = new Set(row.baselineRefundIds);
+  const markerRefunds = reads.list.refunds.filter(
+    (r) => typeof r.note === "string" && r.note.includes(row.marker),
+  );
+  if (markerRefunds.length > 1) {
+    return review(
+      "DUPLICATE_SUSPECTED",
+      `${markerRefunds.length} refunds carry marker ${row.marker}`,
+    );
+  }
+  if (markerRefunds.length === 0) {
+    const external = reads.list.refunds.filter((r) => !baseline.has(r.id));
+    if (external.length > 0 || reads.baselineFingerprintChanged === true) {
+      return review(
+        "EXTERNAL_REFUND",
+        `refund(s) outside the freeze baseline appeared: ` +
+          `${external.map((r) => r.id).join(", ") || "a baseline record's fingerprint changed"}`,
+      );
+    }
+    if (pastAbsent) {
+      return review(
+        "ABSENT_AFTER_WINDOW",
+        `no marker refund on the source order after dispatchedAt + 24 h — ` +
+          `the absence of a marker refund is not proof that no money moved`,
+      );
+    }
+    return wait("visibility", "no refund carries the marker yet");
+  }
+
+  const marker = markerRefunds[0];
+  if (baseline.has(marker.id)) {
+    return review("ANOMALY", "the marker refund predates the freeze baseline");
+  }
+  if (reads.detail === null || !reads.detail.ok) {
+    const detail =
+      reads.detail === null
+        ? "the marker refund's detail was not read"
+        : reads.detail.detail;
+    return pastAbsent
+      ? review("INCOMPLETE_AFTER_WINDOW", detail)
+      : wait("evidence", detail);
+  }
+  const refund = reads.detail.refund;
+  if (refund.id !== marker.id) {
+    return review("ANOMALY", "the detail read returned a different refund id");
+  }
+  if (typeof refund.note !== "string" || !refund.note.includes(row.marker)) {
+    return review("ANOMALY", "the marker refund's detail no longer carries the marker");
+  }
+
+  const fin = financialEvidence(refund, row);
+  if (!fin.ok) {
+    if (!fin.lag) return review("ANOMALY", fin.detail);
+    return pastAbsent
+      ? review("INCOMPLETE_AFTER_WINDOW", fin.detail)
+      : wait("evidence", fin.detail);
+  }
+  const txnClass = classifyTransactionStatus(fin.transaction.status);
+  if (txnClass === "FAILED_CLASS") {
+    return review(
+      "SETTLEMENT_FAILED",
+      `refund transaction ${fin.transaction.id} is ${fin.transaction.status}`,
+    );
+  }
+  if (txnClass === "UNSUPPORTED") {
+    return review(
+      "UNSUPPORTED_TXN_STATUS",
+      `refund transaction status ${fin.transaction.status}`,
+    );
+  }
+  if (txnClass === "PENDING_CLASS") {
+    return pastAbsent
+      ? review("INCOMPLETE_AFTER_WINDOW", `refund transaction still ${fin.transaction.status}`)
+      : wait("evidence", `refund transaction ${fin.transaction.status} — evidence not yet settled`);
+  }
+
+  const timing = timingVerdict(refund, row, nowMs);
+  if (!timing.ok) {
+    if (!timing.lag) return review("ANOMALY", timing.detail);
+    return pastAbsent
+      ? review("INCOMPLETE_AFTER_WINDOW", timing.detail)
+      : wait("evidence", timing.detail);
+  }
+
+  const attribution = evaluateRefundAttribution({
+    refundId: marker.id,
+    agreements: reads.agreements,
+    appId: reads.appId,
+    windowStartMs: row.dispatchedAt.getTime() - RECONCILE_TIMING_SKEW_MS,
+    nowMs,
+  });
+  const attr = attributionOutcome(attribution, ctx.attributionStatus, pastAbsent);
+  if (!attr.satisfied) return attr.decision;
+
+  return {
+    action: "ADOPT",
+    refundId: marker.id,
+    refundCreatedAt: marker.createdAt,
+    settlementState: fin.transaction.status,
+  };
+}
+
+/**
+ * REFUND_RECORDED verification (12.4): the recorded refund must survive a
+ * full independent read-back — 12.3 conditions (1)-(6) for the recorded id
+ * plus a SUCCESS refund transaction and the aggregate consistency check —
+ * before the row may become VERIFIED.
+ */
+export function classifyRefundVerification(
+  row: ReconcileRowFacts,
+  reads: ReconcileReads,
+  ctx: { readonly now: Date; readonly attributionStatus: AttributionStatus },
+): ReconcileDecision {
+  const nowMs = ctx.now.getTime();
+  const anchor = row.respondedAt ?? row.dispatchedAt;
+  const pastVisible = nowMs > anchor.getTime() + REFUND_RECORDED_VISIBILITY_MS;
+  const pastSettlement =
+    nowMs > row.dispatchedAt.getTime() + SETTLEMENT_HORIZON_MS;
+
+  if (row.refundId === null) {
+    return review("ANOMALY", "REFUND_RECORDED row carries no refundId");
+  }
+  if (!reads.list.ok) {
+    if (reads.list.completenessUnproven) {
+      return review("READBACK_INCOMPLETE", reads.list.detail);
+    }
+    return pastSettlement
+      ? review(
+          "READBACK_INCOMPLETE",
+          `reads never completed within the settlement horizon: ${reads.list.detail}`,
+        )
+      : wait("reads", reads.list.detail);
+  }
+  const markerRefunds = reads.list.refunds.filter(
+    (r) => typeof r.note === "string" && r.note.includes(row.marker),
+  );
+  if (markerRefunds.length > 1) {
+    return review(
+      "DUPLICATE_SUSPECTED",
+      `${markerRefunds.length} refunds carry marker ${row.marker}`,
+    );
+  }
+  if (markerRefunds.length === 1 && markerRefunds[0].id !== row.refundId) {
+    return review(
+      "ANOMALY",
+      `the marker refund ${markerRefunds[0].id} differs from the recorded ${row.refundId}`,
+    );
+  }
+  const recorded = reads.list.refunds.find((r) => r.id === row.refundId);
+  if (recorded === undefined) {
+    return pastVisible
+      ? review(
+          "NOT_VISIBLE_AFTER_WINDOW",
+          "the recorded refund is not visible 15 minutes after the response",
+        )
+      : wait("not-visible", "the recorded refund is not yet visible");
+  }
+  if (reads.detail === null || !reads.detail.ok) {
+    const detail =
+      reads.detail === null
+        ? "the recorded refund's detail was not read"
+        : reads.detail.detail;
+    return pastVisible
+      ? review("NOT_VISIBLE_AFTER_WINDOW", detail)
+      : wait("not-visible", detail);
+  }
+  const refund = reads.detail.refund;
+  if (refund.id !== row.refundId) {
+    return review("ANOMALY", "the detail read returned a different refund id");
+  }
+
+  const fin = financialEvidence(refund, row);
+  if (!fin.ok) {
+    if (!fin.lag) return review("ANOMALY", fin.detail);
+    return pastVisible
+      ? review("NOT_VISIBLE_AFTER_WINDOW", fin.detail)
+      : wait("not-visible", fin.detail);
+  }
+  const txnClass = classifyTransactionStatus(fin.transaction.status);
+  if (txnClass === "FAILED_CLASS") {
+    return review(
+      "SETTLEMENT_FAILED",
+      `refund transaction ${fin.transaction.id} is ${fin.transaction.status}`,
+    );
+  }
+  if (txnClass === "UNSUPPORTED") {
+    return review(
+      "UNSUPPORTED_TXN_STATUS",
+      `refund transaction status ${fin.transaction.status}`,
+    );
+  }
+  if (txnClass === "PENDING_CLASS") {
+    return pastSettlement
+      ? review(
+          "SETTLEMENT_TIMEOUT",
+          `refund transaction still ${fin.transaction.status} after the 72-hour horizon`,
+        )
+      : wait("settlement", `refund transaction ${fin.transaction.status}`);
+  }
+
+  const timing = timingVerdict(refund, row, nowMs);
+  if (!timing.ok) {
+    if (!timing.lag) return review("ANOMALY", timing.detail);
+    return pastVisible
+      ? review("NOT_VISIBLE_AFTER_WINDOW", timing.detail)
+      : wait("not-visible", timing.detail);
+  }
+
+  const attribution = evaluateRefundAttribution({
+    refundId: row.refundId,
+    agreements: reads.agreements,
+    appId: reads.appId,
+    windowStartMs: row.dispatchedAt.getTime() - RECONCILE_TIMING_SKEW_MS,
+    nowMs,
+  });
+  const attr = attributionOutcome(attribution, ctx.attributionStatus, pastVisible);
+  if (!attr.satisfied) return attr.decision;
+
+  const baseline = new Set(row.baselineRefundIds);
+  const nonBaseline = reads.list.refunds.filter((r) => !baseline.has(r.id));
+  let aggregateCheck: "verified" | "skipped-other-refunds";
+  if (nonBaseline.length === 1 && nonBaseline[0].id === row.refundId) {
+    const planned = BigInt(row.plannedShippingMinor);
+    const agg = reads.list.totalRefunded;
+    const ship = reads.list.totalRefundedShipping;
+    if (agg === null || ship === null) {
+      return wait("evidence", "order refunded aggregates are not yet visible");
+    }
+    if (
+      agg.minorUnits !== planned ||
+      agg.currencyCode !== row.currencyCode ||
+      ship.minorUnits !== planned ||
+      ship.currencyCode !== row.currencyCode
+    ) {
+      return review(
+        "ANOMALY",
+        `order aggregates ${ship.minorUnits}/${agg.minorUnits} ` +
+          `${agg.currencyCode} do not equal the planned ${planned} ` +
+          `${row.currencyCode}`,
+      );
+    }
+    aggregateCheck = "verified";
+  } else {
+    aggregateCheck = "skipped-other-refunds";
+  }
+
+  const verdict = attribution as Extract<
+    AttributionVerdict,
+    { kind: "ATTRIBUTED" }
+  >;
+  const verifiedAppId =
+    reads.appId !== null && reads.appId.ok ? reads.appId.id : null;
+  return {
+    action: "VERIFY",
+    evidence: {
+      refundId: row.refundId,
+      agreementId: verdict.agreementId,
+      appId: verifiedAppId,
+      refundTransactionId: fin.transaction.id,
+      amountMinor: row.plannedShippingMinor,
+      currencyCode: row.currencyCode,
+      aggregateCheck,
+      checkedAt: ctx.now.toISOString(),
+    },
+  };
+}
+
+export function inDoubtPollDelayMs(dispatchedAt: Date, now: Date): number {
+  return now.getTime() - dispatchedAt.getTime() < IN_DOUBT_FIRST_HOUR_MS
+    ? IN_DOUBT_POLL_FIRST_HOUR_MS
+    : IN_DOUBT_POLL_AFTER_MS;
+}
+
+export function settlementPollDelayMs(dispatchedAt: Date, now: Date): number {
+  const elapsed = now.getTime() - dispatchedAt.getTime();
+  for (const mark of SETTLEMENT_POLL_MARKS_MS) {
+    if (elapsed < mark) return mark - elapsed;
+  }
+  return SETTLEMENT_POLL_CADENCE_MS;
+}
+
+export function reconcileRetryDelayMs(
+  lag: ReconcileLagKind,
+  row: {
+    readonly dispatchedAt: Date;
+    readonly status: "IN_DOUBT" | "REFUND_RECORDED";
+  },
+  now: Date,
+): number {
+  if (lag === "settlement") return settlementPollDelayMs(row.dispatchedAt, now);
+  if (lag === "reads") return READ_FAILURE_RETRY_MS;
+  if (row.status === "IN_DOUBT") return inDoubtPollDelayMs(row.dispatchedAt, now);
+  return IN_DOUBT_POLL_FIRST_HOUR_MS;
+}
+
+export interface GAgreementObservation {
+  readonly refundId: string;
+  readonly processedAt: string | null;
+  readonly agreements: readonly ReconcileAgreement[] | null;
+  readonly verifiedAppId: string | null;
+  readonly readAtMs: number;
+}
+
+export type GAgreementOutcome = "CONFIRMED" | "NEGATIVE" | "INCONCLUSIVE";
+
+/**
+ * 12.8.2: classify the recorded BASE/POS/NEG evidence set. A positive match
+ * alone is never CONFIRMED — the discriminating negative control (a
+ * comparable staff-created refund whose linked RefundAgreement shows a null
+ * or different app.id, read after the visibility window) is mandatory.
+ */
+export function classifyGAgreementEvidence(args: {
+  readonly baseRecorded: boolean;
+  readonly pos: GAgreementObservation | null;
+  readonly negComparable: boolean;
+  readonly neg: GAgreementObservation | null;
+}): { readonly outcome: GAgreementOutcome; readonly detail: string } {
+  const inconclusive = (detail: string) => ({
+    outcome: "INCONCLUSIVE" as const,
+    detail,
+  });
+  const negative = (detail: string) => ({
+    outcome: "NEGATIVE" as const,
+    detail,
+  });
+  const insideWindow = (obs: GAgreementObservation) =>
+    obs.processedAt !== null &&
+    obs.readAtMs < Date.parse(obs.processedAt) + REFUND_RECORDED_VISIBILITY_MS;
+  const linkedTo = (
+    obs: GAgreementObservation,
+    typename: string,
+    reason: string,
+  ) =>
+    (obs.agreements ?? []).filter(
+      (a) =>
+        a.typename === typename &&
+        a.reason === reason &&
+        a.refundId === obs.refundId,
+    );
+  const anyLinked = (obs: GAgreementObservation) =>
+    (obs.agreements ?? []).filter((a) => a.refundId === obs.refundId);
+
+  if (!args.baseRecorded) return inconclusive("BASE is not recorded");
+  if (args.pos === null) return inconclusive("no POS observation");
+  if (args.neg === null) return inconclusive("no NEG observation");
+  const { pos, neg } = args;
+
+  if (pos.agreements === null || neg.agreements === null) {
+    return inconclusive("an agreement list is incomplete");
+  }
+  if (insideWindow(pos) || insideWindow(neg)) {
+    return inconclusive("a read was taken inside the visibility window");
+  }
+
+  const posTyped = linkedTo(pos, "RefundAgreement", "REFUND");
+  const posAny = anyLinked(pos);
+  if (
+    posAny.some((a) => a.typename !== "RefundAgreement" || a.reason !== "REFUND")
+  ) {
+    return negative(
+      "POS refund is linked by an agreement of another typename or reason",
+    );
+  }
+  if (posTyped.length === 0) {
+    return negative("POS refund has no linked RefundAgreement after the window");
+  }
+  if (posTyped.length > 1) {
+    return negative("two agreements link the POS refund");
+  }
+  if (pos.verifiedAppId === null || posTyped[0].appId !== pos.verifiedAppId) {
+    return negative(
+      "the POS agreement's app.id is null or differs from the verified app id",
+    );
+  }
+
+  if (!args.negComparable) {
+    return inconclusive("the NEG control is not a comparable shape");
+  }
+  const negTyped = linkedTo(neg, "RefundAgreement", "REFUND");
+  if (negTyped.length === 0) {
+    return inconclusive(
+      "the NEG refund has no linked RefundAgreement — possibly lag",
+    );
+  }
+  if (negTyped.length > 1) {
+    return negative("two agreements link the NEG refund");
+  }
+  if (neg.verifiedAppId !== null && negTyped[0].appId === neg.verifiedAppId) {
+    return negative(
+      "the NEG agreement carries this app's id — the rule cannot distinguish",
+    );
+  }
+  return {
+    outcome: "CONFIRMED",
+    detail: "POS attributed to this app; NEG attributed to null/different app",
+  };
+}

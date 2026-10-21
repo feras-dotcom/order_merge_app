@@ -34,6 +34,7 @@ import {
 } from "./ownership.server";
 import {
   admitShippingRefund,
+  POST_DISPATCH_ENTRY_STATUS,
   recheckShippingGate,
   validateOperationForClaim,
   type OperationClaimValidation,
@@ -1451,4 +1452,414 @@ export function writePreparedR2Outcome(
       throw new OwnershipLostError(`shipping-refund lease lost for row ${rowId}`);
     }
   });
+}
+
+// ── S1-F: reconciliation surface (6.1, 12; the typed ReconcileTarget) ───────
+// These functions are the only runtime path that may move a row through
+// DISPATCHING -> IN_DOUBT, IN_DOUBT -> REFUND_RECORDED/REVIEW_REQUIRED,
+// REFUND_RECORDED -> VERIFIED/REVIEW_REQUIRED and REVIEW_REQUIRED ->
+// RESOLVED. None of them can create DISPATCHING or write dispatch
+// evidence: the transition guard rejects PREPARED -> DISPATCHING until S2
+// and the evidence-integrity trigger owns dispatchToken/dispatchedAt. Every
+// transition write re-verifies the canonical trigger catalog inside its
+// transaction (5.4.7) and is fenced on (row FOR UPDATE, caller's token,
+// live lease) on the database UTC clock.
+
+const RECONCILE_ACTOR = "shipping-refund-reconcile";
+const RESOLVE_ACTOR = "shipping-refund-resolve";
+
+/** The database-clock age after which an unanswered DISPATCHING row is
+ *  swept to IN_DOUBT (9.5, 12.5): 120 seconds of DB_WALL - dispatchedAt. */
+export const DISPATCH_UNANSWERED_DB_MS = 120_000;
+
+export interface StaleDispatchingRow {
+  readonly id: string;
+  readonly shop: string;
+}
+
+/** The unanswered-dispatch sweep set: DISPATCHING rows whose write-ahead
+ *  timestamp is older than 120 seconds on the database clock, with no live
+ *  lease and no recorded response. */
+export function listStaleDispatchingShippingRefunds(
+  shop: string,
+  limit: number,
+  db: PrismaClient = defaultDb,
+): Promise<StaleDispatchingRow[]> {
+  return db.$queryRaw<StaleDispatchingRow[]>`
+    SELECT "id", "shop"
+    FROM "ShippingRefund"
+    WHERE "shop" = ${shop}
+      AND "status" = ${POST_DISPATCH_ENTRY_STATUS}
+      AND "respondedAt" IS NULL
+      AND "dispatchedAt" IS NOT NULL
+      AND "dispatchedAt" <= (${DB_WALL} - ${DISPATCH_UNANSWERED_DB_MS} * interval '1 millisecond')
+      AND ("leasedUntil" IS NULL OR "leasedUntil" <= ${DB_WALL})
+    ORDER BY "dispatchedAt" ASC, "id" ASC
+    LIMIT ${limit}`;
+}
+
+export interface DueReconcileRow {
+  readonly id: string;
+  readonly shop: string;
+  readonly status: string;
+  readonly sourceOrderId: string;
+}
+
+/** The due reconciliation set: IN_DOUBT/REFUND_RECORDED rows whose
+ *  nextCheckAt is due (or unset — an IN_DOUBT row written by the sweep is
+ *  immediately due), with no live lease. */
+export function listDueReconcileShippingRefunds(
+  shop: string,
+  limit: number,
+  db: PrismaClient = defaultDb,
+): Promise<DueReconcileRow[]> {
+  return db.$queryRaw<DueReconcileRow[]>`
+    SELECT "id", "shop", "status", "sourceOrderId"
+    FROM "ShippingRefund"
+    WHERE "shop" = ${shop}
+      AND "status" IN ('IN_DOUBT','REFUND_RECORDED')
+      AND ("nextCheckAt" IS NULL OR "nextCheckAt" <= ${DB_WALL})
+      AND ("leasedUntil" IS NULL OR "leasedUntil" <= ${DB_WALL})
+    ORDER BY "nextCheckAt" ASC NULLS FIRST, "id" ASC
+    LIMIT ${limit}`;
+}
+
+export type ReconcileLeaseResult =
+  | {
+      readonly leased: true;
+      readonly leaseToken: string;
+      readonly status: string;
+    }
+  | {
+      readonly leased: false;
+      readonly reason: "NOT_FOUND" | "NOT_RECONCILABLE" | "LEASE_HELD" | "NOT_DUE";
+    };
+
+/** Acquire a reconciliation lease on a post-dispatch row. Lock-then-
+ *  validate, conditional on the row being (a) a stale DISPATCHING row or
+ *  (b) a due IN_DOUBT/REFUND_RECORDED row, with an expired lease. */
+export function leaseReconcileShippingRefund(
+  rowId: string,
+  opts: { readonly actor?: string | null } = {},
+  db: PrismaClient = defaultDb,
+): Promise<ReconcileLeaseResult> {
+  return withOwnershipTx(db, async (tx) => {
+    await setActor(tx, opts.actor === undefined ? LEASE_ACTOR : opts.actor);
+    const rows = await tx.$queryRaw<
+      { status: string; leaseToken: string | null }[]
+    >`
+      SELECT "status", "leaseToken"
+      FROM "ShippingRefund" WHERE "id" = ${rowId}
+      FOR UPDATE`;
+    const row = rows[0];
+    if (!row) return { leased: false, reason: "NOT_FOUND" };
+    if (
+      row.status !== POST_DISPATCH_ENTRY_STATUS &&
+      row.status !== "IN_DOUBT" &&
+      row.status !== "REFUND_RECORDED"
+    ) {
+      return { leased: false, reason: "NOT_RECONCILABLE" };
+    }
+    const token = newLeaseToken();
+    const updated = await tx.$executeRaw`
+      UPDATE "ShippingRefund" SET
+        "leaseToken" = ${token},
+        "leasedUntil" = ${dbWallPlus(SHIPPING_REFUND_LEASE_TTL_MS)},
+        "updatedAt" = ${DB_WALL}
+      WHERE "id" = ${rowId}
+        AND ("leasedUntil" IS NULL OR "leasedUntil" <= ${DB_WALL})
+        AND (
+          ("status" = ${POST_DISPATCH_ENTRY_STATUS}
+            AND "respondedAt" IS NULL
+            AND "dispatchedAt" IS NOT NULL
+            AND "dispatchedAt" <= (${DB_WALL} - ${DISPATCH_UNANSWERED_DB_MS} * interval '1 millisecond'))
+          OR ("status" IN ('IN_DOUBT','REFUND_RECORDED')
+            AND ("nextCheckAt" IS NULL OR "nextCheckAt" <= ${DB_WALL})))`;
+    if (updated !== 1) {
+      const [why] = await tx.$queryRaw<{ held: boolean; due: boolean }[]>`
+        SELECT ("leasedUntil" IS NOT NULL AND "leasedUntil" > ${DB_WALL}) AS "held",
+               (("status" = ${POST_DISPATCH_ENTRY_STATUS} AND "respondedAt" IS NULL
+                   AND "dispatchedAt" IS NOT NULL
+                   AND "dispatchedAt" <= (${DB_WALL} - ${DISPATCH_UNANSWERED_DB_MS} * interval '1 millisecond'))
+                OR ("status" IN ('IN_DOUBT','REFUND_RECORDED')
+                   AND ("nextCheckAt" IS NULL OR "nextCheckAt" <= ${DB_WALL}))) AS "due"
+        FROM "ShippingRefund" WHERE "id" = ${rowId}`;
+      if (why?.held) return { leased: false, reason: "LEASE_HELD" };
+      if (!why?.due) return { leased: false, reason: "NOT_DUE" };
+      return { leased: false, reason: "NOT_FOUND" };
+    }
+    return { leased: true, leaseToken: token, status: row.status };
+  });
+}
+
+export interface ReconcileRowRecord {
+  readonly id: string;
+  readonly shop: string;
+  readonly status: string;
+  readonly sourceOrderId: string;
+  readonly marker: string;
+  readonly dispatchedAt: Date | null;
+  readonly respondedAt: Date | null;
+  readonly refundId: string | null;
+  readonly plannedShippingMinor: string | null;
+  readonly currencyCode: string | null;
+  readonly parentTransactionId: string | null;
+  readonly gateway: string | null;
+  readonly preEvidence: unknown;
+  readonly nextCheckAt: Date | null;
+  readonly leaseToken: string | null;
+}
+
+export function loadReconcileRow(
+  rowId: string,
+  db: PrismaClient = defaultDb,
+): Promise<ReconcileRowRecord | null> {
+  return db
+    .$queryRaw<ReconcileRowRecord[]>`
+      SELECT "id", "shop", "status", "sourceOrderId", "marker",
+             "dispatchedAt", "respondedAt", "refundId",
+             "plannedShippingMinor", "currencyCode",
+             "parentTransactionId", "gateway", "preEvidence",
+             "nextCheckAt", "leaseToken"
+      FROM "ShippingRefund" WHERE "id" = ${rowId}`
+    .then((rows) => rows[0] ?? null);
+}
+
+export type ReconcileTransition =
+  | {
+      readonly to: "IN_DOUBT";
+      readonly reasonCode: string;
+      readonly reviewReason?: string | null;
+    }
+  | {
+      readonly to: "REFUND_RECORDED";
+      readonly refundId: string;
+      readonly refundCreatedAt: string | null;
+      readonly settlementState: string;
+    }
+  | {
+      readonly to: "VERIFIED";
+      readonly verifiedEvidence: Record<string, unknown>;
+    }
+  | {
+      readonly to: "REVIEW_REQUIRED";
+      readonly reasonCode: string;
+      readonly reviewReason?: string | null;
+    }
+  | {
+      readonly to: "RESOLVED";
+      readonly resolvedBy: string;
+      readonly resolution: string;
+      readonly resolutionNote?: string | null;
+    };
+
+export type ReconcileWriteResult =
+  | { readonly written: true }
+  | {
+      readonly written: false;
+      readonly reason:
+        | "TRIGGERS_NOT_INTACT"
+        | "WRONG_STATUS"
+        | "REFUND_ID_TAKEN"
+        | "OWNERSHIP_LOST";
+    };
+
+/** The single lease-fenced writer for every reconciliation transition.
+ *  Inside one transaction: canonical trigger check, FOR UPDATE read, the
+ *  source-status and lease predicates re-evaluated on the database clock,
+ *  then the conditional UPDATE. A zero rowcount means the lease or the
+ *  status was lost between checks — OwnershipLostError, nothing written. */
+export function writeReconcileTransition(
+  rowId: string,
+  leaseToken: string | null,
+  outcome: ReconcileTransition,
+  db: PrismaClient = defaultDb,
+): Promise<ReconcileWriteResult> {
+  return withOwnershipTx(db, async (tx) => {
+    const integrity = await triggersIntact(tx);
+    if (!integrity.intact) {
+      return { written: false, reason: "TRIGGERS_NOT_INTACT" };
+    }
+    await setActor(
+      tx,
+      outcome.to === "RESOLVED" ? RESOLVE_ACTOR : RECONCILE_ACTOR,
+    );
+
+    const rows = await tx.$queryRaw<
+      { status: string; leaseToken: string | null; leasedUntil: Date | null }[]
+    >`
+      SELECT "status", "leaseToken", "leasedUntil"
+      FROM "ShippingRefund" WHERE "id" = ${rowId}
+      FOR UPDATE`;
+    const row = rows[0];
+    if (!row) return { written: false, reason: "WRONG_STATUS" };
+
+    // RESOLVED is the only transition that does not require a lease: it is
+    // an operator action on a durable REVIEW_REQUIRED row (12.7).
+    if (outcome.to !== "RESOLVED") {
+      const [fence] = await tx.$queryRaw<{ owned: boolean }[]>`
+        SELECT ("leaseToken" = ${leaseToken} AND "leasedUntil" > ${DB_WALL}) AS "owned"
+        FROM "ShippingRefund" WHERE "id" = ${rowId}`;
+      if (!fence?.owned) return { written: false, reason: "OWNERSHIP_LOST" };
+    }
+    const leasePred =
+      outcome.to === "RESOLVED"
+        ? Prisma.sql``
+        : Prisma.sql`AND "leaseToken" = ${leaseToken} AND "leasedUntil" > ${DB_WALL}`;
+
+    let updated: number;
+    switch (outcome.to) {
+      case "IN_DOUBT": {
+        if (row.status !== POST_DISPATCH_ENTRY_STATUS) {
+          return { written: false, reason: "WRONG_STATUS" };
+        }
+        updated = await tx.$executeRaw`
+          UPDATE "ShippingRefund" SET
+            "status" = 'IN_DOUBT',
+            "reasonCode" = ${outcome.reasonCode},
+            "reviewReason" = ${outcome.reviewReason ?? null},
+            "leaseToken" = NULL, "leasedUntil" = NULL,
+            "nextCheckAt" = ${DB_WALL},
+            "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${rowId}
+            AND "status" = ${POST_DISPATCH_ENTRY_STATUS}
+            AND "respondedAt" IS NULL
+            AND "dispatchedAt" IS NOT NULL
+            AND "dispatchToken" IS NOT NULL
+            AND "dispatchedAt" <= (${DB_WALL} - ${DISPATCH_UNANSWERED_DB_MS} * interval '1 millisecond')
+            ${leasePred}`;
+        break;
+      }
+      case "REFUND_RECORDED": {
+        // Adoption is reachable only from IN_DOUBT (19.2.1 step 5): the
+        // DISPATCHING -> REFUND_RECORDED edge is the S2 dispatcher's (T4)
+        // and is never exercised by the S1 reconciliation writer.
+        if (row.status !== "IN_DOUBT") {
+          return { written: false, reason: "WRONG_STATUS" };
+        }
+        const [taken] = await tx.$queryRaw<{ taken: boolean }[]>`
+          SELECT EXISTS(
+            SELECT 1 FROM "ShippingRefund"
+            WHERE "refundId" = ${outcome.refundId} AND "id" <> ${rowId}) AS "taken"`;
+        if (taken?.taken) return { written: false, reason: "REFUND_ID_TAKEN" };
+        updated = await tx.$executeRaw`
+          UPDATE "ShippingRefund" SET
+            "status" = 'REFUND_RECORDED',
+            "refundId" = ${outcome.refundId},
+            "refundCreatedAt" = ${naiveUtc(outcome.refundCreatedAt)},
+            "settlementState" = ${outcome.settlementState},
+            "settlementCheckAt" = ${DB_WALL},
+            "leaseToken" = NULL, "leasedUntil" = NULL,
+            "nextCheckAt" = ${DB_WALL},
+            "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${rowId}
+            AND "status" = 'IN_DOUBT'
+            ${leasePred}`;
+        break;
+      }
+      case "VERIFIED": {
+        if (row.status !== "REFUND_RECORDED") {
+          return { written: false, reason: "WRONG_STATUS" };
+        }
+        updated = await tx.$executeRaw`
+          UPDATE "ShippingRefund" SET
+            "status" = 'VERIFIED',
+            "settlementState" = 'SUCCESS',
+            "settlementCheckAt" = ${DB_WALL},
+            "verifiedEvidence" = ${JSON.stringify(outcome.verifiedEvidence)}::jsonb,
+            "verifiedAt" = ${DB_WALL},
+            "leaseToken" = NULL, "leasedUntil" = NULL, "nextCheckAt" = NULL,
+            "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${rowId}
+            AND "status" = 'REFUND_RECORDED'
+            AND "refundId" IS NOT NULL
+            ${leasePred}`;
+        break;
+      }
+      case "REVIEW_REQUIRED": {
+        if (row.status !== "IN_DOUBT" && row.status !== "REFUND_RECORDED") {
+          return { written: false, reason: "WRONG_STATUS" };
+        }
+        updated = await tx.$executeRaw`
+          UPDATE "ShippingRefund" SET
+            "status" = 'REVIEW_REQUIRED',
+            "reasonCode" = ${outcome.reasonCode},
+            "reviewReason" = ${outcome.reviewReason ?? null},
+            "leaseToken" = NULL, "leasedUntil" = NULL, "nextCheckAt" = NULL,
+            "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${rowId}
+            AND "status" = ${row.status}
+            ${leasePred}`;
+        break;
+      }
+      case "RESOLVED": {
+        if (row.status !== "REVIEW_REQUIRED") {
+          return { written: false, reason: "WRONG_STATUS" };
+        }
+        updated = await tx.$executeRaw`
+          UPDATE "ShippingRefund" SET
+            "status" = 'RESOLVED',
+            "resolvedBy" = ${outcome.resolvedBy},
+            "resolution" = ${outcome.resolution},
+            "resolutionNote" = ${outcome.resolutionNote ?? null},
+            "resolvedAt" = ${DB_WALL},
+            "leaseToken" = NULL, "leasedUntil" = NULL, "nextCheckAt" = NULL,
+            "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${rowId}
+            AND "status" = 'REVIEW_REQUIRED'`;
+        break;
+      }
+    }
+    if (updated !== 1) {
+      throw new OwnershipLostError(`shipping-refund lease lost for row ${rowId}`);
+    }
+    return { written: true };
+  });
+}
+
+/** Reschedule a post-dispatch row without a status change (12.4/12.5
+ *  cadences): sets nextCheckAt on the database clock and clears the lease.
+ *  The event writer ignores same-status updates (5.4.5), so this is
+ *  bookkeeping, not a transition. */
+export function rescheduleReconcileRow(
+  rowId: string,
+  leaseToken: string,
+  delayMs: number,
+  db: PrismaClient = defaultDb,
+): Promise<void> {
+  return withOwnershipTx(db, async (tx) => {
+    await setActor(tx, SCHEDULE_ACTOR);
+    await tx.$queryRaw`
+      SELECT "id" FROM "ShippingRefund" WHERE "id" = ${rowId} FOR UPDATE`;
+    const updated = await tx.$executeRaw`
+      UPDATE "ShippingRefund" SET
+        "nextCheckAt" = ${dbWallPlus(delayMs)},
+        "leaseToken" = NULL, "leasedUntil" = NULL,
+        "updatedAt" = ${DB_WALL}
+      WHERE "id" = ${rowId}
+        AND "status" IN ('IN_DOUBT','REFUND_RECORDED', ${POST_DISPATCH_ENTRY_STATUS})
+        AND "leaseToken" = ${leaseToken}
+        AND "leasedUntil" > ${DB_WALL}`;
+    if (updated !== 1) {
+      throw new OwnershipLostError(`shipping-refund lease lost for row ${rowId}`);
+    }
+  });
+}
+
+/** Operator resolution of a REVIEW_REQUIRED row (12.7): the only path that
+ *  needs no lease. `resolution` is recorded verbatim — the string is the
+ *  audit trail. Never written by the reconcile cycle itself. */
+export function resolveShippingRefundReview(
+  rowId: string,
+  resolvedBy: string,
+  resolution: string,
+  opts: { readonly note?: string | null } = {},
+  db: PrismaClient = defaultDb,
+): Promise<ReconcileWriteResult> {
+  return writeReconcileTransition(
+    rowId,
+    null,
+    { to: "RESOLVED", resolvedBy, resolution, resolutionNote: opts.note ?? null },
+    db,
+  );
 }
