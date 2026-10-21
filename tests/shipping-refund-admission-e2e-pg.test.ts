@@ -41,7 +41,16 @@ import {
 } from "../app/lib/shipping-refund-admission.server";
 import { OwnershipLostError } from "../app/lib/ownership.server";
 import type { AdminClient } from "../app/lib/graphql.server";
-import { preflightDisposableDatabase } from "./helpers/disposable-db";
+import {
+  checkTriggerIntegrity,
+  TRIGGER_CATALOG_SQL,
+  type ShippingRefundTriggerCatalogRow,
+} from "../app/lib/shipping-refund-trigger-manifest";
+import {
+  preflightDisposableDatabase,
+  withScratchDatabase,
+  type PreflightedDatabase,
+} from "./helpers/disposable-db";
 
 const TEST_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const oid = (n: number) => `gid://shopify/Order/${n}`;
@@ -223,6 +232,7 @@ describe.skipIf(!TEST_URL)(
   "shipping-refund S1-E end-to-end non-dispatch workflow (real disposable database)",
   () => {
     let db: PrismaClient;
+    let preflighted: PreflightedDatabase;
     let savedAppControl: {
       shippingAdjustmentsEnabled: boolean;
       shippingEnabledAt: Date | null;
@@ -237,7 +247,7 @@ describe.skipIf(!TEST_URL)(
 
     beforeAll(async () => {
       // FIRST — before migrations or any write.
-      await preflightDisposableDatabase(TEST_URL!);
+      preflighted = await preflightDisposableDatabase(TEST_URL!);
       execSync("npx prisma migrate deploy", {
         env: { ...process.env, DATABASE_URL: TEST_URL! },
         stdio: "pipe",
@@ -1155,5 +1165,394 @@ describe.skipIf(!TEST_URL)(
       expect(rowsA.every((r) => r.status === "QUEUED")).toBe(true);
       expect((await refundRow(shopB, b.secondaryId))?.status).toBe("OBSERVED");
     }, 60_000);
+
+    // ── Cycle-level trigger integrity (3.2 rule 11 / 5.4.7) ────────────
+    // A due-only cycle: one valid QUEUED row with an expired lease, no new
+    // eligible operations. Catalog alterations run only on a scratch
+    // database (created and dropped by withScratchDatabase); rule 10
+    // reserves DISABLE/ENABLE REPLICA entirely, so the disabled and
+    // failed-read verdicts are exercised through an injected catalog
+    // reader — the same verdicts the store-level checks already prove on
+    // real DDL.
+
+    interface DueFixture {
+      shop: string;
+      primaryId: string;
+      secondaryId: string;
+      cancelledAt: string;
+      rowId: string;
+      leaseToken: string;
+    }
+
+    /** Gate open on the EXECUTE lane, a valid op fixture, and a due QUEUED
+     *  row claimed through the real claim path with its lease expired. */
+    async function seedDueRow(scratch: PrismaClient): Promise<DueFixture> {
+      const shop = uniqueShop();
+      const wall = (
+        await scratch.$queryRaw<{ wall: Date }[]>`
+          SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "wall"`
+      )[0].wall;
+      const cancelledAt = new Date(wall.getTime() - 3600e3).toISOString();
+      const primaryId = nextOrder();
+      const secondaryId = nextOrder();
+
+      await scratch.$executeRaw`
+        UPDATE "AppControl" SET
+          "shippingAdjustmentsEnabled" = true,
+          "shippingEnabledAt" = ${naive(EPOCH)},
+          "shippingAllowShops" = array_append("shippingAllowShops", ${shop})
+        WHERE "id" = 'control'`;
+      await scratch.$executeRaw`
+        INSERT INTO "Settings" ("id", "shop", "shippingAdjustmentEnabled",
+          "shippingAdjustmentEnabledAt", "shippingRolloutAt", "shippingPolicy")
+        VALUES (${`set_${randomUUID()}`}, ${shop}, true, ${naive(EPOCH)}, ${naive(EPOCH)}, 'REFUND_ALL')`;
+      await scratch.$executeRaw`
+        UPDATE "ShippingExecuteControl" SET
+          "admissionEnabled" = true, "admissionEnabledAt" = ${naive(EPOCH)},
+          "dispatchEnabled" = true, "dispatchEnabledAt" = ${naive(EPOCH)}
+        WHERE "id" = 'control'`;
+      await scratch.$executeRaw`
+        INSERT INTO "ShippingExecuteApproval"
+          ("shop", "approvedAt", "approvedBy", "revokedAt", "merchantOptInEpoch",
+           "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor")
+        VALUES (${shop}, ${naive(EPOCH)}, 's1e-test', NULL,
+          ${naive(EPOCH)}, 'v1', ${naive(EPOCH)}, 'USD', '0')`;
+
+      const opId = nextOpId();
+      await scratch.$executeRaw`
+        INSERT INTO "MergeOperation"
+          ("id", "shop", "status", "primaryOrderId", "primaryOrderName",
+           "primaryLineItemCountBefore", "addedLineItemCount", "secondaries",
+           "involvedOrderIds", "createdAt", "updatedAt", "protocolVersion",
+           "phase", "opToken", "calculatedOrderId", "expectedTransfer",
+           "appliedEvidence", "sideEffectsDone")
+        VALUES (
+          ${opId}, ${shop}, 'COMPLETED', ${primaryId}, '#primary',
+          1, 1, ${JSON.stringify([
+            {
+              id: secondaryId,
+              name: `#${secondaryId.split("/").pop()}`,
+              items: 1,
+              done: true,
+              cancelPhase: "CANCEL_VERIFIED",
+              cancelledAt,
+              staffNoteMatched: true,
+            },
+          ])}::jsonb,
+          ${[primaryId, secondaryId]}::text[],
+          ${naive(wall.toISOString())}, ${naive(wall.toISOString())},
+          2, 'COMPLETED', ${`TK${randomUUID().slice(0, 6).toUpperCase()}`},
+          'gid://shopify/CalculatedOrder/1',
+          ${JSON.stringify([{ secondaryId, secondaryIndex: 1, lines: [{ sourceLineItemId: "gid://shopify/LineItem/9", variantId: "gid://shopify/ProductVariant/9", quantity: 1 }] }])}::jsonb,
+          ${JSON.stringify({ agreementId: "gid://shopify/OrderEditAgreement/1", happenedAt: wall.toISOString(), lines: [{ secondaryId }] })}::jsonb,
+          true
+        )`;
+      await scratch.$executeRaw`
+        INSERT INTO "MergeRecord"
+          ("id", "shop", "primaryOrderId", "primaryOrderName", "mergedOrderId",
+           "mergedOrderName", "itemsCombined", "operationId", "createdAt")
+        VALUES (${`mr_${randomUUID()}`}, ${shop}, ${primaryId}, '#primary',
+          ${secondaryId}, '#secondary', 1, ${opId}, ${naive(wall.toISOString())})`;
+      await scratch.$executeRaw`
+        INSERT INTO "MergeMutationAttempt"
+          ("id", "operationId", "kind", "targetOrderId", "attemptNo", "state",
+           "dispatchToken", "dispatchedAt", "respondedAt")
+        VALUES
+          (${`att_${randomUUID()}`}, ${opId}, 'EDIT_COMMIT', ${primaryId}, 1,
+           'SUCCEEDED', 't', ${naive(wall.toISOString())}, ${naive(wall.toISOString())}),
+          (${`att_${randomUUID()}`}, ${opId}, 'ORDER_CANCEL', ${secondaryId}, 1,
+           'SUCCEEDED', 't', ${naive(wall.toISOString())}, ${naive(wall.toISOString())})`;
+
+      const [opRow] = await scratch.$queryRaw<any[]>`
+        SELECT * FROM "MergeOperation" WHERE "id" = ${opId}`;
+      const claim = await claimShippingRefund(
+        { operation: opRow, secondary: { id: secondaryId, cancelledAt } },
+        scratch,
+        () => {},
+      );
+      expect(claim.claimed).toBe(true);
+      if (!claim.claimed) throw new Error(`claim refused: ${claim.code}`);
+      // Expire the claim's lease so Part A can acquire the row.
+      await scratch.$executeRaw`
+        UPDATE "ShippingRefund" SET
+          "leasedUntil" = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second'
+        WHERE "id" = ${claim.rowId}`;
+      return { shop, primaryId, secondaryId, cancelledAt, rowId: claim.rowId, leaseToken: claim.leaseToken! };
+    }
+
+    it("a non-intact catalog stops a due-only cycle before any write or Shopify read (scratch)", async () => {
+      await withScratchDatabase(preflighted, async (scratchUrl) => {
+        execSync("npx prisma migrate deploy", {
+          env: { ...process.env, DATABASE_URL: scratchUrl },
+          stdio: "pipe",
+        });
+        const scratch = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+        try {
+          const fx = await seedDueRow(scratch);
+          const rowState = async () =>
+            (
+              await scratch.$queryRaw<any[]>`
+                SELECT * FROM "ShippingRefund" WHERE "id" = ${fx.rowId}`
+            )[0];
+          const rowEvents = async () =>
+            scratch.$queryRaw<any[]>`
+              SELECT "fromStatus", "toStatus", "actor"
+              FROM "ShippingRefundEvent" WHERE "shippingRefundId" = ${fx.rowId}
+              ORDER BY "at" ASC, "id" ASC`;
+          const realCatalog = () =>
+            scratch.$queryRawUnsafe<ShippingRefundTriggerCatalogRow[]>(
+              TRIGGER_CATALOG_SQL,
+            );
+
+          const runScan = async (
+            catalogReader?: ShippingRefundScanDeps["catalogReader"],
+          ) => {
+            const logs: string[] = [];
+            const admin = fakeAdmin(
+              {},
+              { srcId: fx.secondaryId, priId: fx.primaryId, cancelledAt: fx.cancelledAt },
+            );
+            const reports = await runShippingRefundAdmissionScan(
+              [fx.shop],
+              {
+                adminFactory: async () => admin as any,
+                sessionLoader: usableSession,
+                log: (l) => logs.push(l),
+                ...(catalogReader ? { catalogReader } : {}),
+              },
+              scratch,
+            );
+            return { reports, logs, admin };
+          };
+
+          /** The fail-closed contract (5.4.7): stoppedBy set, the log line
+           *  with reasons, and every observable byte unchanged — no lease,
+           *  no transition, no frozen columns, no event, no Shopify call. */
+          const expectRefused = async (
+            reader?: ShippingRefundScanDeps["catalogReader"],
+          ) => {
+            const before = await rowState();
+            const evBefore = await rowEvents();
+            const { reports, logs, admin } = await runScan(reader);
+            expect(reports[0].stoppedBy).toBe("triggers-not-intact");
+            expect(reports[0].gateOpen).toBe(false);
+            expect(reports[0].dueRowsExamined).toBe(0);
+            expect(reports[0].claimed).toBe(0);
+            expect(reports[0].evaluations).toBe(0);
+            expect(reports[0].secondaryErrors).toEqual([]);
+            expect(reports[0].outcomes).toEqual({});
+            expect(admin.calls.length).toBe(0);
+            expect(
+              logs.some((l) =>
+                l.includes("[shipping-refund] triggers-not-intact"),
+              ),
+            ).toBe(true);
+            expect(await rowState()).toEqual(before);
+            expect(await rowEvents()).toEqual(evBefore);
+          };
+
+          const withMutatedCatalog = async (ddl: string[], undo: string[]) => {
+            for (const stmt of ddl) await scratch.$executeRawUnsafe(stmt);
+            try {
+              const v = await checkTriggerIntegrity(realCatalog);
+              expect(v.intact).toBe(false);
+              await expectRefused();
+            } finally {
+              for (const stmt of undo) await scratch.$executeRawUnsafe(stmt);
+            }
+          };
+
+          // Missing mandatory triggers (the reviewer's demonstrated case
+          // and the frozen-columns guard).
+          await withMutatedCatalog(
+            [`DROP TRIGGER shippingrefund_frozen_columns_guard ON "ShippingRefund"`],
+            [
+              `CREATE TRIGGER shippingrefund_frozen_columns_guard
+               BEFORE UPDATE ON "ShippingRefund"
+               FOR EACH ROW EXECUTE FUNCTION shipping_refund_fn_frozen_columns_guard()`,
+            ],
+          );
+          await withMutatedCatalog(
+            [`DROP TRIGGER shippingrefund_event_writer ON "ShippingRefund"`],
+            [
+              `CREATE TRIGGER shippingrefund_event_writer
+               AFTER INSERT OR UPDATE ON "ShippingRefund"
+               FOR EACH ROW EXECUTE FUNCTION shipping_refund_fn_event_writer()`,
+            ],
+          );
+
+          // An unexpected extra trigger.
+          await withMutatedCatalog(
+            [
+              `CREATE TRIGGER zz_rogue BEFORE UPDATE ON "ShippingRefund"
+               FOR EACH ROW EXECUTE FUNCTION shipping_refund_fn_insert_guard()`,
+            ],
+            [`DROP TRIGGER zz_rogue ON "ShippingRefund"`],
+          );
+
+          // A disabled mandatory trigger — rule 10 keeps DISABLE TRIGGER
+          // out of test DDL, so the 'D' row is injected over the real
+          // catalog rows (same verdict path as a real disabled trigger).
+          await expectRefused(async () =>
+            (await realCatalog()).map((r) =>
+              r.triggerName === "shippingrefund_transition_guard"
+                ? { ...r, tgenabled: "D" }
+                : r,
+            ),
+          );
+
+          // A catalog read that fails, and one that returns nothing.
+          await expectRefused(async () => {
+            throw new Error("catalog read down");
+          });
+          await expectRefused(async () => []);
+
+          // Intact control: the same due row freezes normally.
+          expect((await checkTriggerIntegrity(realCatalog)).intact).toBe(true);
+          const { reports, admin } = await runScan();
+          expect(reports[0].stoppedBy).toBeNull();
+          expect(reports[0].dueRowsExamined).toBe(1);
+          expect(reports[0].outcomes["FROZEN:PREPARED"]).toBe(1);
+          const row = await rowState();
+          expect(row.status).toBe("PREPARED");
+          expect(row.wireHash).toMatch(/^[0-9a-f]{64}$/);
+          expect(admin.calls.length).toBeGreaterThan(0);
+          expect(admin.calls.every((c) => !/\bmutation\b/.test(c.query))).toBe(true);
+          expect(
+            (await rowEvents()).map((e) => `${e.fromStatus}->${e.toStatus}`),
+          ).toEqual(["null->QUEUED", "QUEUED->PREPARED"]);
+        } finally {
+          await scratch.$disconnect();
+        }
+      });
+    }, 240_000);
+
+    it("the freeze's in-transaction recheck refuses a catalog broken mid-cycle (scratch)", async () => {
+      await withScratchDatabase(preflighted, async (scratchUrl) => {
+        execSync("npx prisma migrate deploy", {
+          env: { ...process.env, DATABASE_URL: scratchUrl },
+          stdio: "pipe",
+        });
+        const scratch = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+        try {
+          const fx = await seedDueRow(scratch);
+          const rowState = async () =>
+            (
+              await scratch.$queryRaw<any[]>`
+                SELECT * FROM "ShippingRefund" WHERE "id" = ${fx.rowId}`
+            )[0];
+          const rowEvents = async () =>
+            scratch.$queryRaw<any[]>`
+              SELECT "fromStatus", "toStatus", "actor"
+              FROM "ShippingRefundEvent" WHERE "shippingRefundId" = ${fx.rowId}
+              ORDER BY "at" ASC, "id" ASC`;
+
+          const frozen: ShippingRefundFreezeInput = {
+            contract: {
+              documentSha256: "0".repeat(64),
+              mutationVersion: "v",
+              wireVariables: {},
+              wireHash: "0".repeat(64),
+            },
+            financialColumns: {
+              currencyCode: "USD",
+              plannedShippingMinor: "800",
+              parentTransactionId: TXN_CAP,
+              gateway: "bogus",
+            },
+            preEvidence: {},
+          };
+
+          // Direct: a catalog already missing a trigger refuses inside the
+          // freeze transaction — before the lease is even considered and
+          // with zero writes. The lease is made live again so the refusal
+          // cannot be a lease-expiry artifact.
+          await scratch.$executeRaw`
+            UPDATE "ShippingRefund" SET
+              "leasedUntil" = (clock_timestamp() AT TIME ZONE 'UTC') + interval '120 seconds'
+            WHERE "id" = ${fx.rowId}`;
+          const before = await rowState();
+          await scratch.$executeRawUnsafe(
+            `DROP TRIGGER shippingrefund_frozen_columns_guard ON "ShippingRefund"`,
+          );
+          try {
+            const frz = await freezeShippingRefund(fx.rowId, fx.leaseToken, frozen, scratch);
+            expect(frz).toMatchObject({
+              frozen: false,
+              reason: "TRIGGERS_NOT_INTACT",
+            });
+            expect(await rowState()).toEqual(before);
+          } finally {
+            await scratch.$executeRawUnsafe(
+              `CREATE TRIGGER shippingrefund_frozen_columns_guard
+               BEFORE UPDATE ON "ShippingRefund"
+               FOR EACH ROW EXECUTE FUNCTION shipping_refund_fn_frozen_columns_guard()`,
+            );
+          }
+
+          // Mid-cycle: the catalog is intact when the cycle checks it; the
+          // drop lands inside the fake recheck read, between the cycle
+          // check and the freeze. The freeze's recheck still refuses.
+          await scratch.$executeRaw`
+            UPDATE "ShippingRefund" SET
+              "leasedUntil" = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second'
+            WHERE "id" = ${fx.rowId}`;
+          let dropped = false;
+          const logs: string[] = [];
+          const admin = fakeAdmin(
+            {
+              recheck: async (vars) => {
+                if (!dropped) {
+                  dropped = true;
+                  await scratch.$executeRawUnsafe(
+                    `DROP TRIGGER shippingrefund_event_writer ON "ShippingRefund"`,
+                  );
+                }
+                return recheckBody(vars.source, vars.primary, {
+                  source: { cancelledAt: fx.cancelledAt },
+                });
+              },
+            },
+            { srcId: fx.secondaryId, priId: fx.primaryId, cancelledAt: fx.cancelledAt },
+          );
+          try {
+            const reports = await runShippingRefundAdmissionScan(
+              [fx.shop],
+              {
+                adminFactory: async () => admin as any,
+                sessionLoader: usableSession,
+                log: (l) => logs.push(l),
+              },
+              scratch,
+            );
+            expect(dropped).toBe(true);
+            expect(reports[0].stoppedBy).toBe("triggers-not-intact");
+            expect(reports[0].outcomes["TRIGGERS_NOT_INTACT"]).toBe(1);
+            expect(
+              logs.some((l) =>
+                l.includes("[shipping-refund] triggers-not-intact"),
+              ),
+            ).toBe(true);
+            const row = await rowState();
+            // Nothing settled or froze: still QUEUED, no wire columns, and
+            // the journal holds only the claim's insert event.
+            expect(row.status).toBe("QUEUED");
+            expect(row.wireHash).toBeNull();
+            expect(row.plannedShippingMinor).toBeNull();
+            expect(
+              (await rowEvents()).map((e) => `${e.fromStatus}->${e.toStatus}`),
+            ).toEqual(["null->QUEUED"]);
+          } finally {
+            await scratch.$executeRawUnsafe(
+              `CREATE TRIGGER shippingrefund_event_writer
+               AFTER INSERT OR UPDATE ON "ShippingRefund"
+               FOR EACH ROW EXECUTE FUNCTION shipping_refund_fn_event_writer()`,
+            );
+          }
+        } finally {
+          await scratch.$disconnect();
+        }
+      });
+    }, 240_000);
   },
 );

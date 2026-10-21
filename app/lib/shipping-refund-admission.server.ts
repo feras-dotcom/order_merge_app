@@ -59,6 +59,11 @@ import {
   validateRefundDetailResponse,
 } from "./shipping-refund-queries";
 import {
+  checkTriggerIntegrity,
+  TRIGGER_CATALOG_SQL,
+  type ShippingRefundTriggerCatalogRow,
+} from "./shipping-refund-trigger-manifest";
+import {
   claimShippingRefund,
   claimTerminalShippingRefund,
   findMalformedOperations,
@@ -155,6 +160,11 @@ export interface ShippingRefundScanDeps {
   /** The offline session record {expires} — the same row the library's
    *  session storage loads (offline_<shop>). Defaults to the Session table. */
   readonly sessionLoader?: (shop: string) => Promise<{ expires: Date | null } | null>;
+  /** Reads the trigger catalog for the cycle-level integrity check (3.2
+   *  rule 11). Defaults to the canonical TRIGGER_CATALOG_SQL on `db`; tests
+   *  inject a catalog to exercise verdicts that rule 10 reserves from real
+   *  DDL (a disabled trigger's 'D'/'R'/'A' tgenabled, a failed read). */
+  readonly catalogReader?: () => Promise<readonly ShippingRefundTriggerCatalogRow[]>;
   readonly log?: (line: string) => void;
 }
 
@@ -407,25 +417,6 @@ async function evaluateAndSettleQueuedRow(
     return "INELIGIBLE:PRIOR_REFUND_RECORD";
   }
 
-  // The baseline (empty under STRICT_EMPTY) and its admission rule (8.2.2/3).
-  const [wallRow] = await db.$queryRaw<{ wall: Date }[]>`
-    SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "wall"`;
-  const baseline = buildRefundBaseline({
-    capturedAt: wallRow.wall.toISOString(),
-    currency: evidence.currencyCode,
-    evidence,
-  });
-  const admission = admitBaseline(baseline);
-  if (!admission.ok) {
-    await settleQueuedShippingRefund(
-      row.id,
-      leaseToken,
-      { status: "INELIGIBLE", reasonCode: admission.reasonCode, reviewReason: admission.reason },
-      db,
-    );
-    return `INELIGIBLE:${admission.reasonCode}`;
-  }
-
   // Consistency: the recheck is read once more and must agree exactly —
   // a difference is a transient retry (BASELINE_UNVERIFIED after the
   // attempt budget), never a freeze (8.2.2).
@@ -446,6 +437,27 @@ async function evaluateAndSettleQueuedRow(
   if (!second.ok || !compareRecheckReads(evidence, second.evidence)) {
     await recordEvaluationFailure(row.id, leaseToken, db, "BASELINE_UNVERIFIED");
     return "RETRY_BASELINE_UNVERIFIED";
+  }
+
+  // The baseline (empty under STRICT_EMPTY) and its admission rule
+  // (8.2.2/3): `capturedAt` is the time of the final read, so the database
+  // clock is read only after the consistency check has succeeded.
+  const [wallRow] = await db.$queryRaw<{ wall: Date }[]>`
+    SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "wall"`;
+  const baseline = buildRefundBaseline({
+    capturedAt: wallRow.wall.toISOString(),
+    currency: evidence.currencyCode,
+    evidence,
+  });
+  const admission = admitBaseline(baseline);
+  if (!admission.ok) {
+    await settleQueuedShippingRefund(
+      row.id,
+      leaseToken,
+      { status: "INELIGIBLE", reasonCode: admission.reasonCode, reviewReason: admission.reason },
+      db,
+    );
+    return `INELIGIBLE:${admission.reasonCode}`;
   }
 
   // ── Contract adaptation (8.3 preface) ──
@@ -482,6 +494,10 @@ async function evaluateAndSettleQueuedRow(
     db,
   );
   if (frozen.frozen) return `FROZEN:${frozen.status}`;
+  // A mid-cycle catalog change detected by the freeze's in-transaction
+  // recheck is reported verbatim — nothing was written and the caller
+  // stops the cycle (5.4.7); it is not an ABORTED row.
+  if (frozen.reason === "TRIGGERS_NOT_INTACT") return "TRIGGERS_NOT_INTACT";
   return `ABORTED:${frozen.reason}`;
 }
 
@@ -571,6 +587,30 @@ export async function runShippingRefundAdmissionScan(
     reports.push(report);
 
     try {
+      // 3.2 rule 11 / 5.4.7: the canonical trigger-integrity check opens
+      // every admission cycle — before the advisory gate, Part A due rows,
+      // Part B claims and any write, and before any Shopify call. A failed
+      // check stops this shop's cycle without writing: it is never a
+      // per-secondary error and is never retried inside the same cycle.
+      const integrity = await checkTriggerIntegrity(
+        deps.catalogReader ??
+          (() =>
+            db.$queryRawUnsafe<ShippingRefundTriggerCatalogRow[]>(
+              TRIGGER_CATALOG_SQL,
+            )),
+      );
+      if (!integrity.intact) {
+        report.stoppedBy = "triggers-not-intact";
+        log(
+          `[shipping-refund] triggers-not-intact shop=${shop} ` +
+            integrity.reasons
+              .map((r) => `${r.code}${r.trigger ? `(${r.trigger})` : ""}`)
+              .join(" ")
+              .slice(0, 2000),
+        );
+        continue;
+      }
+
       const live: ShippingGateLiveState = await readAdvisoryGateState(shop, db);
       const gate = computeShippingGate(live);
       if (!gate.open) {
@@ -650,12 +690,19 @@ export async function runShippingRefundAdmissionScan(
       const settleRow = async (queued: QueuedRowContext, leaseToken: string) => {
         const outcome = await evaluateAndSettleQueuedRow(queued, leaseToken, fullDeps, db, dbWall);
         bump(outcomes, outcome);
+        // A mid-cycle integrity refusal (the freeze's in-transaction
+        // recheck) stops the whole cycle — it is never a per-secondary
+        // error and never retried within this cycle (5.4.7).
+        if (outcome === "TRIGGERS_NOT_INTACT") {
+          report.stoppedBy = "triggers-not-intact";
+          log(`[shipping-refund] triggers-not-intact shop=${shop}`);
+        }
       };
 
       // ── Part A: due QUEUED rows (outside any new-row cap) ──
       const dueRows = await listDueQueuedShippingRefunds(shop, SHIPPING_REFUND_DUE_ROW_LIMIT, db);
       for (const due of dueRows) {
-        if (report.stoppedBy === "error-budget") break;
+        if (report.stoppedBy !== null) break;
         await errorBoundary(due.mergeOperationId, due.sourceOrderId, async () => {
           report.dueRowsExamined += 1;
           const lease = await leaseQueuedShippingRefund(due.id, {}, db);
@@ -825,7 +872,13 @@ async function scanOperation(
           bump(report.outcomes, "GATE_CLOSED");
           return;
         }
-        if (claim.code === "TRIGGERS_NOT_INTACT") throw new Error("triggers-not-intact");
+        if (claim.code === "TRIGGERS_NOT_INTACT") {
+          // 5.4.7: an integrity refusal stops the cycle — never a
+          // per-secondary error, never a same-cycle retry.
+          report.stoppedBy = "triggers-not-intact";
+          log(`[shipping-refund] triggers-not-intact shop=${op.shop}`);
+          return;
+        }
         bump(report.outcomes, `CLAIM:${claim.code}`);
         return;
       }
@@ -867,7 +920,11 @@ async function scanOperation(
           bump(report.outcomes, "GATE_CLOSED");
           return;
         }
-        if (claim.code === "TRIGGERS_NOT_INTACT") throw new Error("triggers-not-intact");
+        if (claim.code === "TRIGGERS_NOT_INTACT") {
+          report.stoppedBy = "triggers-not-intact";
+          log(`[shipping-refund] triggers-not-intact shop=${op.shop}`);
+          return;
+        }
         bump(report.outcomes, `CLAIM:${claim.code}`);
         return;
       }
@@ -897,7 +954,11 @@ async function scanOperation(
           bump(report.outcomes, "GATE_CLOSED");
           return;
         }
-        if (claim.code === "TRIGGERS_NOT_INTACT") throw new Error("triggers-not-intact");
+        if (claim.code === "TRIGGERS_NOT_INTACT") {
+          report.stoppedBy = "triggers-not-intact";
+          log(`[shipping-refund] triggers-not-intact shop=${op.shop}`);
+          return;
+        }
         bump(report.outcomes, `CLAIM:${claim.code}`);
         return;
       }
@@ -918,7 +979,11 @@ async function scanOperation(
           bump(report.outcomes, "GATE_CLOSED");
           return;
         }
-        if (claim.code === "TRIGGERS_NOT_INTACT") throw new Error("triggers-not-intact");
+        if (claim.code === "TRIGGERS_NOT_INTACT") {
+          report.stoppedBy = "triggers-not-intact";
+          log(`[shipping-refund] triggers-not-intact shop=${op.shop}`);
+          return;
+        }
         if (claim.code === "UNCLAIMABLE") {
           // Re-validation inside the claim refused (it ran before ours): no
           // valid key to park — counted in the malformed report.

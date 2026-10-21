@@ -1060,8 +1060,15 @@ export type ShippingRefundFreezeResult =
       /** OWNERSHIP_LOST: token mismatch or expired lease — the caller must
        *  treat the row as owned elsewhere and write nothing. NOT_QUEUED:
        *  the row already settled. HORIZON_EXPIRED/GATE_CHANGED: the row was
-       *  aborted inside this transaction (7.4/8.3). */
-      readonly reason: "OWNERSHIP_LOST" | "NOT_QUEUED" | "HORIZON_EXPIRED" | "GATE_CHANGED";
+       *  aborted inside this transaction (7.4/8.3). TRIGGERS_NOT_INTACT:
+       *  the catalog was not the manifest inside this transaction — nothing
+       *  was written (3.2 rule 11). */
+      readonly reason:
+        | "OWNERSHIP_LOST"
+        | "NOT_QUEUED"
+        | "HORIZON_EXPIRED"
+        | "GATE_CHANGED"
+        | "TRIGGERS_NOT_INTACT";
       readonly detail?: string;
     };
 
@@ -1088,7 +1095,11 @@ interface FrozenRowHead {
 /**
  * The §8.3 freeze: the only path to PREPARED and to OBSERVED.
  *
- * One transaction: lock the existing row FOR UPDATE; verify the caller's
+ * One transaction: the canonical trigger-integrity check first (3.2 rule
+ * 11 — the same §7.5 catalog preface the claim runs, so a catalog altered
+ * after the caller's cycle-level check still cannot yield a transition
+ * without its journal event; on failure nothing is written); lock the
+ * existing row FOR UPDATE; verify the caller's
  * lease token and its unexpired lease on the database clock; enforce the
  * seven-day horizon (an expired QUEUED row is aborted instead, 8.4); take
  * the §4.10 FOR SHARE locks and recompute the entire live gate, requiring
@@ -1111,6 +1122,14 @@ export function freezeShippingRefund(
   db: PrismaClient = defaultDb,
 ): Promise<ShippingRefundFreezeResult> {
   return withOwnershipTx(db, async (tx) => {
+    // 3.2 rule 11: the freeze is the write that mints PREPARED — the
+    // canonical check runs inside this transaction, before any write, so a
+    // catalog altered after the cycle-level check cannot produce a journal-
+    // less transition (a missing event-writer must not strand one).
+    const integrity = await triggersIntact(tx);
+    if (!integrity.intact) {
+      return { frozen: false, reason: "TRIGGERS_NOT_INTACT" };
+    }
     await setActor(tx, FREEZE_ACTOR);
 
     const rows = await tx.$queryRaw<FrozenRowHead[]>`
