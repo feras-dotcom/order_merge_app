@@ -100,20 +100,42 @@ export interface ReconcileShopReport {
 export interface ShippingRefundReconcileDeps {
   /** Offline admin client per shop (wrapped in readOnlyAdmin here). */
   adminFactory: (shop: string) => Promise<AdminClient | null>;
-  /** Offline session probe; a near-expiry session skips Shopify reads
-   *  without touching any row (the refresh-rotation hazard of the dry-run
-   *  rule). Default: none — adminFactory is the session. */
+  /** Offline session probe — the same row the Shopify library loads
+   *  (`offline_<shop>`, i.e. `getOfflineId(shop)`, F12/N12). A near-expiry
+   *  or missing session skips every Shopify read and every write for the
+   *  shop (the refresh-rotation hazard of the dry-run rule). Defaults to
+   *  the real Session-table lookup below: production wiring MUST NOT
+   *  substitute a loader that identifies a different session row or that
+   *  always reports usable — the offline-session validity check is a
+   *  prerequisite for any future operational caller. */
   sessionLoader?: (shop: string) => Promise<{ expires: Date | null } | null>;
-  /** Injected ONLY by tests (12.3.1): production code never passes this —
-   *  the pin `ATTRIBUTION_STATUS` supplies "UNVERIFIED". */
-  attributionStatus?: AttributionStatus;
   /** Test seam for the cycle-level catalog check (mirrors admission). The
-   *  transition writer always re-checks inside its own transaction. */
+   *   transition writer always re-checks inside its own transaction. */
   catalogReader?: () => Promise<readonly ShippingRefundTriggerCatalogRow[]>;
   log?: (line: string) => void;
   /** Per-shop row cap (test knob; the spec bound is 25). */
   rowLimit?: number;
 }
+
+/**
+ * TEST-ONLY deps extension (12.3.1). `attributionStatus` is injected ONLY
+ * by tests to exercise the CONFIRMED branch on fixtures; production code
+ * never supplies it — the pinned `ATTRIBUTION_STATUS` constant supplies
+ * "UNVERIFIED". The field lives on a separate type so an operational deps
+ * object cannot acquire it by accident, and the architecture scan forbids
+ * the token in non-test sources outside this module and the gate module.
+ * There is no env var, row, setter or request path to it.
+ */
+export interface ShippingRefundReconcileTestDeps
+  extends ShippingRefundReconcileDeps {
+  readonly attributionStatus?: AttributionStatus;
+}
+
+/** The real offline-session lookup: the exact row `loadSession` uses for
+ *  `getOfflineId(shop)` (N12) — never `findFirst({shop, isOnline:false})`.
+ *  Mirrors the admission scan's default loader. */
+const defaultSessionLoader = (db: PrismaClient) => async (shop: string) =>
+  db.session.findUnique({ where: { id: `offline_${shop}` } });
 
 const bump = (outcomes: Record<string, number>, key: string) => {
   outcomes[key] = (outcomes[key] ?? 0) + 1;
@@ -121,13 +143,35 @@ const bump = (outcomes: Record<string, number>, key: string) => {
 
 // ── Response normalization (all via the pinned validators) ────────────────
 
+/** A throttled top-level GraphQL error — transient per section 11: it
+ *  never contributes evidence and never counts as completeness-unproven.
+ *  Thrown out of gqlJson so every reader maps it to its lag/failure class
+ *  exactly like a transport failure. */
+export class ShopifyThrottledError extends Error {
+  name = "ShopifyThrottledError";
+}
+
+const isThrottledBody = (body: unknown): boolean => {
+  if (!isObj(body) || !Array.isArray(body.errors)) return false;
+  return (body.errors as unknown[]).some(
+    (e) =>
+      isObj(e) &&
+      ((isObj(e.extensions) && e.extensions.code === "THROTTLED") ||
+        /^throttled/i.test(String((e as { message?: unknown }).message ?? ""))),
+  );
+};
+
 const gqlJson = async (
   admin: AdminClient,
   document: string,
   variables: Record<string, unknown>,
 ): Promise<unknown> => {
   const res = await admin.graphql(document, { variables });
-  return res.json();
+  const body = await res.json();
+  if (isThrottledBody(body)) {
+    throw new ShopifyThrottledError("Shopify read throttled — retryable");
+  }
+  return body;
 };
 
 const moneyBag = (
@@ -439,14 +483,17 @@ const extractRowFacts = (rec: {
 
 export async function runShippingRefundReconcileCycle(
   shops: readonly string[],
-  deps: ShippingRefundReconcileDeps,
+  deps: ShippingRefundReconcileDeps | ShippingRefundReconcileTestDeps,
   db: PrismaClient = defaultDb,
 ): Promise<ReconcileShopReport[]> {
   const log = deps.log ?? ((line: string) => console.error(line));
   // 12.3.1: production wiring never passes attributionStatus — the pinned
   // constant supplies "UNVERIFIED". Test fixtures inject "CONFIRMED"
-  // through this seam only; no env var, row, setter or request reaches it.
-  const attributionStatus = deps.attributionStatus ?? ATTRIBUTION_STATUS;
+  // through the ShippingRefundReconcileTestDeps seam only; the field does
+  // not exist on the operational type and no env var, row, setter or
+  // request reaches it.
+  const attributionStatus = (deps as ShippingRefundReconcileTestDeps).attributionStatus ?? ATTRIBUTION_STATUS;
+  const sessionLoader = deps.sessionLoader ?? defaultSessionLoader(db);
   const rowLimit = deps.rowLimit ?? RECONCILE_ROWS_PER_SHOP;
   const reports: ReconcileShopReport[] = [];
 
@@ -537,16 +584,16 @@ export async function runShippingRefundReconcileCycle(
     }
     if (report.stoppedBy !== null) continue;
 
-    // ── Shopify reads: session gate, then the read-only client. A session
-    // problem skips every read and every write for the shop — the rows
-    // stay due for the next cycle, never forced. ──
-    if (deps.sessionLoader) {
-      const session = await deps.sessionLoader(shop).catch(() => null);
-      if (!dryRunSessionUsable(session)) {
-        report.stoppedBy = "session-unusable";
-        log(`[shipping-refund] reconcile-session-unusable shop=${shop}`);
-        continue;
-      }
+    // ── Shopify reads: session gate, then the read-only client. The gate
+    // is mandatory — the loader defaults to the real offline-session lookup
+    // (`offline_${shop}`, the getOfflineId row), and a missing/expired or
+    // unreadable session skips every read and every write for the shop.
+    // The rows stay due for the next cycle, never forced. ──
+    const session = await sessionLoader(shop).catch(() => null);
+    if (!dryRunSessionUsable(session)) {
+      report.stoppedBy = "session-unusable";
+      log(`[shipping-refund] reconcile-session-unusable shop=${shop}`);
+      continue;
     }
     let rawAdmin: AdminClient | null;
     try {
@@ -841,7 +888,8 @@ export interface OrphanAuditFinding {
   readonly code:
     | "ORPHAN_MARKER_REFUND"
     | "ORPHAN_APP_REFUND"
-    | "ORPHAN_APP_ZERO";
+    | "ORPHAN_APP_ZERO"
+    | "ORPHAN_APP_UNVERIFIED";
   readonly shop: string;
   readonly sourceOrderId: string;
   readonly refundId: string;
@@ -863,9 +911,16 @@ interface AuditSecondary {
   readonly cancelledAt: string;
 }
 
+/**
+ * The secondary scan is bounded and JSON-safe: `secondaries` that are not
+ * JSON arrays are reported and skipped instead of aborting the whole shop
+ * audit, and the `since` filter binds the naive-UTC `createdAt` column
+ * through an explicit `AT TIME ZONE 'UTC'` cast so it is correct on any
+ * session timezone (the same rule as every other timestamp bind).
+ */
 const listAuditSecondaries = (
   shop: string,
-  since: Date,
+  sinceIso: string,
   db: PrismaClient,
 ): Promise<AuditSecondary[]> =>
   db.$queryRaw<AuditSecondary[]>`
@@ -877,11 +932,47 @@ const listAuditSecondaries = (
     WHERE o."shop" = ${shop}
       AND o."protocolVersion" = 2
       AND o."phase" = 'COMPLETED'
-      AND o."createdAt" >= ${since}
+      AND o."createdAt" >= (${sinceIso}::timestamptz AT TIME ZONE 'UTC')
+      AND jsonb_typeof(o."secondaries") = 'array'
       AND s.value->>'cancelledAt' IS NOT NULL
       AND s.value->>'done' = 'true'
     ORDER BY o."createdAt" ASC
     LIMIT ${ORPHAN_AUDIT_SECONDARIES_PER_SHOP}`;
+
+/** Ops whose `secondaries` is not a JSON array — they are reported as
+ *  unreadable rather than throwing out of jsonb_array_elements. */
+const listMalformedSecondariesOps = (
+  shop: string,
+  sinceIso: string,
+  db: PrismaClient,
+): Promise<{ operationId: string }[]> =>
+  db.$queryRaw<{ operationId: string }[]>`
+    SELECT o."id" AS "operationId"
+    FROM "MergeOperation" o
+    WHERE o."shop" = ${shop}
+      AND o."protocolVersion" = 2
+      AND o."phase" = 'COMPLETED'
+      AND o."createdAt" >= (${sinceIso}::timestamptz AT TIME ZONE 'UTC')
+      AND jsonb_typeof(o."secondaries") IS DISTINCT FROM 'array'`;
+
+/** Total eligible secondary records — compared against the bounded scan so
+ *  the report can say when the bound left records unexamined. */
+const countAuditSecondaries = (
+  shop: string,
+  sinceIso: string,
+  db: PrismaClient,
+): Promise<bigint> =>
+  db.$queryRaw<{ n: bigint }[]>`
+    SELECT count(*)::bigint AS "n"
+    FROM "MergeOperation" o,
+         jsonb_array_elements(o."secondaries") s
+    WHERE o."shop" = ${shop}
+      AND o."protocolVersion" = 2
+      AND o."phase" = 'COMPLETED'
+      AND o."createdAt" >= (${sinceIso}::timestamptz AT TIME ZONE 'UTC')
+      AND jsonb_typeof(o."secondaries") = 'array'
+      AND s.value->>'cancelledAt' IS NOT NULL
+      AND s.value->>'done' = 'true'`.then((rows) => rows[0]?.n ?? 0n);
 
 const isRefundFinancial = (d: ReconcileRefundDetail): boolean =>
   (d.totalRefunded?.minorUnits ?? 0n) > 0n ||
@@ -907,12 +998,11 @@ export async function auditShippingRefundOrphans(
     findings: [],
     errors: [],
   };
-  if (deps.sessionLoader) {
-    const session = await deps.sessionLoader(args.shop).catch(() => null);
-    if (!dryRunSessionUsable(session)) {
-      report.stoppedBy = "session-unusable";
-      return report;
-    }
+  const sessionLoader = deps.sessionLoader ?? defaultSessionLoader(db);
+  const session = await sessionLoader(args.shop).catch(() => null);
+  if (!dryRunSessionUsable(session)) {
+    report.stoppedBy = "session-unusable";
+    return report;
   }
   const rawAdmin = await deps.adminFactory(args.shop).catch(() => null);
   if (!rawAdmin) {
@@ -921,7 +1011,29 @@ export async function auditShippingRefundOrphans(
   }
   const admin = readOnlyAdmin(rawAdmin);
   const appId = await readCurrentAppId(admin);
-  const secondaries = await listAuditSecondaries(args.shop, args.since, db);
+  if (!appId.ok) {
+    // Unavailable attribution reads are recorded — never silently skipped.
+    report.errors.push(`Q-APPID unavailable: ${appId.detail}`);
+  }
+  const sinceIso = args.since.toISOString();
+  for (const malformed of await listMalformedSecondariesOps(
+    args.shop,
+    sinceIso,
+    db,
+  )) {
+    report.errors.push(
+      `${malformed.operationId}: 'secondaries' is not a JSON array — skipped`,
+    );
+  }
+  const secondaries = await listAuditSecondaries(args.shop, sinceIso, db);
+  const totalSecondaries = await countAuditSecondaries(args.shop, sinceIso, db);
+  if (totalSecondaries > BigInt(secondaries.length)) {
+    report.errors.push(
+      `secondary scan bound ${ORPHAN_AUDIT_SECONDARIES_PER_SHOP} reached — ` +
+        `${(totalSecondaries - BigInt(secondaries.length)).toString()} further ` +
+        "records left unexamined",
+    );
+  }
 
   for (const secondary of secondaries) {
     report.secondariesScanned += 1;
@@ -948,7 +1060,13 @@ export async function auditShippingRefundOrphans(
       secondary.secondaryId,
       undefined,
     );
+    if (!details.ok) {
+      report.errors.push(`${secondary.secondaryId}: ${details.detail}`);
+    }
     const agreements = await readAllAgreements(admin, secondary.secondaryId);
+    if (!agreements.ok) {
+      report.errors.push(`${secondary.secondaryId}: ${agreements.detail}`);
+    }
 
     for (const refund of refunds) {
       // (a) the marker prefix is OUR prefix regardless of which row it names.
@@ -986,13 +1104,32 @@ export async function auditShippingRefundOrphans(
       );
       if (linked.length === 0) continue;
       const node = details.ok ? details.byId.get(refund.id) : undefined;
-      const financial = node !== undefined && isRefundFinancial(node);
       const [local] = await db.$queryRaw<{ status: string }[]>`
         SELECT "status" FROM "ShippingRefund"
         WHERE "refundId" = ${refund.id} LIMIT 1`;
       const consistent =
         local !== undefined &&
         (local.status === "REFUND_RECORDED" || local.status === "VERIFIED");
+      if (node === undefined) {
+        // The financial state is UNKNOWN — a failed or absent detail read
+        // must never be reported as verified-zero. With no consistent local
+        // row the refund is an unverified orphan, not a baseline candidate.
+        if (!consistent) {
+          report.findings.push({
+            severity: "HIGH",
+            code: "ORPHAN_APP_UNVERIFIED",
+            shop: args.shop,
+            sourceOrderId: secondary.secondaryId,
+            refundId: refund.id,
+            detail:
+              "an app-attributed refund's financial state could not be " +
+              "verified — the detail read was unavailable; NOT confirmed " +
+              "zero-movement",
+          });
+        }
+        continue;
+      }
+      const financial = isRefundFinancial(node);
       if (financial && !consistent) {
         report.findings.push({
           severity: "HIGH",

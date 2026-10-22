@@ -1742,6 +1742,17 @@ export function classifyRefundVerification(
         )
       : wait("not-visible", "the recorded refund is not yet visible");
   }
+  // 12.4 must satisfy 12.3 condition (1): the recorded refund must still be
+  // the unique marker refund. A visible recorded refund that no longer
+  // carries the marker is a contradiction — the note was written when the
+  // refund was created, so its absence is not lag (C-1).
+  if (markerRefunds.length === 0) {
+    return review(
+      "ANOMALY",
+      `the recorded refund ${row.refundId} is visible but no refund carries ` +
+        `marker ${row.marker}`,
+    );
+  }
   if (reads.detail === null || !reads.detail.ok) {
     const detail =
       reads.detail === null
@@ -1754,6 +1765,12 @@ export function classifyRefundVerification(
   const refund = reads.detail.refund;
   if (refund.id !== row.refundId) {
     return review("ANOMALY", "the detail read returned a different refund id");
+  }
+  if (typeof refund.note !== "string" || !refund.note.includes(row.marker)) {
+    return review(
+      "ANOMALY",
+      "the recorded refund's detail no longer carries the marker",
+    );
   }
 
   const fin = financialEvidence(refund, row);

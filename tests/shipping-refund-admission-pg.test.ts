@@ -42,8 +42,14 @@ const oid = (n: number) => `gid://shopify/Order/${n}`;
 const naive = (iso: string) => Prisma.sql`(${iso}::timestamptz AT TIME ZONE 'UTC')`;
 
 const EPOCH = "2026-10-10T00:00:00.000Z";
-const OP_CREATED = "2026-10-15T09:12:03.000Z";
-const CANCELLED = "2026-10-15T09:30:00.000Z";
+// Operation/cancellation instants are anchored to the DATABASE UTC wall
+// clock in beforeAll — the seven-day sourceCancelledAt horizon (§8.4,
+// STALE_COMBINE_MS) and the epoch-cutoff comparisons are evaluated against
+// live time, so fixed timestamps would age into HORIZON_EXPIRED as wall
+// time advances. Only tests exercising an explicit boundary (e.g. the
+// deliberately expired 2020 cancellation below) may pin a date.
+let OP_CREATED = "2026-10-15T09:12:03.000Z";
+let CANCELLED = "2026-10-15T09:30:00.000Z";
 
 describe.skipIf(!TEST_URL)(
   "shipping-refund S1-D admission & lease (real disposable database)",
@@ -76,6 +82,14 @@ describe.skipIf(!TEST_URL)(
       });
       db = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
       db2 = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
+
+      // Anchor the claim-time fixtures to the database UTC wall clock:
+      // OP_CREATED 2 h ago, CANCELLED 1 h ago — comfortably inside the
+      // seven-day horizon on every run date.
+      const [wall0] = await db.$queryRaw<{ wall: Date }[]>`
+        SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "wall"`;
+      OP_CREATED = new Date(wall0.wall.getTime() - 2 * 3600e3).toISOString();
+      CANCELLED = new Date(wall0.wall.getTime() - 3600e3).toISOString();
 
       // Capture the pre-suite shared control state for afterAll restore.
       [savedAppControl] = await db.$queryRaw<{
@@ -409,7 +423,11 @@ describe.skipIf(!TEST_URL)(
       const shop = uniqueShop();
       try {
         // Admission enabled AFTER the operation's creation: E3 no retroactive.
-        await seedGate(shop, { admissionEnabledAt: "2026-10-16T00:00:00.000Z" });
+        await seedGate(shop, {
+          admissionEnabledAt: new Date(
+            Date.parse(OP_CREATED) + 3600e3,
+          ).toISOString(),
+        });
         const res = await claimShippingRefund(
           { operation: operation(shop), secondary: { id: nextOrder(), cancelledAt: CANCELLED } },
           db,
@@ -736,7 +754,11 @@ describe.skipIf(!TEST_URL)(
       const shop = uniqueShop();
       await seedGate(shop, {
         dispatchEnabled: true,
-        dispatchEnabledAt: "2026-10-20T00:00:00.000Z",
+        // A dispatch epoch after the combine's creation (OP_CREATED) —
+        // wall-relative so it stays after it on every run date.
+        dispatchEnabledAt: new Date(
+          Date.parse(OP_CREATED) + 48 * 3600e3,
+        ).toISOString(),
       });
       try {
         const res = await claimShippingRefund(

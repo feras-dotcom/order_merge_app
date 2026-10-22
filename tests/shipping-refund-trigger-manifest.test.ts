@@ -1184,7 +1184,7 @@ describe("attribution CONFIRMED cannot be activated (12.3.1, 19.3)", () => {
           const rhs = (m[1] ?? "").trim();
           const allowed =
             /^AttributionStatus\b/.test(rhs) ||
-            /^deps\.attributionStatus\s*\?\?\s*ATTRIBUTION_STATUS\b/.test(rhs);
+            /^(?:deps|\(deps as ShippingRefundReconcileTestDeps\))\.attributionStatus\s*\?\?\s*ATTRIBUTION_STATUS\b/.test(rhs);
           if (!allowed) {
             offenders.push(`${rel}: attributionStatus bound to '${rhs.slice(0, 80)}'`);
           }
@@ -1195,6 +1195,15 @@ describe("attribution CONFIRMED cannot be activated (12.3.1, 19.3)", () => {
           /attribution[\s\S]{0,160}process\.env/i.test(text)
         ) {
           offenders.push(`${rel}: env-driven attribution`);
+        }
+        // The test seam is confined to the two modules that own it — no
+        // other production source may even mention the field name.
+        if (
+          text.includes("attributionStatus") &&
+          rel !== "app/lib/shipping-refund-reconcile.server.ts" &&
+          rel !== "app/lib/shipping-refund-gate.ts"
+        ) {
+          offenders.push(`${rel}: attributionStatus referenced outside the reconcile/gate modules`);
         }
       }
     }

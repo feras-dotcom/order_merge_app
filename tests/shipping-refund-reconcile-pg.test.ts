@@ -34,7 +34,7 @@ import {
 import {
   auditShippingRefundOrphans,
   runShippingRefundReconcileCycle,
-  type ShippingRefundReconcileDeps,
+  type ShippingRefundReconcileTestDeps,
 } from "../app/lib/shipping-refund-reconcile.server";
 import {
   buildFrozenWireContract,
@@ -47,6 +47,7 @@ import {
 } from "../app/lib/shipping-refund-trigger-manifest";
 import {
   preflightDisposableDatabase,
+  withMarkedScratchDatabase,
   type PreflightedDatabase,
 } from "./helpers/disposable-db";
 import {
@@ -172,20 +173,22 @@ describe.skipIf(!TEST_URL)(
     let opSeq = 0;
     const nextOpId = () => `op_s1f_rc_${++opSeq}_${randomUUID().slice(0, 8)}`;
 
-    const dbWall = async (): Promise<Date> => {
-      const [row] = await db.$queryRaw<{ wall: Date }[]>`
+    const dbWall = async (client: PrismaClient = db): Promise<Date> => {
+      const [row] = await client.$queryRaw<{ wall: Date }[]>`
         SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "wall"`;
       return row.wall;
     };
-    const ago = (ms: number) => dbWall().then((w) => new Date(w.getTime() - ms));
-    const agoIso = async (ms: number) => (await ago(ms)).toISOString();
-    const rowState = async (rowId: string) =>
+    const ago = (ms: number, client: PrismaClient = db) =>
+      dbWall(client).then((w) => new Date(w.getTime() - ms));
+    const agoIso = async (ms: number, client: PrismaClient = db) =>
+      (await ago(ms, client)).toISOString();
+    const rowState = async (rowId: string, client: PrismaClient = db) =>
       (
-        await db.$queryRaw<any[]>`
+        await client.$queryRaw<any[]>`
           SELECT * FROM "ShippingRefund" WHERE "id" = ${rowId}`
       )[0] ?? null;
-    const rowEvents = async (rowId: string) =>
-      db.$queryRaw<{ fromStatus: string | null; toStatus: string; actor: string }[]>`
+    const rowEvents = async (rowId: string, client: PrismaClient = db) =>
+      client.$queryRaw<{ fromStatus: string | null; toStatus: string; actor: string }[]>`
         SELECT "fromStatus", "toStatus", "actor" FROM "ShippingRefundEvent"
         WHERE "shippingRefundId" = ${rowId} ORDER BY "at" ASC, "id" ASC`;
     const eventStatuses = async (rowId: string) =>
@@ -193,22 +196,34 @@ describe.skipIf(!TEST_URL)(
 
     const seededShops = new Set<string>();
 
-    async function seedGateAndOp(shop: string) {
-      const wall = await dbWall();
+    /** `client` lets scratch-database tests seed their own target — the
+     *  control rows are seeded per client, so a fresh scratch gets its
+     *  own open gates. */
+    async function seedGateAndOp(shop: string, client: PrismaClient = db) {
+      const wall = await dbWall(client);
       const cancelledAt = new Date(wall.getTime() - 3600e3).toISOString();
       const primaryId = nextOrder();
       const secondaryId = nextOrder();
       if (!seededShops.has(shop)) {
         seededShops.add(shop);
-        await db.$executeRaw`
+        await client.$executeRaw`
           UPDATE "AppControl" SET
+            "shippingAdjustmentsEnabled" = true,
+            "shippingEnabledAt" = ${naive(EPOCH)},
             "shippingAllowShops" = array_append("shippingAllowShops", ${shop})
           WHERE "id" = 'control'`;
-        await db.$executeRaw`
+        await client.$executeRaw`
+          INSERT INTO "ShippingExecuteControl"
+            ("id", "admissionEnabled", "admissionEnabledAt", "dispatchEnabled", "dispatchEnabledAt")
+          VALUES ('control', true, ${naive(EPOCH)}, true, ${naive(EPOCH)})
+          ON CONFLICT ("id") DO UPDATE SET
+            "admissionEnabled" = true, "admissionEnabledAt" = ${naive(EPOCH)},
+            "dispatchEnabled" = true, "dispatchEnabledAt" = ${naive(EPOCH)}`;
+        await client.$executeRaw`
           INSERT INTO "Settings" ("id", "shop", "shippingAdjustmentEnabled",
             "shippingAdjustmentEnabledAt", "shippingRolloutAt", "shippingPolicy")
           VALUES (${`set_${randomUUID()}`}, ${shop}, true, ${naive(EPOCH)}, ${naive(EPOCH)}, 'REFUND_ALL')`;
-        await db.$executeRaw`
+        await client.$executeRaw`
           INSERT INTO "ShippingExecuteApproval"
             ("shop", "approvedAt", "approvedBy", "revokedAt", "merchantOptInEpoch",
              "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor")
@@ -227,7 +242,7 @@ describe.skipIf(!TEST_URL)(
           staffNoteMatched: true,
         },
       ];
-      await db.$executeRaw`
+      await client.$executeRaw`
         INSERT INTO "MergeOperation"
           ("id", "shop", "status", "primaryOrderId", "primaryOrderName",
            "primaryLineItemCountBefore", "addedLineItemCount", "secondaries",
@@ -245,13 +260,13 @@ describe.skipIf(!TEST_URL)(
           ${JSON.stringify({ agreementId: "gid://shopify/OrderEditAgreement/1", happenedAt: wall.toISOString(), lines: [{ secondaryId }] })}::jsonb,
           true
         )`;
-      await db.$executeRaw`
+      await client.$executeRaw`
         INSERT INTO "MergeRecord"
           ("id", "shop", "primaryOrderId", "primaryOrderName", "mergedOrderId",
            "mergedOrderName", "itemsCombined", "operationId", "createdAt")
         VALUES (${`mr_${randomUUID()}`}, ${shop}, ${primaryId}, '#primary',
           ${secondaryId}, '#secondary', 1, ${opId}, ${naive(wall.toISOString())})`;
-      const [opRow] = await db.$queryRaw<any[]>`
+      const [opRow] = await client.$queryRaw<any[]>`
         SELECT * FROM "MergeOperation" WHERE "id" = ${opId}`;
       return { opRow, secondary: { id: secondaryId, cancelledAt }, secondaryId };
     }
@@ -298,16 +313,19 @@ describe.skipIf(!TEST_URL)(
       },
     });
 
-    /** A stale (>120 s) DISPATCHING fixture row. */
+    /** A stale (>120 s) DISPATCHING fixture row. `client`/`brand` target a
+     *  marked scratch database when given. */
     const makeDispatching = async (
       shop: string,
       dispatchedAgoMs = 10 * 60_000,
       over: { plannedMinor?: string } = {},
+      client: PrismaClient = db,
+      brand: PreflightedDatabase = preflighted,
     ) => {
-      const seed = await seedGateAndOp(shop);
-      const fx = await createDispatchedFixture(preflighted, db, {
+      const seed = await seedGateAndOp(shop, client);
+      const fx = await createDispatchedFixture(brand, client, {
         ...fixtureArgsFor(seed, over),
-        dispatchedAt: await agoIso(dispatchedAgoMs),
+        dispatchedAt: await agoIso(dispatchedAgoMs, client),
       });
       return { ...fx, secondaryId: seed.secondary.id };
     };
@@ -316,11 +334,12 @@ describe.skipIf(!TEST_URL)(
     const transition = async (
       rowId: string,
       outcome: Parameters<typeof writeReconcileTransition>[2],
+      client: PrismaClient = db,
     ) => {
-      const lease = await leaseReconcileShippingRefund(rowId, {}, db);
+      const lease = await leaseReconcileShippingRefund(rowId, {}, client);
       expect(lease.leased).toBe(true);
       if (!lease.leased) throw new Error(`lease refused: ${lease.reason}`);
-      const w = await writeReconcileTransition(rowId, lease.leaseToken, outcome, db);
+      const w = await writeReconcileTransition(rowId, lease.leaseToken, outcome, client);
       if (!w.written) throw new Error(`write refused: ${w.reason}`);
       return w;
     };
@@ -329,12 +348,14 @@ describe.skipIf(!TEST_URL)(
       shop: string,
       dispatchedAgoMs = 10 * 60_000,
       over: { plannedMinor?: string } = {},
+      client: PrismaClient = db,
+      brand: PreflightedDatabase = preflighted,
     ) => {
-      const fx = await makeDispatching(shop, dispatchedAgoMs, over);
+      const fx = await makeDispatching(shop, dispatchedAgoMs, over, client, brand);
       await transition(fx.rowId, {
         to: "IN_DOUBT",
         reasonCode: "DISPATCH_UNANSWERED",
-      });
+      }, client);
       return fx;
     };
 
@@ -595,7 +616,7 @@ describe.skipIf(!TEST_URL)(
     const runCycle = (
       shops: string[],
       admin: AdminClient,
-      over: Partial<ShippingRefundReconcileDeps> = {},
+      over: Partial<ShippingRefundReconcileTestDeps> = {},
     ) =>
       runShippingRefundReconcileCycle(
         shops,
@@ -1058,38 +1079,62 @@ describe.skipIf(!TEST_URL)(
     });
 
     it("the transition writer re-checks the catalog inside its own transaction", async () => {
-      const shop = uniqueShop();
-      const fx = await makeInDoubt(shop, 10 * 60_000);
-      const lease = await leaseReconcileShippingRefund(fx.rowId, {}, db);
-      expect(lease.leased).toBe(true);
-      if (!lease.leased) return;
-      // Mutate the catalog between lease and write on a real database —
-      // the writer's in-transaction check must still refuse.
-      await db.$executeRawUnsafe(
-        `DROP TRIGGER shippingrefund_frozen_columns_guard ON "ShippingRefund"`,
+      // The catalog mutation runs on an authorized scratch database —
+      // the shared suite database's trigger catalog is never touched.
+      await withMarkedScratchDatabase(
+        preflighted,
+        async (scratchUrl, _name, brandB) => {
+          const dbB = new PrismaClient({
+            datasources: { db: { url: scratchUrl } },
+          });
+          try {
+            const shop = uniqueShop();
+            const fx = await makeInDoubt(shop, 10 * 60_000, {}, dbB, brandB);
+            const lease = await leaseReconcileShippingRefund(fx.rowId, {}, dbB);
+            expect(lease.leased).toBe(true);
+            if (!lease.leased) return;
+            // Mutate the catalog between lease and write on the real
+            // scratch database — the writer's in-transaction check must
+            // still refuse.
+            await dbB.$executeRawUnsafe(
+              `DROP TRIGGER shippingrefund_frozen_columns_guard ON "ShippingRefund"`,
+            );
+            try {
+              const w = await writeReconcileTransition(
+                fx.rowId,
+                lease.leaseToken,
+                { to: "REVIEW_REQUIRED", reasonCode: "ANOMALY" },
+                dbB,
+              );
+              expect(w.written).toBe(false);
+              if (!w.written) expect(w.reason).toBe("TRIGGERS_NOT_INTACT");
+            } finally {
+              await dbB.$executeRawUnsafe(
+                `CREATE TRIGGER shippingrefund_frozen_columns_guard
+                 BEFORE UPDATE ON "ShippingRefund"
+                 FOR EACH ROW EXECUTE FUNCTION shipping_refund_fn_frozen_columns_guard()`,
+              );
+            }
+            const row = await rowState(fx.rowId, dbB);
+            expect(row.status).toBe("IN_DOUBT");
+            const integrity = await checkTriggerIntegrity(() =>
+              dbB.$queryRawUnsafe<ShippingRefundTriggerCatalogRow[]>(
+                TRIGGER_CATALOG_SQL,
+              ),
+            );
+            expect(integrity.intact).toBe(true);
+            // The shared suite catalog was never weakened.
+            const suiteIntegrity = await checkTriggerIntegrity(() =>
+              db.$queryRawUnsafe<ShippingRefundTriggerCatalogRow[]>(
+                TRIGGER_CATALOG_SQL,
+              ),
+            );
+            expect(suiteIntegrity.intact).toBe(true);
+          } finally {
+            await dbB.$disconnect();
+          }
+        },
       );
-      try {
-        const w = await writeReconcileTransition(
-          fx.rowId,
-          lease.leaseToken,
-          { to: "REVIEW_REQUIRED", reasonCode: "ANOMALY" },
-          db,
-        );
-        expect(w.written).toBe(false);
-        if (!w.written) expect(w.reason).toBe("TRIGGERS_NOT_INTACT");
-      } finally {
-        await db.$executeRawUnsafe(
-          `CREATE TRIGGER shippingrefund_frozen_columns_guard
-           BEFORE UPDATE ON "ShippingRefund"
-           FOR EACH ROW EXECUTE FUNCTION shipping_refund_fn_frozen_columns_guard()`,
-        );
-      }
-      const row = await rowState(fx.rowId);
-      expect(row.status).toBe("IN_DOUBT");
-      const integrity = await checkTriggerIntegrity(() =>
-        db.$queryRawUnsafe<ShippingRefundTriggerCatalogRow[]>(TRIGGER_CATALOG_SQL),
-      );
-      expect(integrity.intact).toBe(true);
     });
 
     it("repeated reconciliation is idempotent — no double-adopt, no extra events", async () => {
@@ -1205,6 +1250,311 @@ describe.skipIf(!TEST_URL)(
       // Read-only: nothing was mutated.
       expect(await rowState(fx.rowId)).toEqual(before);
       for (const c of admin.calls) expect(c.query).toMatch(/^query /);
+    });
+
+    it("a THROTTLED top-level response is transient — the row waits, never reviews", async () => {
+      const shop = uniqueShop();
+      const fx = await makeInDoubt(shop, 10 * 60_000);
+      const admin = {
+        calls: [] as { query: string }[],
+        graphql: async (query: string) => {
+          admin.calls.push({ query });
+          return {
+            json: async () => ({
+              errors: [
+                { message: "Throttled", extensions: { code: "THROTTLED" } },
+              ],
+            }),
+          } as any;
+        },
+      } as unknown as AdminClient & { calls: { query: string }[] };
+      const reports = await runCycle([shop], admin);
+      // Transient read failure → bounded retry, NOT READBACK_INCOMPLETE.
+      expect(reports[0].outcomes["WAIT:reads"]).toBe(1);
+      expect(reports[0].outcomes["REVIEW:READBACK_INCOMPLETE"] ?? 0).toBe(0);
+      const row = await rowState(fx.rowId);
+      expect(row.status).toBe("IN_DOUBT");
+      expect(row.nextCheckAt).not.toBeNull();
+    });
+
+    it("without a usable offline session the cycle makes no Shopify call and writes nothing", async () => {
+      const shop = uniqueShop();
+      const fx = await makeInDoubt(shop, 10 * 60_000);
+      const admin = reconAdmin({});
+      // No sessionLoader — the default real lookup finds no Session row
+      // in the disposable database → session-unusable, nothing read.
+      const reports = await runShippingRefundReconcileCycle(
+        [shop],
+        { adminFactory: async () => admin, log: () => {} },
+        db,
+      );
+      expect(reports[0].stoppedBy).toBe("session-unusable");
+      expect(admin.calls).toHaveLength(0);
+      expect((await rowState(fx.rowId)).status).toBe("IN_DOUBT");
+    });
+
+    it("orphan audit: an app-attributed refund whose detail read failed is unverified — never reported zero", async () => {
+      const shop = uniqueShop();
+      const seed = await seedGateAndOp(shop);
+      const rid = refundGid(5801);
+      const marker = `MS-SHIPREFUND-${randomUUID()}`;
+      const note = buildRefundNote(marker, seed.secondaryId);
+      // The refund is app-attributed (agreement links it to our app id),
+      // but the DETAIL read fails — its financial state is UNKNOWN.
+      const admin = {
+        calls: [] as { query: string }[],
+        graphql: async (query: string, options?: { variables?: any }) => {
+          admin.calls.push({ query });
+          let payload: unknown;
+          if (query.includes("ShippingRefundAppIdentity")) {
+            payload = { currentAppInstallation: { app: { id: APP_GID } } };
+          } else if (query.includes("ShippingRefundDetail")) {
+            throw new Error("detail transport failure");
+          } else if (query.includes("ShippingRefundAgreements")) {
+            payload = {
+              order: {
+                agreements: {
+                  nodes: [agreementNode(31, { refund: { id: rid } })],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            };
+          } else {
+            payload = {
+              order: {
+                id: options?.variables?.source,
+                cancelledAt: "2026-10-15T09:30:00Z",
+                closed: true,
+                displayFinancialStatus: "PAID",
+                currencyCode: "USD",
+                totalRefundedSet: PM("8.00"),
+                totalRefundedShippingSet: PM("8.00"),
+                refunds: [
+                  {
+                    id: rid,
+                    note,
+                    createdAt: new Date().toISOString(),
+                    processedAt: new Date().toISOString(),
+                    totalRefundedSet: PM("8.00"),
+                  },
+                ],
+                transactions: [],
+              },
+            };
+          }
+          return { json: async () => ({ data: payload }) } as any;
+        },
+      } as unknown as AdminClient & { calls: { query: string }[] };
+      const report = await auditShippingRefundOrphans(
+        { shop, since: await ago(24 * 3600e3) },
+        { adminFactory: async () => admin, sessionLoader: usableSession, log: () => {} },
+        db,
+      );
+      // The read failure is recorded — never silent.
+      expect(
+        report.errors.some((e) => e.includes("detail transport failure")),
+      ).toBe(true);
+      // An unknown financial state must never be labelled zero-movement.
+      expect(report.findings.some((f) => f.code === "ORPHAN_APP_ZERO")).toBe(
+        false,
+      );
+      const unverified = report.findings.filter(
+        (f) => f.code === "ORPHAN_APP_UNVERIFIED",
+      );
+      expect(unverified.length).toBeGreaterThanOrEqual(1);
+      expect(unverified[0].severity).toBe("HIGH");
+    });
+
+    it("orphan audit: unavailable app-id and agreement reads are recorded, not silently skipped", async () => {
+      const shop = uniqueShop();
+      const seed = await seedGateAndOp(shop);
+      const rid = refundGid(5802);
+      const admin = {
+        graphql: async (query: string) => {
+          let payload: unknown;
+          if (query.includes("ShippingRefundAppIdentity")) {
+            throw new Error("appId read down");
+          } else if (query.includes("ShippingRefundAgreements")) {
+            throw new Error("agreements read down");
+          } else if (query.includes("ShippingRefundDetail")) {
+            payload = {
+              nodes: [
+                detailNode(rid, seed.secondaryId, { note: "x", total: "8.00" }),
+              ],
+            };
+          } else {
+            payload = {
+              order: {
+                id: seed.secondaryId,
+                cancelledAt: "2026-10-15T09:30:00Z",
+                closed: true,
+                displayFinancialStatus: "PAID",
+                currencyCode: "USD",
+                refunds: [
+                  {
+                    id: rid,
+                    note: "refund",
+                    createdAt: null,
+                    processedAt: null,
+                    totalRefundedSet: PM("8.00"),
+                  },
+                ],
+                transactions: [],
+                totalRefundedSet: PM("8.00"),
+                totalRefundedShippingSet: PM("8.00"),
+              },
+            };
+          }
+          return { json: async () => ({ data: payload }) } as any;
+        },
+      } as unknown as AdminClient;
+      const report = await auditShippingRefundOrphans(
+        { shop, since: await ago(24 * 3600e3) },
+        { adminFactory: async () => admin, sessionLoader: usableSession, log: () => {} },
+        db,
+      );
+      expect(report.errors.some((e) => e.includes("appId read down"))).toBe(
+        true,
+      );
+      expect(
+        report.errors.some((e) => e.includes("agreements read down")),
+      ).toBe(true);
+      // App-attribution findings are impossible without the reads — and
+      // none may be invented.
+      expect(
+        report.findings.some(
+          (f) =>
+            f.code === "ORPHAN_APP_REFUND" ||
+            f.code === "ORPHAN_APP_ZERO" ||
+            f.code === "ORPHAN_APP_UNVERIFIED",
+        ),
+      ).toBe(false);
+    });
+
+    it("orphan audit: malformed secondaries JSON is reported and does not abort the shop's audit", async () => {
+      const shop = uniqueShop();
+      // One good op (scanned normally) plus one op whose `secondaries` is
+      // a JSON object, not an array — jsonb_array_elements would throw.
+      await seedGateAndOp(shop);
+      const wall = await dbWall();
+      await db.$executeRaw`
+        INSERT INTO "MergeOperation"
+          ("id", "shop", "status", "primaryOrderId", "primaryOrderName",
+           "primaryLineItemCountBefore", "addedLineItemCount", "secondaries",
+           "involvedOrderIds", "createdAt", "updatedAt", "protocolVersion",
+           "phase", "opToken", "calculatedOrderId", "expectedTransfer",
+           "appliedEvidence", "sideEffectsDone")
+        VALUES (
+          ${nextOpId()}, ${shop}, 'COMPLETED', ${nextOrder()}, '#primary',
+          1, 0, ${'{"not":"an-array"}'}::jsonb,
+          ${[] as string[]}::text[],
+          ${naive(wall.toISOString())}, ${naive(wall.toISOString())},
+          2, 'COMPLETED', ${`TK${randomUUID().slice(0, 6).toUpperCase()}`}, 'gid://shopify/CalculatedOrder/1',
+          '[]'::jsonb, '{}'::jsonb, true
+        )`;
+      const admin = reconAdmin({});
+      const report = await auditShippingRefundOrphans(
+        { shop, since: await ago(24 * 3600e3) },
+        { adminFactory: async () => admin, sessionLoader: usableSession, log: () => {} },
+        db,
+      );
+      // The malformed op is reported, not fatal — the good op was scanned.
+      expect(
+        report.errors.some((e) => e.includes("is not a JSON array")),
+      ).toBe(true);
+      expect(report.secondariesScanned).toBeGreaterThanOrEqual(1);
+      expect(
+        admin.calls.some((c) =>
+          c.query.includes("ShippingRefundReconcile"),
+        ),
+      ).toBe(true);
+    });
+
+    it("orphan audit: the since filter is correct on a non-UTC session timezone", async () => {
+      const shop = uniqueShop();
+      const [dbRow] = await db.$queryRaw<{ d: string }[]>(
+        Prisma.sql`SELECT current_database() AS "d"`,
+      );
+      // An op created 3 h ago must be found with since = 4 h even when the
+      // session timezone is Asia/Tokyo — the naive-UTC column binds through
+      // an explicit AT TIME ZONE 'UTC' cast.
+      await db.$executeRawUnsafe(
+        `ALTER DATABASE "${dbRow.d}" SET timezone = 'Asia/Tokyo'`,
+      );
+      const tokyoDb = new PrismaClient({
+        datasources: { db: { url: TEST_URL } },
+      });
+      try {
+        const [{ tz }] = await tokyoDb.$queryRaw<{ tz: string }[]>`
+          SELECT current_setting('TimeZone') AS "tz"`;
+        expect(tz).toBe("Asia/Tokyo");
+        const seed = await seedGateAndOp(shop, tokyoDb);
+        void seed;
+        const admin = reconAdmin({});
+        const report = await auditShippingRefundOrphans(
+          { shop, since: await ago(4 * 3600e3, tokyoDb) },
+          {
+            adminFactory: async () => admin,
+            sessionLoader: usableSession,
+            log: () => {},
+          },
+          tokyoDb,
+        );
+        // The 3-hour-old op is inside the since window under any session tz.
+        expect(report.secondariesScanned).toBeGreaterThanOrEqual(1);
+      } finally {
+        await tokyoDb.$disconnect();
+        await db.$executeRawUnsafe(
+          `ALTER DATABASE "${dbRow.d}" RESET timezone`,
+        );
+      }
+    });
+
+    it("orphan audit: the secondary scan bound reports the records it cannot examine", async () => {
+      const shop = uniqueShop();
+      const seed = await seedGateAndOp(shop);
+      void seed;
+      const wall = await dbWall();
+      // 26 qualifying ops — one past the 25-secondary bound.
+      for (let i = 0; i < 26; i += 1) {
+        const secondaryId = nextOrder();
+        const secondaries = [
+          {
+            id: secondaryId,
+            name: `#${secondaryId.split("/").pop()}`,
+            items: 0,
+            done: true,
+            cancelPhase: "CANCEL_VERIFIED",
+            cancelledAt: new Date(wall.getTime() - 3600e3).toISOString(),
+            staffNoteMatched: true,
+          },
+        ];
+        await db.$executeRaw`
+          INSERT INTO "MergeOperation"
+            ("id", "shop", "status", "primaryOrderId", "primaryOrderName",
+             "primaryLineItemCountBefore", "addedLineItemCount", "secondaries",
+             "involvedOrderIds", "createdAt", "updatedAt", "protocolVersion",
+             "phase", "opToken", "calculatedOrderId", "expectedTransfer",
+             "appliedEvidence", "sideEffectsDone")
+          VALUES (
+            ${nextOpId()}, ${shop}, 'COMPLETED', ${nextOrder()}, '#primary',
+            1, 0, ${JSON.stringify(secondaries)}::jsonb,
+            ${[secondaryId]}::text[],
+            ${naive(wall.toISOString())}, ${naive(wall.toISOString())},
+            2, 'COMPLETED', ${`TK${i}${randomUUID().slice(0, 5).toUpperCase()}`}, 'gid://shopify/CalculatedOrder/1',
+            '[]'::jsonb, '{}'::jsonb, true
+          )`;
+      }
+      const admin = reconAdmin({});
+      const report = await auditShippingRefundOrphans(
+        { shop, since: await ago(24 * 3600e3) },
+        { adminFactory: async () => admin, sessionLoader: usableSession, log: () => {} },
+        db,
+      );
+      expect(report.secondariesScanned).toBe(25);
+      expect(
+        report.errors.some((e) => e.includes("unexamined")),
+      ).toBe(true);
     });
   },
 );

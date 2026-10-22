@@ -6,6 +6,11 @@
 // Discipline (read this before touching anything):
 //   - It accepts only a PreflightedDatabase brand — a bare URL, a hand-built
 //     object or a self-constructed instance is rejected before any DDL.
+//   - Before ANY write (the claim and freeze are writes), it verifies the
+//     supplied client itself with read-only queries: the connected database
+//     is the brand's database and server, still carries the operator's
+//     disposable marker, and the role owns "ShippingRefund". A client
+//     pointing anywhere else is refused with zero rows written (B-1).
 //   - Inside the fixture transaction, on the very connection running the
 //     DDL, it re-verifies: current_database() equals the brand's database
 //     name and matches the disposable-name pattern; inet_server_addr() is
@@ -67,6 +72,83 @@ import {
 
 export class FixtureError extends Error {
   name = "FixtureError";
+}
+
+type Identity = ReturnType<typeof preflightedIdentity>;
+
+/**
+ * The read-only target verification of §19.2.1 step 2 — run on `query`,
+ * which is bound either to the supplied client (BEFORE the real claim, so
+ * a wrong-target client is refused with zero writes) or to the fixture
+ * transaction's own connection (the spec's same-connection re-check ahead
+ * of the DDL). A failure always throws DisposablePreflightError — never a
+ * falsy verdict — and every check is a SELECT: calling it mutates nothing.
+ */
+async function verifyFixtureTarget(
+  query: <T>(sql: string) => Promise<T>,
+  identity: Identity,
+  markerToken: string,
+): Promise<void> {
+  const [ident] = await query<
+    { db: string; addr: string | null; port: number | null }[]
+  >(
+    `SELECT current_database() AS "db",
+            host(inet_server_addr()) AS "addr",
+            inet_server_port() AS "port"`,
+  );
+  if (
+    !ident ||
+    ident.db !== identity.dbName ||
+    !DISPOSABLE_DB_NAME_PATTERN.test(ident.db)
+  ) {
+    throw new DisposablePreflightError(
+      `fixture client is connected to '${ident?.db}' — expected the ` +
+        `preflighted disposable database '${identity.dbName}'.`,
+    );
+  }
+  if (ident.addr !== null && !isLocalOrPrivateAddress(ident.addr)) {
+    throw new DisposablePreflightError(
+      `fixture connection reached '${ident.addr}' — not a local or private server.`,
+    );
+  }
+  if (ident.addr !== identity.addr || ident.port !== identity.port) {
+    throw new DisposablePreflightError(
+      `fixture connection identity '${ident.addr ?? "unix"}:${ident.port ?? "?"}' ` +
+        `does not match the brand's '${identity.addr ?? "unix"}:${identity.port ?? "?"}' — refusing.`,
+    );
+  }
+  const [marker] = await query<{ marker: string | null }[]>(
+    `SELECT shobj_description(
+       (SELECT oid FROM pg_database WHERE datname = current_database()),
+       'pg_database') AS "marker"`,
+  );
+  if (marker?.marker !== `${SHADOW_DB_MARKER_PREFIX}${markerToken}`) {
+    throw new DisposablePreflightError(
+      "the database the fixture client is connected to does not carry the " +
+        "operator's disposable marker — refusing.",
+    );
+  }
+  const [privilege] = await query<
+    { rel: string | null; member: boolean | null }[]
+  >(
+    `SELECT to_regclass('public."ShippingRefund"')::text AS "rel",
+            pg_has_role(current_user,
+              (SELECT relowner FROM pg_class
+               WHERE oid = to_regclass('public."ShippingRefund"')),
+              'MEMBER') AS "member"`,
+  );
+  if (privilege?.rel === null || privilege?.rel === undefined) {
+    throw new DisposablePreflightError(
+      'the connected database has no public."ShippingRefund" table — the ' +
+        "fixture refuses a target without the S1 schema.",
+    );
+  }
+  if (privilege.member !== true) {
+    throw new DisposablePreflightError(
+      "insufficient_privilege: the connected role does not own " +
+        '"ShippingRefund" — the fixture fails before writing anything.',
+    );
+  }
 }
 
 /** Steps of the one synthetic transaction, for the injection hooks the
@@ -144,6 +226,19 @@ export async function createDispatchedFixture(
         "verify the disposable marker without it.",
     );
   }
+
+  // ── Step 2a: target verification BEFORE any write (B-1). The supplied
+  // client must be the very database the brand was issued for — the
+  // claim and freeze below are writes, so identity, marker and privilege
+  // are proven here with read-only queries first. A client connected to
+  // any other database (marked or not) is refused with zero rows written.
+  // Step 2b below re-runs the identical checks inside the fixture
+  // transaction on the connection that executes the DDL. ──
+  await verifyFixtureTarget(
+    (sql) => db.$queryRawUnsafe(sql),
+    identity,
+    markerToken,
+  );
 
   // ── Step 3: legal creation through the real store (insert guard and
   // freeze path both live). ──
@@ -232,58 +327,10 @@ export async function createDispatchedFixture(
       await run(`SET LOCAL lock_timeout = '2s'`);
       await run(`SET LOCAL statement_timeout = '10s'`);
 
-      // ── Step 2: same-connection verification (19.2.1 step 2). ──
-      const [ident] = await query<
-        { db: string; addr: string | null; port: number | null }[]
-      >(
-        `SELECT current_database() AS "db",
-                host(inet_server_addr()) AS "addr",
-                inet_server_port() AS "port"`,
-      );
-      if (
-        !ident ||
-        ident.db !== identity.dbName ||
-        !DISPOSABLE_DB_NAME_PATTERN.test(ident.db)
-      ) {
-        throw new DisposablePreflightError(
-          `fixture transaction is connected to '${ident?.db}' — expected the ` +
-            `preflighted disposable database '${identity.dbName}'.`,
-        );
-      }
-      if (ident.addr !== null && !isLocalOrPrivateAddress(ident.addr)) {
-        throw new DisposablePreflightError(
-          `fixture transaction reached '${ident.addr}' — not a local or private server.`,
-        );
-      }
-      if (ident.addr !== identity.addr || ident.port !== identity.port) {
-        throw new DisposablePreflightError(
-          `fixture connection identity '${ident.addr ?? "unix"}:${ident.port ?? "?"}' ` +
-            `does not match the brand's '${identity.addr ?? "unix"}:${identity.port ?? "?"}' — refusing.`,
-        );
-      }
-      const [marker] = await query<{ marker: string | null }[]>(
-        `SELECT shobj_description(
-           (SELECT oid FROM pg_database WHERE datname = current_database()),
-           'pg_database') AS "marker"`,
-      );
-      if (marker?.marker !== `${SHADOW_DB_MARKER_PREFIX}${markerToken}`) {
-        throw new DisposablePreflightError(
-          "the database inside the fixture transaction does not carry the " +
-            "operator's disposable marker — refusing.",
-        );
-      }
-      const [ownership] = await query<{ member: boolean }[]>(
-        `SELECT pg_has_role(current_user,
-           (SELECT relowner FROM pg_class
-            WHERE oid = 'public."ShippingRefund"'::regclass),
-           'MEMBER') AS "member"`,
-      );
-      if (ownership?.member !== true) {
-        throw new DisposablePreflightError(
-          "insufficient_privilege: the connected role does not own " +
-            '"ShippingRefund" — the fixture fails before writing anything.',
-        );
-      }
+      // ── Step 2b: same-connection verification (19.2.1 step 2) — the
+      // identical read-only checks as step 2a, now on the very connection
+      // that runs the DDL. ──
+      await verifyFixtureTarget(query, identity, markerToken);
 
       await run(
         `SELECT set_config('mergeship.actor', 'test-fixture', true)`,

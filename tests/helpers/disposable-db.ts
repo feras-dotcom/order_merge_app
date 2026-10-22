@@ -51,23 +51,25 @@
 //   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres:<random>@127.0.0.1:<port>/mergeship_test_x \
 //   MERGESHIP_SHADOW_TOKEN=<same token> npx vitest run tests/...
 
+import { execSync } from "node:child_process";
 import crypto from "node:crypto";
 import net from "node:net";
 import { PrismaClient } from "@prisma/client";
 import {
   DISPOSABLE_DB_NAME_PATTERN,
   assertNoProductionEnvironment,
+  bootstrapDisposableDatabase,
+  databaseFingerprint,
   databaseIdentity,
   isLocalOrPrivateAddress,
+  serverAndDatabaseIdentity,
   type DatabaseIdentity,
+  type DatabaseOidIdentity,
 } from "../../app/lib/shadow-db-bootstrap.server";
 import { SHADOW_DB_MARKER_PREFIX } from "../../app/lib/shipping-shadow.server";
 // The oid-bearing identity read lives with the bootstrap's other safety
 // checks; re-exported so provisioning code keeps a single import surface.
-export {
-  serverAndDatabaseIdentity,
-  type DatabaseOidIdentity,
-} from "../../app/lib/shadow-db-bootstrap.server";
+export { serverAndDatabaseIdentity, type DatabaseOidIdentity };
 
 export class DisposablePreflightError extends Error {
   name = "DisposablePreflightError";
@@ -402,4 +404,58 @@ export async function withScratchDatabase<T>(
   } finally {
     await maintenance.$disconnect();
   }
+}
+
+/**
+ * A scratch database that additionally satisfies the §19.2.1 fixture's
+ * marker requirement: created through the authorized withScratchDatabase
+ * path above, migrated to the application schema, then stamped through the
+ * ONE official marker writer — `bootstrapDisposableDatabase`, the same
+ * function scripts/test-db-provision.ts uses (suites never invent a marker
+ * string) — and preflighted like any real disposable database.
+ *
+ * Needed only where a test must run the fixture — or mutate the trigger
+ * catalog under fixture conditions — on a database other than the suite's
+ * own (cross-database refusal proofs, trigger-definition doubles). The
+ * scratch is dropped when `fn` returns.
+ */
+export async function withMarkedScratchDatabase<T>(
+  brand: PreflightedDatabase,
+  fn: (
+    scratchUrl: string,
+    scratchName: string,
+    scratchBrand: PreflightedDatabase,
+  ) => Promise<T>,
+  connect: DbConnector = realConnector,
+): Promise<T> {
+  return withScratchDatabase(
+    brand,
+    async (scratchUrl, scratchName) => {
+      // Migrate BEFORE marking: the official bootstrap requires the full
+      // application schema present at exactly its fresh-migration state —
+      // it refuses a populated database.
+      execSync("npx prisma migrate deploy", {
+        env: { ...process.env, DATABASE_URL: scratchUrl },
+        stdio: "pipe",
+      });
+      const scratch = connect(scratchUrl);
+      try {
+        const expected = await serverAndDatabaseIdentity(scratch, scratchName);
+        await bootstrapDisposableDatabase(scratch, {
+          token: operatorToken(),
+          confirmDb: await databaseFingerprint(scratch),
+          disposableConfirmed: true,
+          expected,
+        });
+      } finally {
+        await scratch.$disconnect();
+      }
+      const scratchBrand = await preflightDisposableDatabase(
+        scratchUrl,
+        connect,
+      );
+      return fn(scratchUrl, scratchName, scratchBrand);
+    },
+    connect,
+  );
 }

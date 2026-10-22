@@ -692,6 +692,87 @@ describe("classifyRefundVerification", () => {
     expect(d).toMatchObject({ action: "REVIEW", reasonCode: "ANOMALY" });
   });
 
+  it("reviews ANOMALY when the recorded refund is visible but carries no marker (C-1)", () => {
+    // §12.4 must satisfy §12.3 condition (1): the recorded refund must still
+    // be the UNIQUE marker refund. The note was written when the refund was
+    // created — its absence on a visible recorded refund is a
+    // contradiction, never lag, and never VERIFY (the pre-fix defect
+    // verified a marker-less refund outright).
+    for (const note of [null, "a refund without our note"] as const) {
+      const d = classifyRefundVerification(
+        recorded(),
+        reads({
+          list: {
+            ok: true,
+            refunds: [listEntry({ note })],
+            transactions: [],
+            totalRefunded: money(800n),
+            totalRefundedShipping: money(800n),
+          },
+          detail: { ok: true, refund: refundDetail({ note }) },
+        }),
+        ctx("CONFIRMED"),
+      );
+      expect(d, JSON.stringify(note)).toMatchObject({
+        action: "REVIEW",
+        reasonCode: "ANOMALY",
+      });
+      expect(d.action).not.toBe("VERIFY");
+    }
+  });
+
+  it("reviews ANOMALY when the recorded refund carries a different marker (C-1)", () => {
+    const foreign = "Shipping refund MS-SHIPREFUND-99999999-0000-0000-0000-000000000000";
+    const d = classifyRefundVerification(
+      recorded(),
+      reads({
+        list: {
+          ok: true,
+          refunds: [listEntry({ note: foreign })],
+          transactions: [],
+          totalRefunded: money(800n),
+          totalRefundedShipping: money(800n),
+        },
+        detail: { ok: true, refund: refundDetail({ note: foreign }) },
+      }),
+      ctx("CONFIRMED"),
+    );
+    expect(d).toMatchObject({ action: "REVIEW", reasonCode: "ANOMALY" });
+  });
+
+  it("reviews ANOMALY when the detail no longer carries the marker although the list entry does (C-1)", () => {
+    const d = classifyRefundVerification(
+      recorded(),
+      reads({
+        detail: { ok: true, refund: refundDetail({ note: "unrelated" }) },
+      }),
+      ctx("CONFIRMED"),
+    );
+    expect(d).toMatchObject({ action: "REVIEW", reasonCode: "ANOMALY" });
+    expect(d.action).not.toBe("VERIFY");
+  });
+
+  it("still waits while the recorded refund is not visible even with no marker anywhere", () => {
+    // Marker absence only contradicts a VISIBLE recorded refund — an
+    // invisible one keeps the lag semantics.
+    const d = classifyRefundVerification(
+      recorded(),
+      reads({
+        list: {
+          ok: true,
+          refunds: [listEntry({ id: "gid://shopify/Refund/555", note: "other" })],
+          transactions: [],
+          totalRefunded: money(100n),
+          totalRefundedShipping: money(100n),
+        },
+        detail: null,
+        agreements: null,
+      }),
+      ctx("CONFIRMED"),
+    );
+    expect(d).toMatchObject({ action: "WAIT", lag: "not-visible" });
+  });
+
   it("waits on a pending settlement, reviews at the 72-hour horizon", () => {
     const pending = reads({
       detail: {
