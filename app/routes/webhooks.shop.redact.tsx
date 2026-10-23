@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../lib/webhook-auth.server";
 import db from "../db.server";
 
 // ── SHOP_REDACT mandatory privacy webhook ─────────────────────────────────────
@@ -20,7 +20,7 @@ import db from "../db.server";
 // from the Railway PostgreSQL console using the logged shop domain.
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { shop, topic } = await authenticate.webhook(request);
+  const { shop, topic } = await authenticateWebhook(request);
 
   console.log(`[${topic}] Redact request for shop ${shop} — erasing all stored data.`);
 

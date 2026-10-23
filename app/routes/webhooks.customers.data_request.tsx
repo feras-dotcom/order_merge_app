@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../lib/webhook-auth.server";
 import db from "../db.server";
 
 // ── CUSTOMERS_DATA_REQUEST mandatory privacy webhook ──────────────────────────
@@ -14,7 +14,7 @@ import db from "../db.server";
 // response within 5 minutes.
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  const { shop, topic, payload } = await authenticateWebhook(request);
 
   const customerId = (payload as Record<string, any>)?.customer?.id;
   if (!customerId) {

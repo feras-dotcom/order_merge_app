@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../lib/webhook-auth.server";
 import { getSettings } from "../lib/settings.server";
 import { isOnboardingComplete } from "../lib/onboarding";
 import { LEASE_TTL_MS, newLeaseToken } from "../lib/ownership.server";
@@ -27,7 +27,7 @@ import { defaultMergeDeps } from "../lib/merge.server";
 // loads the order fresh; only admin_graphql_api_id is read here.
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { topic, shop, payload, admin } = await authenticate.webhook(request);
+  const { topic, shop, payload, admin } = await authenticateWebhook(request);
 
   if (topic !== "ORDERS_CREATE") {
     console.warn(`[orders/create] Unexpected topic: ${topic}`);
