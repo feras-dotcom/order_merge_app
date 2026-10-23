@@ -65,6 +65,7 @@ const deps = {
           refresh_token: target.refreshToken,
           grant_type: "refresh_token",
         }),
+        signal: AbortSignal.timeout(30_000),
       },
     );
     const body = (await res.json().catch(() => ({}))) as RefreshResponse;
@@ -86,6 +87,9 @@ const deps = {
         ...(body.expires_in !== undefined
           ? { expires: secondsFromNow(body.expires_in) }
           : {}),
+        // Mirror the SDK's createSession: refreshToken and
+        // refreshTokenExpires are written only as a pair — a lone
+        // refresh_token would leave a stale expiry on the new token.
         ...(body.refresh_token && body.refresh_token_expires_in
           ? {
               refreshToken: body.refresh_token,
@@ -93,9 +97,7 @@ const deps = {
                 body.refresh_token_expires_in,
               ),
             }
-          : body.refresh_token
-            ? { refreshToken: body.refresh_token }
-            : {}),
+          : {}),
       },
     });
   },
@@ -112,6 +114,7 @@ const deps = {
           "X-Shopify-Access-Token": stored.accessToken,
         },
         body: JSON.stringify({ query: "{ shop { name } }" }),
+        signal: AbortSignal.timeout(30_000),
       },
     );
     if (!res.ok) throw new Error(`verification query HTTP ${res.status}`);
@@ -119,7 +122,7 @@ const deps = {
     if (body.errors) throw new Error("verification query returned errors");
   },
 
-  sleep: (ms: number) => new Promise((r) => setTimeout(r, ms)),
+  sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
 };
 
 if (!apply) {

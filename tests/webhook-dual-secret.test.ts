@@ -113,6 +113,72 @@ describe("authenticateWebhook (dual-secret transition)", () => {
     expect(unauthenticatedAdminMock).not.toHaveBeenCalled();
   });
 
+  it("delegates to the primary validator when the HMAC header is missing", async () => {
+    const marker = { noHmac: true };
+    authenticateWebhookMock.mockResolvedValue(marker);
+    const request = new Request(WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Shop-Domain": SHOP,
+        "X-Shopify-Topic": "orders/create",
+        "X-Shopify-API-Version": "2026-04",
+        "X-Shopify-Webhook-Id": "wh-test-1",
+        "Content-Type": "application/json",
+      },
+      body: BODY,
+    });
+
+    const ctx = await authenticateWebhook(request);
+
+    expect(ctx).toBe(marker);
+    expect(authenticateWebhookMock).toHaveBeenCalledWith(request);
+    expect(unauthenticatedAdminMock).not.toHaveBeenCalled();
+  });
+
+  it("delegates a malformed base64 HMAC header to the primary validator", async () => {
+    const marker = { malformed: true };
+    authenticateWebhookMock.mockResolvedValue(marker);
+    const request = new Request(WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Hmac-Sha256": "!!!not-base64!!!",
+        "X-Shopify-Shop-Domain": SHOP,
+        "X-Shopify-Topic": "orders/create",
+        "X-Shopify-API-Version": "2026-04",
+        "X-Shopify-Webhook-Id": "wh-test-1",
+        "Content-Type": "application/json",
+      },
+      body: BODY,
+    });
+
+    const ctx = await authenticateWebhook(request);
+
+    expect(ctx).toBe(marker);
+    expect(authenticateWebhookMock).toHaveBeenCalledWith(request);
+    expect(unauthenticatedAdminMock).not.toHaveBeenCalled();
+  });
+
+  it("delegates a valid previous-secret signature missing required headers", async () => {
+    const marker = { canonical400: true };
+    authenticateWebhookMock.mockResolvedValue(marker);
+    const request = new Request(WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Hmac-Sha256": hmac(OLD_SECRET, BODY),
+        "X-Shopify-Shop-Domain": SHOP,
+        // X-Shopify-Topic / API-Version / Webhook-Id deliberately absent.
+        "Content-Type": "application/json",
+      },
+      body: BODY,
+    });
+
+    const ctx = await authenticateWebhook(request);
+
+    expect(ctx).toBe(marker);
+    expect(authenticateWebhookMock).toHaveBeenCalledWith(request);
+    expect(unauthenticatedAdminMock).not.toHaveBeenCalled();
+  });
+
   it("is a pure pass-through when SHOPIFY_API_SECRET_PREVIOUS is unset", async () => {
     delete process.env.SHOPIFY_API_SECRET_PREVIOUS;
     const marker = { delegated: true };

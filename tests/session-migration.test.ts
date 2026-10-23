@@ -16,9 +16,9 @@ function makeDeps(targets: MigrationTarget[]) {
     refresh: vi.fn(async (target: MigrationTarget) => ({
       accessToken: `at-${target.shop}`,
     })),
-    persist: vi.fn(async () => {}),
-    verify: vi.fn(async () => {}),
-    sleep: vi.fn(async () => {}),
+    persist: vi.fn(async (_t: MigrationTarget, _r: unknown) => {}),
+    verify: vi.fn(async (_t: MigrationTarget) => {}),
+    sleep: vi.fn(async (_ms: number) => {}),
   };
 }
 

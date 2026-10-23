@@ -76,6 +76,15 @@ export async function authenticateWebhook(
     return authenticate.webhook(request);
   }
 
+  // Observability for the transition window: a previous-secret match means
+  // dual-secret mode is still armed and Shopify (or a forger holding the old
+  // secret) signed this delivery with it. Log shop + webhook id only — never
+  // the signature or secret. While this keeps firing past the expected ~1h
+  // propagation window the rotation is not done; see docs/RUNBOOK.md.
+  console.warn(
+    `[webhook-auth] previous-secret HMAC accepted shop=${shop} webhookId=${webhookId} topic=${topic}`,
+  );
+
   const { admin, session } = await unauthenticated.admin(shop).catch(
     (err: unknown) => {
       // authenticate.webhook returns session/admin undefined rather than
