@@ -1,32 +1,61 @@
 // G-READBACK / G-AGREEMENT-A / G-INTROSPECT evidence runner (docs §12.1, §12.8, §17).
 // READ-ONLY: executes only the pinned query documents from
 // app/lib/shipping-refund-queries.ts (exact text, pinned sha256) against the
-// approved development store through the authenticated `shopify app execute`
-// channel, applies the repo's own response validators, and writes the
-// sanitized archive to docs/evidence/shipping-v0/.
+// approved development store, applies the repo's own response validators, and
+// writes the sanitized archive to docs/evidence/shipping-v0/.
 //
 //   npx vite-node --script scripts/shipping-refund-readback.ts
 //
+// Channels:
+//   - default: `shopify app execute` (authorized CLI session; returns `data`
+//     only — `extensions.cost` is not exposed).
+//   - SHIPRB_TOKEN_ENV=<env var name holding an offline access token for the
+//     store>: direct POST to /admin/api/<ver>/graphql.json with
+//     `Shopify-GraphQL-Cost-Debug: 1`, capturing extensions.cost. The token is
+//     read from the named environment variable at run time and is never
+//     printed or written to evidence.
+//
 // Env: SHIPRB_STORE (default ordermergetest2.myshopify.com), SHIPRB_VERSION
 // (default 2026-04), SHIPRB_OUT (default docs/evidence/shipping-v0).
-// Never prints or stores credentials; the CLI holds the authorized session.
 import { execSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   Q_APPID, Q_RECHECK, Q_RECONCILE, Q_REFUND_DETAIL, Q_AGREEMENTS,
   sha256Hex, validateAppIdentity, validateExecRecheck, validateRefundList,
   validateRefundDetailResponse, validateAgreementsPage,
 } from "../app/lib/shipping-refund-queries";
+import { buildManifestLines, MANIFEST_NAME } from "./lib/evidence-manifest";
 
 const STORE = process.env.SHIPRB_STORE ?? "ordermergetest2.myshopify.com";
 const VERSION = process.env.SHIPRB_VERSION ?? "2026-04";
 const OUT = process.env.SHIPRB_OUT ?? "docs/evidence/shipping-v0";
+const TOKEN_ENV = process.env.SHIPRB_TOKEN_ENV;
 const RUN = new Date().toISOString();
 const REPO_ROOT = process.cwd();
+const CHANNEL = TOKEN_ENV ? "admin-graphql-http" : "shopify-app-execute";
 
-const execQuery = (doc: { name: string; document: string }, variables?: Record<string, unknown>) => {
+interface ExecResult { data: unknown; errors: unknown; extensions: unknown }
+
+const execQuery = async (
+  doc: { name: string; document: string },
+  variables?: Record<string, unknown>,
+): Promise<ExecResult> => {
+  if (TOKEN_ENV) {
+    const token = process.env[TOKEN_ENV];
+    if (!token) throw new Error(`${TOKEN_ENV} is not set`);
+    const res = await fetch(`https://${STORE}/admin/api/${VERSION}/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": token,
+        "Shopify-GraphQL-Cost-Debug": "1",
+      },
+      body: JSON.stringify({ query: doc.document, variables }),
+    });
+    const body = await res.json();
+    return { data: body?.data ?? null, errors: body?.errors ?? null, extensions: body?.extensions ?? null };
+  }
   const qf = join(process.env.TEMP ?? "/tmp", `shiprb-${doc.name}.graphql`);
   writeFileSync(qf, doc.document);
   const vf = join(process.env.TEMP ?? "/tmp", `shiprb-${doc.name}.vars.json`);
@@ -35,13 +64,19 @@ const execQuery = (doc: { name: string; document: string }, variables?: Record<s
     writeFileSync(vf, JSON.stringify(variables));
     varArg = ` --variable-file "${vf}"`;
   }
+  // stderr merged: the CLI draws GraphQL error bodies on stderr.
   const raw = execSync(
-    `npx shopify app execute --store ${STORE} --version ${VERSION} --query-file "${qf}"${varArg}`,
+    `npx shopify app execute --store ${STORE} --version ${VERSION} --query-file "${qf}"${varArg} 2>&1`,
     { cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000 },
   );
   const i = raw.indexOf("{"), j = raw.lastIndexOf("}");
+  if (i < 0 || j <= i) throw new Error(`CLI returned no JSON body: ${raw.slice(0, 300)}`);
   const body = JSON.parse(raw.slice(i, j + 1));
-  return body.data ?? body;
+  // The CLI prints the data object; a failed operation prints {errors:[...]}.
+  if (body && Array.isArray(body.errors) && body.errors.length > 0 && body.data === undefined) {
+    return { data: null, errors: body.errors, extensions: null };
+  }
+  return { data: body.data ?? body, errors: body.errors ?? null, extensions: body.extensions ?? null };
 };
 
 const O = {
@@ -57,55 +92,9 @@ const REFUND_IDS = [
   "gid://shopify/Refund/1123042787575", // E6
   "gid://shopify/Refund/1123042066679", // E2
   "gid://shopify/Refund/1122917253367", // E1
-  "gid://shopify/Refund/1120895828215", // #1104
+  "gid://shopify/Refund/1120895828215", // #1104 restock-shaped, 0.00
   "gid://shopify/Refund/1120894320887", // #1099 Scenario5A
 ];
-
-const records: any[] = [];
-const rec = (doc: { name: string; document: string; documentSha256: string }, purpose: string,
-  variables: Record<string, unknown> | undefined, data: unknown, verdict: string, extra: Record<string, unknown> = {}) => {
-  const file = `${doc.name.toLowerCase()}-${purpose.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}.json`;
-  writeFileSync(join(OUT, file), JSON.stringify({
-    experiment: "G-READBACK/GA-A", runAtUtc: RUN, apiVersion: VERSION, store: STORE,
-    document: { name: doc.name, sha256: doc.documentSha256, text: doc.document },
-    variables, verdict, response: data, ...extra,
-  }, null, 1));
-  records.push({ name: doc.name, purpose, file, sha256: doc.documentSha256, verdict });
-  return data;
-};
-
-mkdirSync(OUT, { recursive: true });
-const fail = (e: unknown) => `FAIL: ${String((e as Error)?.message ?? e).slice(0, 300)}`;
-const costNote = "shopify app execute returns data only; extensions.cost is not exposed by this channel";
-
-// ── Identity gate ──────────────────────────────────────────────────────────
-let appId = "";
-try {
-  const d = execQuery(Q_APPID);
-  const v = validateAppIdentity({ data: d });
-  appId = v.ok ? v.appId! : "";
-  rec(Q_APPID, "identity", undefined, d, v.ok ? "PASS" : `FAIL: ${v.reason}`);
-} catch (e) { rec(Q_APPID, "identity", undefined, null, fail(e)); }
-
-// ── Q-RECHECK: cancelled secondary (BASE) + PAID primary ───────────────────
-try {
-  const vars = { source: O.BASE, primary: O.NO_REFUNDS };
-  const d = execQuery(Q_RECHECK, vars);
-  const v = validateExecRecheck({ data: d }, { sourceOrderId: O.BASE, primaryOrderId: O.NO_REFUNDS });
-  rec(Q_RECHECK, "cancelled_secondary", vars, d, v.ok ? "PASS" : `FAIL: ${v.reason}`, { costMeasurement: costNote });
-} catch (e) { rec(Q_RECHECK, "cancelled_secondary", { source: O.BASE, primary: O.NO_REFUNDS }, null, fail(e)); }
-
-// ── Q-RECONCILE: three orders ──────────────────────────────────────────────
-for (const [purpose, src] of [["no_refunds", O.NO_REFUNDS], ["with_refund_e6", O.WITH_REFUND], ["base_cancelled", O.BASE], ["e2_cancelled_refund", O.E2], ["e1_cancelled_refund", O.E1], ["neg_candidate_1104", O.NEG1], ["neg_candidate_1099", O.NEG2]] as const) {
-  try {
-    const d = execQuery(Q_RECONCILE, { source: src });
-    const v = validateRefundList({ data: d }, { sourceOrderId: src });
-    const refunds = (d as any)?.order?.refunds?.length ?? "?";
-    rec(Q_RECONCILE, purpose, { source: src }, d, v.ok ? "PASS" : `FAIL: ${v.reason}`, { refundCount: refunds, costMeasurement: costNote });
-  } catch (e) { rec(Q_RECONCILE, purpose, { source: src }, null, fail(e)); }
-}
-
-// ── Q-REFUND-DETAIL: five refund ids (worst-case bound) + strict single-order ──
 const REFUND_ORDER: Record<string, string> = {
   "gid://shopify/Refund/1123042787575": O.WITH_REFUND,
   "gid://shopify/Refund/1123042066679": O.E2,
@@ -113,65 +102,176 @@ const REFUND_ORDER: Record<string, string> = {
   "gid://shopify/Refund/1120895828215": O.NEG1,
   "gid://shopify/Refund/1120894320887": O.NEG2,
 };
-try {
-  const vars = { ids: REFUND_IDS };
-  const d: any = execQuery(Q_REFUND_DETAIL, vars);
-  const nodes = d?.nodes ?? [];
-  const checks = nodes.map((n: any, i: number) => ({
-    requestedId: REFUND_IDS[i], nodeId: n?.id ?? null,
-    orderOk: n?.order?.id === REFUND_ORDER[REFUND_IDS[i]],
-    hasNextPages: Object.fromEntries(
-      ["refundShippingLines", "refundLineItems", "orderAdjustments", "transactions"]
-        .map((c) => [c, n?.[c]?.pageInfo?.hasNextPage])),
-    dutiesArray: Array.isArray(n?.duties),
-  }));
-  const ok = nodes.length === REFUND_IDS.length && checks.every((c: any) => c.nodeId === c.requestedId && c.orderOk);
-  rec(Q_REFUND_DETAIL, "five_ids", vars, d, ok ? "PASS" : `CHECK: ${JSON.stringify(checks).slice(0, 200)}`,
-    { nodeChecks: checks, costMeasurement: costNote });
-} catch (e) { rec(Q_REFUND_DETAIL, "five_ids", { ids: REFUND_IDS }, null, fail(e)); }
-try {
-  const vars = { ids: [REFUND_IDS[0]] };
-  const d = execQuery(Q_REFUND_DETAIL, vars);
-  const v = validateRefundDetailResponse({ data: d }, [REFUND_IDS[0]], { sourceOrderId: O.WITH_REFUND });
-  rec(Q_REFUND_DETAIL, "strict_single", vars, d, v.ok ? "PASS" : `FAIL: ${v.reason}`);
-} catch (e) { rec(Q_REFUND_DETAIL, "strict_single", { ids: [REFUND_IDS[0]] }, null, fail(e)); }
+const NESTED_CONNS = ["refundShippingLines", "refundLineItems", "orderAdjustments", "transactions"] as const;
 
-// ── Q-AGREEMENTS: BASE + POS + NEG orders ─────────────────────────────────
-for (const [purpose, src] of [["base_cancelled", O.BASE], ["pos_e6", O.WITH_REFUND], ["pos_e2", O.E2], ["pos_e1", O.E1], ["neg_1104", O.NEG1], ["neg_1099", O.NEG2]] as const) {
+const written: string[] = [];
+const records: any[] = [];
+
+const writeArtifact = (file: string, payload: Record<string, unknown>) => {
+  writeFileSync(join(OUT, file), JSON.stringify(payload, null, 1));
+  written.push(file);
+};
+
+const rec = (doc: { name: string; document: string; documentSha256: string }, purpose: string,
+  variables: Record<string, unknown> | undefined, r: ExecResult | null, verdict: string,
+  extra: Record<string, unknown> = {}) => {
+  const file = `${doc.name.toLowerCase()}-${purpose.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}.json`;
+  writeArtifact(file, {
+    experiment: "G-READBACK/GA-A", runAtUtc: RUN, apiVersion: VERSION, store: STORE,
+    channel: CHANNEL,
+    document: { name: doc.name, sha256: doc.documentSha256, text: doc.document },
+    variables, verdict,
+    executionErrors: r?.errors ?? null,
+    response: r?.data ?? null,
+    cost: (r?.extensions as any)?.cost ?? null,
+    ...extra,
+  });
+  records.push({ name: doc.name, purpose, file, sha256: doc.documentSha256, verdict });
+  return r;
+};
+
+const fail = (e: unknown) => `FAIL: ${String((e as Error)?.message ?? e).slice(0, 300)}`;
+const costNote = TOKEN_ENV
+  ? "extensions.cost captured via Shopify-GraphQL-Cost-Debug: 1"
+  : "shopify app execute returns data only; extensions.cost is not exposed by this channel";
+const hasErrors = (r: ExecResult | null) => Array.isArray(r?.errors) && (r!.errors as unknown[]).length > 0;
+
+async function main() {
+  mkdirSync(OUT, { recursive: true });
+
+  // ── Q-APPID ────────────────────────────────────────────────────────────────
+  let appId = "";
   try {
-    const pages: any[] = [];
-    let after: string | null = null;
-    for (let p = 0; p < 5; p += 1) {
-      const d = execQuery(Q_AGREEMENTS, { source: src, after });
-      const v = validateAgreementsPage({ data: d }, { sourceOrderId: src });
-      pages.push({ page: p + 1, validator: v.ok ? "ok" : v.reason, data: d });
-      if (!v.ok || !(d as any)?.order?.agreements?.pageInfo?.hasNextPage) break;
-      after = (d as any).order.agreements.pageInfo.endCursor;
-    }
-    const nodes = pages.flatMap((p) => p.data?.order?.agreements?.nodes ?? []);
-    rec(Q_AGREEMENTS, purpose, { source: src }, nodes, "PASS", {
-      pages: pages.length, pageComplete: !pages[pages.length - 1]?.data?.order?.agreements?.pageInfo?.hasNextPage,
-      costMeasurement: costNote, verifiedAppId: appId,
-      refundAgreements: nodes.filter((a: any) => a.__typename === "RefundAgreement"),
+    const r = await execQuery(Q_APPID);
+    const v = validateAppIdentity({ data: r.data });
+    appId = v.ok ? v.appId! : "";
+    rec(Q_APPID, "identity", undefined, r, v.ok && !hasErrors(r) ? "PASS" : `FAIL: ${v.ok ? "top-level errors" : v.reason}`);
+  } catch (e) { rec(Q_APPID, "identity", undefined, null, fail(e)); }
+
+  // ── Q-RECHECK: cancelled secondary (BASE) + PAID primary ───────────────────
+  try {
+    const vars = { source: O.BASE, primary: O.NO_REFUNDS };
+    const r = await execQuery(Q_RECHECK, vars);
+    const v = validateExecRecheck({ data: r.data }, { sourceOrderId: O.BASE, primaryOrderId: O.NO_REFUNDS });
+    rec(Q_RECHECK, "cancelled_secondary", vars, r, v.ok && !hasErrors(r) ? "PASS" : `FAIL: ${v.ok ? "top-level errors" : v.reason}`);
+  } catch (e) { rec(Q_RECHECK, "cancelled_secondary", { source: O.BASE, primary: O.NO_REFUNDS }, null, fail(e)); }
+
+  // ── Q-RECONCILE over the order set ─────────────────────────────────────────
+  for (const [purpose, src] of [["no_refunds", O.NO_REFUNDS], ["with_refund_e6", O.WITH_REFUND],
+    ["base_cancelled", O.BASE], ["e2_cancelled_refund", O.E2], ["e1_cancelled_refund", O.E1],
+    ["neg_candidate_1104", O.NEG1], ["neg_candidate_1099", O.NEG2]] as const) {
+    try {
+      const r = await execQuery(Q_RECONCILE, { source: src });
+      const v = validateRefundList({ data: r.data }, { sourceOrderId: src });
+      const refunds = (r.data as any)?.order?.refunds?.length ?? "?";
+      rec(Q_RECONCILE, purpose, { source: src }, r,
+        v.ok && !hasErrors(r) ? "PASS" : `FAIL: ${v.ok ? "top-level errors" : v.reason}`,
+        { refundCount: refunds });
+    } catch (e) { rec(Q_RECONCILE, purpose, { source: src }, null, fail(e)); }
+  }
+
+  // ── Q-REFUND-DETAIL: five ids (worst-case bound) — execution vs identity vs
+  //    nested-evidence completeness are separate verdict dimensions ──────────
+  try {
+    const vars = { ids: REFUND_IDS };
+    const r = await execQuery(Q_REFUND_DETAIL, vars);
+    const nodes = (r.data as any)?.nodes ?? [];
+    const checks = nodes.map((n: any, i: number) => {
+      const incompletes = NESTED_CONNS.filter((c) => n?.[c]?.pageInfo?.hasNextPage !== false);
+      return {
+        requestedId: REFUND_IDS[i], nodeId: n?.id ?? null,
+        orderOk: n?.order?.id === REFUND_ORDER[REFUND_IDS[i]],
+        incompleteConnections: incompletes,
+        dutiesArray: Array.isArray(n?.duties),
+      };
     });
-  } catch (e) { rec(Q_AGREEMENTS, purpose, { source: src }, null, fail(e)); }
+    const executed = nodes.length === REFUND_IDS.length && !hasErrors(r);
+    const identityOk = checks.every((c: any) => c.nodeId === c.requestedId && c.orderOk);
+    const completeOk = checks.every((c: any) => c.incompleteConnections.length === 0 && c.dutiesArray);
+    const verdict = !executed ? "FAIL: execution"
+      : !identityOk ? "FAIL: identity/order association"
+      : completeOk ? "PASS"
+      : "INCOMPLETE: " + checks.filter((c: any) => c.incompleteConnections.length || !c.dutiesArray)
+        .map((c: any) => `${String(c.requestedId).split("/").pop()}: ${c.incompleteConnections.join("+") || "duties not array"}`).join("; ");
+    rec(Q_REFUND_DETAIL, "five_ids", vars, r, verdict,
+      { verdictDimensions: { execution: executed ? "ok" : "fail", identity: identityOk ? "ok" : "fail", nestedEvidenceComplete: completeOk }, nodeChecks: checks });
+  } catch (e) { rec(Q_REFUND_DETAIL, "five_ids", { ids: REFUND_IDS }, null, fail(e)); }
+  // Strict single-refund check (E6) against the repo validator.
+  try {
+    const vars = { ids: [REFUND_IDS[0]] };
+    const r = await execQuery(Q_REFUND_DETAIL, vars);
+    const v = validateRefundDetailResponse({ data: r.data }, [REFUND_IDS[0]], { sourceOrderId: O.WITH_REFUND });
+    rec(Q_REFUND_DETAIL, "strict_single_e6", vars, r, v.ok && !hasErrors(r) ? "PASS" : `FAIL: ${v.ok ? "top-level errors" : v.reason}`);
+  } catch (e) { rec(Q_REFUND_DETAIL, "strict_single_e6", { ids: [REFUND_IDS[0]] }, null, fail(e)); }
+
+  // ── Q-AGREEMENTS: raw per-page responses archived; verdict reflects
+  //    validator results and whether the connection completed in ≤5 pages ────
+  for (const [purpose, src] of [["base_cancelled", O.BASE], ["pos_e6", O.WITH_REFUND],
+    ["pos_e2", O.E2], ["pos_e1", O.E1], ["neg_1104", O.NEG1], ["neg_1099", O.NEG2]] as const) {
+    try {
+      const pages: any[] = [];
+      let after: string | null = null;
+      let vFail: string | null = null;
+      let completed = false;
+      for (let p = 0; p < 5; p += 1) {
+        const r = await execQuery(Q_AGREEMENTS, { source: src, after });
+        const v = hasErrors(r)
+          ? { ok: false as const, reason: "top-level errors" }
+          : validateAgreementsPage({ data: r.data }, { sourceOrderId: src });
+        pages.push({ page: p + 1, variables: { source: src, after }, validator: v.ok ? "ok" : v.reason, errors: r.errors ?? null, response: r.data });
+        if (!v.ok) { vFail = v.reason ?? "validator failure"; break; }
+        const pi = (r.data as any)?.order?.agreements?.pageInfo;
+        if (pi?.hasNextPage !== true) { completed = pi?.hasNextPage === false; break; }
+        after = pi.endCursor;
+      }
+      const verdict = vFail ? `FAIL: ${vFail}` : completed ? "PASS" : "INCOMPLETE: 5-page budget exhausted with hasNextPage";
+      const nodes = pages.flatMap((p) => p.response?.order?.agreements?.nodes ?? []);
+      rec(Q_AGREEMENTS, purpose, { source: src }, null, verdict, {
+        pagesScanned: pages.length, pageComplete: completed, verifiedAppId: appId,
+        agreementNodes: nodes,
+        refundAgreements: nodes.filter((a: any) => a.__typename === "RefundAgreement"),
+        rawPages: pages, // sanitized per-page responses incl. pageInfo (E-2)
+      });
+    } catch (e) { rec(Q_AGREEMENTS, purpose, { source: src }, null, fail(e)); }
+  }
+
+  // ── G-INTROSPECT: @idempotent directive ────────────────────────────────────
+  try {
+    const doc = { name: "G-INTROSPECT", document: `query {\n  __schema {\n    directives { name locations args { name type { kind name ofType { kind name ofType { kind name } } } } }\n  }\n}` };
+    const r = await execQuery(doc as any);
+    const dirs = ((r.data as any)?.__schema?.directives ?? []).filter((x: any) => /idempotent/i.test(x.name));
+    const verdict = hasErrors(r) ? "FAIL: top-level errors" : dirs.length ? "PASS" : "NOT FOUND";
+    writeArtifact("introspect-idempotent.json", {
+      experiment: "G-INTROSPECT", runAtUtc: RUN, apiVersion: VERSION, store: STORE, channel: CHANNEL,
+      document: { sha256: sha256Hex(doc.document), text: doc.document },
+      executionErrors: r.errors ?? null, result: dirs, verdict,
+    });
+    records.push({ name: "G-INTROSPECT", purpose: "idempotent-directive", file: "introspect-idempotent.json", sha256: sha256Hex(doc.document), verdict });
+  } catch (e) { records.push({ name: "G-INTROSPECT", purpose: "idempotent-directive", file: "introspect-idempotent.json", verdict: fail(e) }); }
+
+  // ── BASE provenance: order events proving who cancelled/restocked (E-4) ───
+  // Supplementary (non-pinned) read-only query; archived under its own sha256.
+  try {
+    const doc = { name: "Q-EVENTS-BASE", document: `query BaseCancelEvents($id: ID!) {\n  order(id: $id) {\n    id\n    cancelledAt\n    events(first: 30) {\n      nodes { __typename id createdAt ... on BasicEvent { message appTitle } }\n      pageInfo { hasNextPage endCursor }\n    }\n  }\n}` };
+    const r = await execQuery(doc as any, { id: O.BASE });
+    writeArtifact("base-cancel-events.json", {
+      experiment: "G-AGREEMENT-A/BASE-provenance", runAtUtc: RUN, apiVersion: VERSION, store: STORE, channel: CHANNEL,
+      document: { name: doc.name, sha256: sha256Hex(doc.document), text: doc.document },
+      variables: { id: O.BASE }, executionErrors: r.errors ?? null, response: r.data,
+      verdict: hasErrors(r) ? "FAIL: top-level errors" : "PASS",
+    });
+    records.push({ name: "Q-EVENTS-BASE", purpose: "base-cancel-provenance", file: "base-cancel-events.json", sha256: sha256Hex(doc.document), verdict: hasErrors(r) ? "FAIL" : "PASS" });
+  } catch (e) { records.push({ name: "Q-EVENTS-BASE", purpose: "base-cancel-provenance", file: "base-cancel-events.json", verdict: fail(e) }); }
+
+  // ── Register first, manifest LAST over every intended artifact (E-3) ──────
+  writeArtifact("validation-register.json", {
+    runAtUtc: RUN, store: STORE, apiVersion: VERSION, channel: CHANNEL, verifiedAppId: appId,
+    costNote, records,
+  });
+  const files = [...written, "README.md"].filter((f, i, a) => a.indexOf(f) === i);
+  writeFileSync(join(OUT, MANIFEST_NAME), buildManifestLines(OUT, files).join("\n") + "\n");
+  console.log(records.map((r) => `${String(r.verdict).startsWith("PASS") ? "PASS" : "XXXX"}  ${r.name}  ${r.purpose}  ${String(r.verdict).slice(0, 100)}`).join("\n"));
+  console.log("artifacts:", readdirSync(OUT).length, "manifest entries:", files.length);
 }
 
-// ── G-INTROSPECT: @idempotent directive (read-only introspection) ──────────
-try {
-  const doc = { name: "G-INTROSPECT", document: `query {\n  __schema {\n    directives { name locations args { name type { kind name ofType { kind name ofType { kind name } } } } }\n  }\n}` };
-  const d: any = execQuery(doc as any);
-  const dirs = (d.__schema?.directives ?? []).filter((x: any) => /idempotent/i.test(x.name));
-  writeFileSync(join(OUT, "introspect-idempotent.json"), JSON.stringify({
-    experiment: "G-INTROSPECT", runAtUtc: RUN, apiVersion: VERSION, store: STORE,
-    document: { sha256: sha256Hex(doc.document), text: doc.document }, result: dirs, verdict: dirs.length ? "PASS" : "NOT FOUND",
-  }, null, 1));
-  records.push({ name: "G-INTROSPECT", purpose: "idempotent-directive", file: "introspect-idempotent.json", sha256: sha256Hex(doc.document), verdict: dirs.length ? "PASS" : "NOT FOUND" });
-} catch (e) { records.push({ name: "G-INTROSPECT", purpose: "idempotent-directive", file: "introspect-idempotent.json", verdict: fail(e) }); }
-
-// ── MANIFEST + register ────────────────────────────────────────────────────
-const manifest = readdirSync(OUT).filter((f) => f.endsWith(".json") && f !== "MANIFEST.sha256").sort()
-  .map((f) => `${createHash("sha256").update(readFileSync(join(OUT, f))).digest("hex")}  ${f}`).join("\n");
-writeFileSync(join(OUT, "MANIFEST.sha256"), manifest + "\n");
-writeFileSync(join(OUT, "validation-register.json"), JSON.stringify({ runAtUtc: RUN, store: STORE, apiVersion: VERSION, verifiedAppId: appId, costNote, records }, null, 1));
-console.log(records.map((r) => `${r.verdict.startsWith("PASS") ? "PASS" : "XXXX"}  ${r.name}  ${r.purpose}  ${r.verdict.slice(0, 90)}`).join("\n"));
+await main();

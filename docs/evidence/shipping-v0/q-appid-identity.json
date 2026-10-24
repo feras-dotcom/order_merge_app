@@ -1,19 +1,22 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "name": "Q-APPID",
   "sha256": "616d5da0b45467c102c60e368a7f339fbbb4b2f7f68a5d145c50c2c8175caf16",
   "text": "query ShippingRefundAppIdentity {\n  currentAppInstallation { app { id } }\n}"
  },
  "verdict": "PASS",
+ "executionErrors": null,
  "response": {
   "currentAppInstallation": {
    "app": {
     "id": "gid://shopify/App/426185785345"
    }
   }
- }
+ },
+ "cost": null
 }

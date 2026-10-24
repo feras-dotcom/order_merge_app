@@ -1,8 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "name": "Q-RECONCILE",
   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
@@ -12,6 +13,7 @@
   "source": "gid://shopify/Order/8052786135287"
  },
  "verdict": "PASS",
+ "executionErrors": null,
  "response": {
   "order": {
    "id": "gid://shopify/Order/8052786135287",
@@ -50,6 +52,6 @@
    ]
   }
  },
- "refundCount": 0,
- "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel"
+ "cost": null,
+ "refundCount": 0
 }

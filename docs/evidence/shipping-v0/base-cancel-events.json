@@ -1,0 +1,94 @@
+{
+ "experiment": "G-AGREEMENT-A/BASE-provenance",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
+ "document": {
+  "name": "Q-EVENTS-BASE",
+  "sha256": "c370d50d022b7507481f71b996345373cb1d41d86be50b8acb1120ecb3444844",
+  "text": "query BaseCancelEvents($id: ID!) {\n  order(id: $id) {\n    id\n    cancelledAt\n    events(first: 30) {\n      nodes { __typename id createdAt ... on BasicEvent { message appTitle } }\n      pageInfo { hasNextPage endCursor }\n    }\n  }\n}"
+ },
+ "variables": {
+  "id": "gid://shopify/Order/8052786135287"
+ },
+ "executionErrors": null,
+ "response": {
+  "order": {
+   "id": "gid://shopify/Order/8052786135287",
+   "cancelledAt": "2026-10-05T10:32:57Z",
+   "events": {
+    "nodes": [
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038470861047",
+      "createdAt": "2026-10-05T10:32:09Z",
+      "message": "MergeShip Reuse Scenario11B clean chain placed this order on MergeShip.",
+      "appTitle": "MergeShip"
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038470893815",
+      "createdAt": "2026-10-05T10:32:09Z",
+      "message": "Confirmation #34NYX5ZCX was generated for this order.",
+      "appTitle": "MergeShip"
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038470959351",
+      "createdAt": "2026-10-05T10:32:10Z",
+      "message": "MergeShip added a note to this order.",
+      "appTitle": "MergeShip"
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038471057655",
+      "createdAt": "2026-10-05T10:32:10Z",
+      "message": "Received new order <a href=\"https://ordermergetest2.myshopify.com/admin/orders/8052786135287\">#1124</a>.",
+      "appTitle": null
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038472532215",
+      "createdAt": "2026-10-05T10:32:14Z",
+      "message": "MergeShip manually marked $10.00 USD as paid for this order.",
+      "appTitle": "MergeShip"
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038486851831",
+      "createdAt": "2026-10-05T10:32:57Z",
+      "message": "MergeShip restocked 1 line item.",
+      "appTitle": "MergeShip"
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038486950135",
+      "createdAt": "2026-10-05T10:32:57Z",
+      "message": "MergeShip canceled this order.",
+      "appTitle": "MergeShip"
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038491144439",
+      "createdAt": "2026-10-05T10:33:05Z",
+      "message": "MergeShip edited the note on this order.",
+      "appTitle": "MergeShip"
+     },
+     {
+      "__typename": "BasicEvent",
+      "id": "gid://shopify/BasicEvent/180038491373815",
+      "createdAt": "2026-10-05T10:33:05Z",
+      "message": "MergeShip archived this order.",
+      "appTitle": "MergeShip"
+     }
+    ],
+    "pageInfo": {
+     "hasNextPage": false,
+     "endCursor": "eyJsYXN0X2lkIjoxODAwMzg0OTEzNzM4MTUsImxhc3RfdmFsdWUiOiIxODAwMzg0OTEzNzM4MTUifQ=="
+    }
+   }
+  }
+ },
+ "verdict": "PASS"
+}

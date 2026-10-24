@@ -1,12 +1,14 @@
 {
  "experiment": "G-INTROSPECT",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "sha256": "82d436555817c4f9e34ec319f433907e78bb4bb0964142a0a42ca60f18ba07c3",
   "text": "query {\n  __schema {\n    directives { name locations args { name type { kind name ofType { kind name ofType { kind name } } } } }\n  }\n}"
  },
+ "executionErrors": null,
  "result": [
   {
    "name": "idempotent",

@@ -1,7 +1,8 @@
 {
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "store": "ordermergetest2.myshopify.com",
  "apiVersion": "2026-04",
+ "channel": "shopify-app-execute",
  "verifiedAppId": "gid://shopify/App/426185785345",
  "costNote": "shopify app execute returns data only; extensions.cost is not exposed by this channel",
  "records": [
@@ -73,12 +74,12 @@
    "purpose": "five_ids",
    "file": "q-refund-detail-five_ids.json",
    "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
-   "verdict": "PASS"
+   "verdict": "INCOMPLETE: 1120895828215: refundLineItems"
   },
   {
    "name": "Q-REFUND-DETAIL",
-   "purpose": "strict_single",
-   "file": "q-refund-detail-strict_single.json",
+   "purpose": "strict_single_e6",
+   "file": "q-refund-detail-strict_single_e6.json",
    "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
    "verdict": "PASS"
   },
@@ -129,6 +130,13 @@
    "purpose": "idempotent-directive",
    "file": "introspect-idempotent.json",
    "sha256": "82d436555817c4f9e34ec319f433907e78bb4bb0964142a0a42ca60f18ba07c3",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-EVENTS-BASE",
+   "purpose": "base-cancel-provenance",
+   "file": "base-cancel-events.json",
+   "sha256": "c370d50d022b7507481f71b996345373cb1d41d86be50b8acb1120ecb3444844",
    "verdict": "PASS"
   }
  ]

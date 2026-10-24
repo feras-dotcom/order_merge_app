@@ -1,8 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "name": "Q-AGREEMENTS",
   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
@@ -12,7 +13,13 @@
   "source": "gid://shopify/Order/8078035452151"
  },
  "verdict": "PASS",
- "response": [
+ "executionErrors": null,
+ "response": null,
+ "cost": null,
+ "pagesScanned": 1,
+ "pageComplete": true,
+ "verifiedAppId": "gid://shopify/App/426185785345",
+ "agreementNodes": [
   {
    "__typename": "OrderAgreement",
    "id": "gid://shopify/SalesAgreement/8641726841079",
@@ -35,10 +42,6 @@
    }
   }
  ],
- "pages": 1,
- "pageComplete": true,
- "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel",
- "verifiedAppId": "gid://shopify/App/426185785345",
  "refundAgreements": [
   {
    "__typename": "RefundAgreement",
@@ -50,6 +53,50 @@
    },
    "refund": {
     "id": "gid://shopify/Refund/1123042066679"
+   }
+  }
+ ],
+ "rawPages": [
+  {
+   "page": 1,
+   "variables": {
+    "source": "gid://shopify/Order/8078035452151",
+    "after": null
+   },
+   "validator": "ok",
+   "errors": null,
+   "response": {
+    "order": {
+     "agreements": {
+      "nodes": [
+       {
+        "__typename": "OrderAgreement",
+        "id": "gid://shopify/SalesAgreement/8641726841079",
+        "happenedAt": "2026-10-14T15:30:08Z",
+        "reason": "ORDER",
+        "app": {
+         "id": "gid://shopify/App/580111"
+        }
+       },
+       {
+        "__typename": "RefundAgreement",
+        "id": "gid://shopify/SalesAgreement/8643474391287",
+        "happenedAt": "2026-10-15T08:08:37Z",
+        "reason": "REFUND",
+        "app": {
+         "id": "gid://shopify/App/426185785345"
+        },
+        "refund": {
+         "id": "gid://shopify/Refund/1123042066679"
+        }
+       }
+      ],
+      "pageInfo": {
+       "hasNextPage": false,
+       "endCursor": "eyJsYXN0X2lkIjo4NjQzNDc0MzkxMjg3LCJsYXN0X3ZhbHVlIjoiODY0MzQ3NDM5MTI4NyJ9"
+      }
+     }
+    }
    }
   }
  ]

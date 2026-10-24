@@ -1,8 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "name": "Q-AGREEMENTS",
   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
@@ -12,7 +13,13 @@
   "source": "gid://shopify/Order/8051306299639"
  },
  "verdict": "PASS",
- "response": [
+ "executionErrors": null,
+ "response": null,
+ "cost": null,
+ "pagesScanned": 1,
+ "pageComplete": true,
+ "verifiedAppId": "gid://shopify/App/426185785345",
+ "agreementNodes": [
   {
    "__typename": "OrderAgreement",
    "id": "gid://shopify/SalesAgreement/8612423467255",
@@ -44,10 +51,6 @@
    }
   }
  ],
- "pages": 1,
- "pageComplete": true,
- "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel",
- "verifiedAppId": "gid://shopify/App/426185785345",
  "refundAgreements": [
   {
    "__typename": "RefundAgreement",
@@ -59,6 +62,59 @@
    },
    "refund": {
     "id": "gid://shopify/Refund/1120894320887"
+   }
+  }
+ ],
+ "rawPages": [
+  {
+   "page": 1,
+   "variables": {
+    "source": "gid://shopify/Order/8051306299639",
+    "after": null
+   },
+   "validator": "ok",
+   "errors": null,
+   "response": {
+    "order": {
+     "agreements": {
+      "nodes": [
+       {
+        "__typename": "OrderAgreement",
+        "id": "gid://shopify/SalesAgreement/8612423467255",
+        "happenedAt": "2026-10-04T19:47:21Z",
+        "reason": "ORDER",
+        "app": {
+         "id": "gid://shopify/App/426185785345"
+        }
+       },
+       {
+        "__typename": "OrderEditAgreement",
+        "id": "gid://shopify/SalesAgreement/8612424548599",
+        "happenedAt": "2026-10-04T19:47:49Z",
+        "reason": "ORDER_EDIT",
+        "app": {
+         "id": "gid://shopify/App/426185785345"
+        }
+       },
+       {
+        "__typename": "RefundAgreement",
+        "id": "gid://shopify/SalesAgreement/8612425105655",
+        "happenedAt": "2026-10-04T19:48:00Z",
+        "reason": "REFUND",
+        "app": {
+         "id": "gid://shopify/App/426185785345"
+        },
+        "refund": {
+         "id": "gid://shopify/Refund/1120894320887"
+        }
+       }
+      ],
+      "pageInfo": {
+       "hasNextPage": false,
+       "endCursor": "eyJsYXN0X2lkIjo4NjEyNDI1MTA1NjU1LCJsYXN0X3ZhbHVlIjoiODYxMjQyNTEwNTY1NSJ9"
+      }
+     }
+    }
    }
   }
  ]

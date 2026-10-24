@@ -1,8 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "name": "Q-AGREEMENTS",
   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
@@ -12,7 +13,13 @@
   "source": "gid://shopify/Order/8051362136311"
  },
  "verdict": "PASS",
- "response": [
+ "executionErrors": null,
+ "response": null,
+ "cost": null,
+ "pagesScanned": 1,
+ "pageComplete": true,
+ "verifiedAppId": "gid://shopify/App/426185785345",
+ "agreementNodes": [
   {
    "__typename": "OrderAgreement",
    "id": "gid://shopify/SalesAgreement/8612481794295",
@@ -32,9 +39,46 @@
    }
   }
  ],
- "pages": 1,
- "pageComplete": true,
- "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel",
- "verifiedAppId": "gid://shopify/App/426185785345",
- "refundAgreements": []
+ "refundAgreements": [],
+ "rawPages": [
+  {
+   "page": 1,
+   "variables": {
+    "source": "gid://shopify/Order/8051362136311",
+    "after": null
+   },
+   "validator": "ok",
+   "errors": null,
+   "response": {
+    "order": {
+     "agreements": {
+      "nodes": [
+       {
+        "__typename": "OrderAgreement",
+        "id": "gid://shopify/SalesAgreement/8612481794295",
+        "happenedAt": "2026-10-04T20:15:59Z",
+        "reason": "ORDER",
+        "app": {
+         "id": "gid://shopify/App/426185785345"
+        }
+       },
+       {
+        "__typename": "OrderEditAgreement",
+        "id": "gid://shopify/SalesAgreement/8612484940023",
+        "happenedAt": "2026-10-04T20:17:42Z",
+        "reason": "ORDER_EDIT",
+        "app": {
+         "id": "gid://shopify/App/426185785345"
+        }
+       }
+      ],
+      "pageInfo": {
+       "hasNextPage": false,
+       "endCursor": "eyJsYXN0X2lkIjo4NjEyNDg0OTQwMDIzLCJsYXN0X3ZhbHVlIjoiODYxMjQ4NDk0MDAyMyJ9"
+      }
+     }
+    }
+   }
+  }
+ ]
 }

@@ -1,8 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "name": "Q-REFUND-DETAIL",
   "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
@@ -14,6 +15,7 @@
   ]
  },
  "verdict": "PASS",
+ "executionErrors": null,
  "response": {
   "nodes": [
    {
@@ -89,5 +91,6 @@
     }
    }
   ]
- }
+ },
+ "cost": null
 }

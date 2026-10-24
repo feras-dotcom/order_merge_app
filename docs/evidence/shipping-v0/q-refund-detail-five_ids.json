@@ -1,8 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "runAtUtc": "2026-10-24T15:30:32.396Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
  "document": {
   "name": "Q-REFUND-DETAIL",
   "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
@@ -17,7 +18,8 @@
    "gid://shopify/Refund/1120894320887"
   ]
  },
- "verdict": "PASS",
+ "verdict": "INCOMPLETE: 1120895828215: refundLineItems",
+ "executionErrors": null,
  "response": {
   "nodes": [
    {
@@ -370,67 +372,49 @@
    }
   ]
  },
+ "cost": null,
+ "verdictDimensions": {
+  "execution": "ok",
+  "identity": "ok",
+  "nestedEvidenceComplete": false
+ },
  "nodeChecks": [
   {
    "requestedId": "gid://shopify/Refund/1123042787575",
    "nodeId": "gid://shopify/Refund/1123042787575",
    "orderOk": true,
-   "hasNextPages": {
-    "refundShippingLines": false,
-    "refundLineItems": false,
-    "orderAdjustments": false,
-    "transactions": false
-   },
+   "incompleteConnections": [],
    "dutiesArray": true
   },
   {
    "requestedId": "gid://shopify/Refund/1123042066679",
    "nodeId": "gid://shopify/Refund/1123042066679",
    "orderOk": true,
-   "hasNextPages": {
-    "refundShippingLines": false,
-    "refundLineItems": false,
-    "orderAdjustments": false,
-    "transactions": false
-   },
+   "incompleteConnections": [],
    "dutiesArray": true
   },
   {
    "requestedId": "gid://shopify/Refund/1122917253367",
    "nodeId": "gid://shopify/Refund/1122917253367",
    "orderOk": true,
-   "hasNextPages": {
-    "refundShippingLines": false,
-    "refundLineItems": false,
-    "orderAdjustments": false,
-    "transactions": false
-   },
+   "incompleteConnections": [],
    "dutiesArray": true
   },
   {
    "requestedId": "gid://shopify/Refund/1120895828215",
    "nodeId": "gid://shopify/Refund/1120895828215",
    "orderOk": true,
-   "hasNextPages": {
-    "refundShippingLines": false,
-    "refundLineItems": true,
-    "orderAdjustments": false,
-    "transactions": false
-   },
+   "incompleteConnections": [
+    "refundLineItems"
+   ],
    "dutiesArray": true
   },
   {
    "requestedId": "gid://shopify/Refund/1120894320887",
    "nodeId": "gid://shopify/Refund/1120894320887",
    "orderOk": true,
-   "hasNextPages": {
-    "refundShippingLines": false,
-    "refundLineItems": false,
-    "orderAdjustments": false,
-    "transactions": false
-   },
+   "incompleteConnections": [],
    "dutiesArray": true
   }
- ],
- "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel"
+ ]
 }
