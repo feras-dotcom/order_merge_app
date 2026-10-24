@@ -1,0 +1,61 @@
+{
+ "experiment": "G-READBACK/GA-A",
+ "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "document": {
+  "name": "Q-RECHECK",
+  "sha256": "56d35112e5308721d82124fad1f80fe99a9ef711e7c7377426cef6879cefb12b",
+  "text": "query ShippingRefundExecRecheck($source: ID!, $primary: ID!) {\n  source: order(id: $source) {\n    id\n    cancelledAt\n    closed\n    displayFinancialStatus\n    currencyCode\n    totalRefundedSet { presentmentMoney { amount currencyCode } }\n    totalRefundedShippingSet { presentmentMoney { amount currencyCode } }\n    refunds(first: 50) { id }\n    transactions(first: 50) {\n      id\n      kind\n      status\n      gateway\n      test\n      amountSet { presentmentMoney { amount currencyCode } }\n      parentTransaction { id }\n    }\n  }\n  primary: order(id: $primary) {\n    id\n    cancelledAt\n    displayFinancialStatus\n    currencyCode\n  }\n}"
+ },
+ "variables": {
+  "source": "gid://shopify/Order/8052786135287",
+  "primary": "gid://shopify/Order/8052845805815"
+ },
+ "verdict": "PASS",
+ "response": {
+  "source": {
+   "id": "gid://shopify/Order/8052786135287",
+   "cancelledAt": "2026-10-05T10:32:57Z",
+   "closed": true,
+   "displayFinancialStatus": "PAID",
+   "currencyCode": "USD",
+   "totalRefundedSet": {
+    "presentmentMoney": {
+     "amount": "0.0",
+     "currencyCode": "USD"
+    }
+   },
+   "totalRefundedShippingSet": {
+    "presentmentMoney": {
+     "amount": "0.0",
+     "currencyCode": "USD"
+    }
+   },
+   "refunds": [],
+   "transactions": [
+    {
+     "id": "gid://shopify/OrderTransaction/10122602938615",
+     "kind": "SALE",
+     "status": "SUCCESS",
+     "gateway": "manual",
+     "test": false,
+     "amountSet": {
+      "presentmentMoney": {
+       "amount": "10.0",
+       "currencyCode": "USD"
+      }
+     },
+     "parentTransaction": null
+    }
+   ]
+  },
+  "primary": {
+   "id": "gid://shopify/Order/8052845805815",
+   "cancelledAt": null,
+   "displayFinancialStatus": "PAID",
+   "currencyCode": "USD"
+  }
+ },
+ "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel"
+}

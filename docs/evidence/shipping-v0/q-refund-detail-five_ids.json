@@ -1,0 +1,436 @@
+{
+ "experiment": "G-READBACK/GA-A",
+ "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "document": {
+  "name": "Q-REFUND-DETAIL",
+  "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
+  "text": "query ShippingRefundDetail($ids: [ID!]!) {\n  nodes(ids: $ids) {\n    ... on Refund {\n      id\n      note\n      createdAt\n      processedAt\n      order { id }\n      totalRefundedSet { presentmentMoney { amount currencyCode } }\n      duties { amountSet { presentmentMoney { amount currencyCode } } }\n      refundShippingLines(first: 10) {\n        nodes {\n          subtotalAmountSet { presentmentMoney { amount currencyCode } }\n          taxAmountSet { presentmentMoney { amount currencyCode } }\n        }\n        pageInfo { hasNextPage }\n      }\n      refundLineItems(first: 10) {\n        nodes { id }\n        pageInfo { hasNextPage }\n      }\n      orderAdjustments(first: 10) {\n        nodes { id }\n        pageInfo { hasNextPage }\n      }\n      transactions(first: 10) {\n        nodes {\n          id\n          kind\n          status\n          gateway\n          test\n          amountSet { presentmentMoney { amount currencyCode } }\n          parentTransaction { id }\n        }\n        pageInfo { hasNextPage }\n      }\n    }\n  }\n}"
+ },
+ "variables": {
+  "ids": [
+   "gid://shopify/Refund/1123042787575",
+   "gid://shopify/Refund/1123042066679",
+   "gid://shopify/Refund/1122917253367",
+   "gid://shopify/Refund/1120895828215",
+   "gid://shopify/Refund/1120894320887"
+  ]
+ },
+ "verdict": "PASS",
+ "response": {
+  "nodes": [
+   {
+    "id": "gid://shopify/Refund/1123042787575",
+    "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+    "createdAt": "2026-10-15T08:10:21Z",
+    "processedAt": "2026-10-15T08:10:21Z",
+    "order": {
+     "id": "gid://shopify/Order/8078037057783"
+    },
+    "totalRefundedSet": {
+     "presentmentMoney": {
+      "amount": "3.0",
+      "currencyCode": "USD"
+     }
+    },
+    "duties": [],
+    "refundShippingLines": {
+     "nodes": [
+      {
+       "subtotalAmountSet": {
+        "presentmentMoney": {
+         "amount": "3.0",
+         "currencyCode": "USD"
+        }
+       },
+       "taxAmountSet": {
+        "presentmentMoney": {
+         "amount": "0.0",
+         "currencyCode": "USD"
+        }
+       }
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "refundLineItems": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "orderAdjustments": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "transactions": {
+     "nodes": [
+      {
+       "id": "gid://shopify/OrderTransaction/10165563097335",
+       "kind": "REFUND",
+       "status": "SUCCESS",
+       "gateway": "bogus",
+       "test": true,
+       "amountSet": {
+        "presentmentMoney": {
+         "amount": "3.0",
+         "currencyCode": "USD"
+        }
+       },
+       "parentTransaction": {
+        "id": "gid://shopify/OrderTransaction/10162809569527"
+       }
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    }
+   },
+   {
+    "id": "gid://shopify/Refund/1123042066679",
+    "note": "MS-SHIP-E2 feasibility shipping refund (test order)",
+    "createdAt": "2026-10-15T08:08:37Z",
+    "processedAt": "2026-10-15T08:08:37Z",
+    "order": {
+     "id": "gid://shopify/Order/8078035452151"
+    },
+    "totalRefundedSet": {
+     "presentmentMoney": {
+      "amount": "8.0",
+      "currencyCode": "USD"
+     }
+    },
+    "duties": [],
+    "refundShippingLines": {
+     "nodes": [
+      {
+       "subtotalAmountSet": {
+        "presentmentMoney": {
+         "amount": "8.0",
+         "currencyCode": "USD"
+        }
+       },
+       "taxAmountSet": {
+        "presentmentMoney": {
+         "amount": "0.0",
+         "currencyCode": "USD"
+        }
+       }
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "refundLineItems": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "orderAdjustments": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "transactions": {
+     "nodes": [
+      {
+       "id": "gid://shopify/OrderTransaction/10165555003639",
+       "kind": "REFUND",
+       "status": "SUCCESS",
+       "gateway": "bogus",
+       "test": true,
+       "amountSet": {
+        "presentmentMoney": {
+         "amount": "8.0",
+         "currencyCode": "USD"
+        }
+       },
+       "parentTransaction": {
+        "id": "gid://shopify/OrderTransaction/10162807013623"
+       }
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    }
+   },
+   {
+    "id": "gid://shopify/Refund/1122917253367",
+    "note": "MS-SHIP-E1 feasibility shipping refund (test order)",
+    "createdAt": "2026-10-14T15:11:40Z",
+    "processedAt": "2026-10-14T15:11:40Z",
+    "order": {
+     "id": "gid://shopify/Order/8077992820983"
+    },
+    "totalRefundedSet": {
+     "presentmentMoney": {
+      "amount": "8.0",
+      "currencyCode": "USD"
+     }
+    },
+    "duties": [],
+    "refundShippingLines": {
+     "nodes": [
+      {
+       "subtotalAmountSet": {
+        "presentmentMoney": {
+         "amount": "8.0",
+         "currencyCode": "USD"
+        }
+       },
+       "taxAmountSet": {
+        "presentmentMoney": {
+         "amount": "0.0",
+         "currencyCode": "USD"
+        }
+       }
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "refundLineItems": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "orderAdjustments": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "transactions": {
+     "nodes": [
+      {
+       "id": "gid://shopify/OrderTransaction/10162755731703",
+       "kind": "REFUND",
+       "status": "SUCCESS",
+       "gateway": "bogus",
+       "test": true,
+       "amountSet": {
+        "presentmentMoney": {
+         "amount": "8.0",
+         "currencyCode": "USD"
+        }
+       },
+       "parentTransaction": {
+        "id": "gid://shopify/OrderTransaction/10162742067447"
+       }
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    }
+   },
+   {
+    "id": "gid://shopify/Refund/1120895828215",
+    "note": null,
+    "createdAt": "2026-10-04T20:17:42Z",
+    "processedAt": "2026-10-04T20:17:42Z",
+    "order": {
+     "id": "gid://shopify/Order/8051362136311"
+    },
+    "totalRefundedSet": {
+     "presentmentMoney": {
+      "amount": "0.0",
+      "currencyCode": "USD"
+     }
+    },
+    "duties": [],
+    "refundShippingLines": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "refundLineItems": {
+     "nodes": [
+      {
+       "id": "gid://shopify/RefundLineItem/825355272439"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355305207"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355337975"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355370743"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355403511"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355436279"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355469047"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355501815"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355534583"
+      },
+      {
+       "id": "gid://shopify/RefundLineItem/825355567351"
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": true
+     }
+    },
+    "orderAdjustments": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "transactions": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    }
+   },
+   {
+    "id": "gid://shopify/Refund/1120894320887",
+    "note": "Scenario5A controlled USD1 monetary-only refund; no merchandise/refund-line/restock changes",
+    "createdAt": "2026-10-04T19:48:00Z",
+    "processedAt": "2026-10-04T19:48:00Z",
+    "order": {
+     "id": "gid://shopify/Order/8051306299639"
+    },
+    "totalRefundedSet": {
+     "presentmentMoney": {
+      "amount": "1.0",
+      "currencyCode": "USD"
+     }
+    },
+    "duties": [],
+    "refundShippingLines": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "refundLineItems": {
+     "nodes": [],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "orderAdjustments": {
+     "nodes": [
+      {
+       "id": "gid://shopify/OrderAdjustment/448368279799"
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    },
+    "transactions": {
+     "nodes": [
+      {
+       "id": "gid://shopify/OrderTransaction/10119494467831",
+       "kind": "REFUND",
+       "status": "SUCCESS",
+       "gateway": "manual",
+       "test": false,
+       "amountSet": {
+        "presentmentMoney": {
+         "amount": "1.0",
+         "currencyCode": "USD"
+        }
+       },
+       "parentTransaction": {
+        "id": "gid://shopify/OrderTransaction/10119492403447"
+       }
+      }
+     ],
+     "pageInfo": {
+      "hasNextPage": false
+     }
+    }
+   }
+  ]
+ },
+ "nodeChecks": [
+  {
+   "requestedId": "gid://shopify/Refund/1123042787575",
+   "nodeId": "gid://shopify/Refund/1123042787575",
+   "orderOk": true,
+   "hasNextPages": {
+    "refundShippingLines": false,
+    "refundLineItems": false,
+    "orderAdjustments": false,
+    "transactions": false
+   },
+   "dutiesArray": true
+  },
+  {
+   "requestedId": "gid://shopify/Refund/1123042066679",
+   "nodeId": "gid://shopify/Refund/1123042066679",
+   "orderOk": true,
+   "hasNextPages": {
+    "refundShippingLines": false,
+    "refundLineItems": false,
+    "orderAdjustments": false,
+    "transactions": false
+   },
+   "dutiesArray": true
+  },
+  {
+   "requestedId": "gid://shopify/Refund/1122917253367",
+   "nodeId": "gid://shopify/Refund/1122917253367",
+   "orderOk": true,
+   "hasNextPages": {
+    "refundShippingLines": false,
+    "refundLineItems": false,
+    "orderAdjustments": false,
+    "transactions": false
+   },
+   "dutiesArray": true
+  },
+  {
+   "requestedId": "gid://shopify/Refund/1120895828215",
+   "nodeId": "gid://shopify/Refund/1120895828215",
+   "orderOk": true,
+   "hasNextPages": {
+    "refundShippingLines": false,
+    "refundLineItems": true,
+    "orderAdjustments": false,
+    "transactions": false
+   },
+   "dutiesArray": true
+  },
+  {
+   "requestedId": "gid://shopify/Refund/1120894320887",
+   "nodeId": "gid://shopify/Refund/1120894320887",
+   "orderOk": true,
+   "hasNextPages": {
+    "refundShippingLines": false,
+    "refundLineItems": false,
+    "orderAdjustments": false,
+    "transactions": false
+   },
+   "dutiesArray": true
+  }
+ ],
+ "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel"
+}

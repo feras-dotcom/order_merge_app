@@ -1,0 +1,68 @@
+{
+ "experiment": "G-READBACK/GA-A",
+ "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "document": {
+  "name": "Q-RECONCILE",
+  "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+  "text": "query ShippingRefundReconcile($source: ID!) {\n  order(id: $source) {\n    id\n    cancelledAt\n    closed\n    displayFinancialStatus\n    currencyCode\n    totalRefundedSet { presentmentMoney { amount currencyCode } }\n    totalRefundedShippingSet { presentmentMoney { amount currencyCode } }\n    refunds(first: 50) {\n      id\n      note\n      createdAt\n      processedAt\n      totalRefundedSet { presentmentMoney { amount currencyCode } }\n    }\n    transactions(first: 50) {\n      id\n      kind\n      status\n      gateway\n      test\n      amountSet { presentmentMoney { amount currencyCode } }\n      parentTransaction { id }\n    }\n  }\n}"
+ },
+ "variables": {
+  "source": "gid://shopify/Order/8051362136311"
+ },
+ "verdict": "PASS",
+ "response": {
+  "order": {
+   "id": "gid://shopify/Order/8051362136311",
+   "cancelledAt": null,
+   "closed": false,
+   "displayFinancialStatus": "PAID",
+   "currencyCode": "USD",
+   "totalRefundedSet": {
+    "presentmentMoney": {
+     "amount": "0.0",
+     "currencyCode": "USD"
+    }
+   },
+   "totalRefundedShippingSet": {
+    "presentmentMoney": {
+     "amount": "0.0",
+     "currencyCode": "USD"
+    }
+   },
+   "refunds": [
+    {
+     "id": "gid://shopify/Refund/1120895828215",
+     "note": null,
+     "createdAt": "2026-10-04T20:17:42Z",
+     "processedAt": "2026-10-04T20:17:42Z",
+     "totalRefundedSet": {
+      "presentmentMoney": {
+       "amount": "0.0",
+       "currencyCode": "USD"
+      }
+     }
+    }
+   ],
+   "transactions": [
+    {
+     "id": "gid://shopify/OrderTransaction/10119580254455",
+     "kind": "SALE",
+     "status": "SUCCESS",
+     "gateway": "manual",
+     "test": false,
+     "amountSet": {
+      "presentmentMoney": {
+       "amount": "10.0",
+       "currencyCode": "USD"
+      }
+     },
+     "parentTransaction": null
+    }
+   ]
+  }
+ },
+ "refundCount": 1,
+ "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel"
+}

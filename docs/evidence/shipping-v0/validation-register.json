@@ -1,0 +1,135 @@
+{
+ "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "store": "ordermergetest2.myshopify.com",
+ "apiVersion": "2026-04",
+ "verifiedAppId": "gid://shopify/App/426185785345",
+ "costNote": "shopify app execute returns data only; extensions.cost is not exposed by this channel",
+ "records": [
+  {
+   "name": "Q-APPID",
+   "purpose": "identity",
+   "file": "q-appid-identity.json",
+   "sha256": "616d5da0b45467c102c60e368a7f339fbbb4b2f7f68a5d145c50c2c8175caf16",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECHECK",
+   "purpose": "cancelled_secondary",
+   "file": "q-recheck-cancelled_secondary.json",
+   "sha256": "56d35112e5308721d82124fad1f80fe99a9ef711e7c7377426cef6879cefb12b",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "no_refunds",
+   "file": "q-reconcile-no_refunds.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "with_refund_e6",
+   "file": "q-reconcile-with_refund_e6.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "base_cancelled",
+   "file": "q-reconcile-base_cancelled.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "e2_cancelled_refund",
+   "file": "q-reconcile-e2_cancelled_refund.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "e1_cancelled_refund",
+   "file": "q-reconcile-e1_cancelled_refund.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "neg_candidate_1104",
+   "file": "q-reconcile-neg_candidate_1104.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "neg_candidate_1099",
+   "file": "q-reconcile-neg_candidate_1099.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-REFUND-DETAIL",
+   "purpose": "five_ids",
+   "file": "q-refund-detail-five_ids.json",
+   "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-REFUND-DETAIL",
+   "purpose": "strict_single",
+   "file": "q-refund-detail-strict_single.json",
+   "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-AGREEMENTS",
+   "purpose": "base_cancelled",
+   "file": "q-agreements-base_cancelled.json",
+   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-AGREEMENTS",
+   "purpose": "pos_e6",
+   "file": "q-agreements-pos_e6.json",
+   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-AGREEMENTS",
+   "purpose": "pos_e2",
+   "file": "q-agreements-pos_e2.json",
+   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-AGREEMENTS",
+   "purpose": "pos_e1",
+   "file": "q-agreements-pos_e1.json",
+   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-AGREEMENTS",
+   "purpose": "neg_1104",
+   "file": "q-agreements-neg_1104.json",
+   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-AGREEMENTS",
+   "purpose": "neg_1099",
+   "file": "q-agreements-neg_1099.json",
+   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+   "verdict": "PASS"
+  },
+  {
+   "name": "G-INTROSPECT",
+   "purpose": "idempotent-directive",
+   "file": "introspect-idempotent.json",
+   "sha256": "82d436555817c4f9e34ec319f433907e78bb4bb0964142a0a42ca60f18ba07c3",
+   "verdict": "PASS"
+  }
+ ]
+}

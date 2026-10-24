@@ -1,0 +1,33 @@
+{
+ "experiment": "G-INTROSPECT",
+ "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "document": {
+  "sha256": "82d436555817c4f9e34ec319f433907e78bb4bb0964142a0a42ca60f18ba07c3",
+  "text": "query {\n  __schema {\n    directives { name locations args { name type { kind name ofType { kind name ofType { kind name } } } } }\n  }\n}"
+ },
+ "result": [
+  {
+   "name": "idempotent",
+   "locations": [
+    "FIELD"
+   ],
+   "args": [
+    {
+     "name": "key",
+     "type": {
+      "kind": "NON_NULL",
+      "name": null,
+      "ofType": {
+       "kind": "SCALAR",
+       "name": "String",
+       "ofType": null
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "verdict": "PASS"
+}

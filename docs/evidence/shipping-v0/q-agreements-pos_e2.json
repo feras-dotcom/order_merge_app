@@ -1,0 +1,56 @@
+{
+ "experiment": "G-READBACK/GA-A",
+ "runAtUtc": "2026-10-24T14:50:30.628Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "document": {
+  "name": "Q-AGREEMENTS",
+  "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+  "text": "query ShippingRefundAgreements($source: ID!, $after: String) {\n  order(id: $source) {\n    agreements(first: 50, after: $after) {\n      nodes {\n        __typename\n        id\n        happenedAt\n        reason\n        app { id }\n        ... on RefundAgreement {\n          refund { id }\n        }\n      }\n      pageInfo { hasNextPage endCursor }\n    }\n  }\n}"
+ },
+ "variables": {
+  "source": "gid://shopify/Order/8078035452151"
+ },
+ "verdict": "PASS",
+ "response": [
+  {
+   "__typename": "OrderAgreement",
+   "id": "gid://shopify/SalesAgreement/8641726841079",
+   "happenedAt": "2026-10-14T15:30:08Z",
+   "reason": "ORDER",
+   "app": {
+    "id": "gid://shopify/App/580111"
+   }
+  },
+  {
+   "__typename": "RefundAgreement",
+   "id": "gid://shopify/SalesAgreement/8643474391287",
+   "happenedAt": "2026-10-15T08:08:37Z",
+   "reason": "REFUND",
+   "app": {
+    "id": "gid://shopify/App/426185785345"
+   },
+   "refund": {
+    "id": "gid://shopify/Refund/1123042066679"
+   }
+  }
+ ],
+ "pages": 1,
+ "pageComplete": true,
+ "costMeasurement": "shopify app execute returns data only; extensions.cost is not exposed by this channel",
+ "verifiedAppId": "gid://shopify/App/426185785345",
+ "refundAgreements": [
+  {
+   "__typename": "RefundAgreement",
+   "id": "gid://shopify/SalesAgreement/8643474391287",
+   "happenedAt": "2026-10-15T08:08:37Z",
+   "reason": "REFUND",
+   "app": {
+    "id": "gid://shopify/App/426185785345"
+   },
+   "refund": {
+    "id": "gid://shopify/Refund/1123042066679"
+   }
+  }
+ ]
+}
