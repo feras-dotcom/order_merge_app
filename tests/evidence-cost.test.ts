@@ -31,6 +31,10 @@ describe("validateCostExtension", () => {
     ["missing actualQueryCost", { cost: { requestedQueryCost: 12, fields: [] } }],
     ["missing fields breakdown", { cost: { requestedQueryCost: 12, actualQueryCost: 2 } }],
     ["fields not array", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: {} } }],
+    ["empty fields breakdown", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [] } }],
+    ["fields entry not object", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [null] } }],
+    ["fields entry missing cost", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ path: ["order"] }] } }],
+    ["fields entry non-numeric actual", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ requestedQueryCost: 3, actualQueryCost: "x" }] } }],
   ])("fails on %s", (_label, ext) => {
     expect(validateCostExtension(ext).ok).toBe(false);
   });
@@ -55,6 +59,10 @@ describe("withinCostLimit / verdictFromCost", () => {
 });
 
 describe("costGateStatus", () => {
+  it("empty verdict collection is UNMEASURED, never PASS", () => {
+    expect(costGateStatus([])).toBe("UNMEASURED");
+  });
+
   const pass = verdictFromCost("A", goodExt());
   const unmeasured = verdictFromCost("B", null);
   const failDoc = verdictFromCost("C", goodExt(999));

@@ -1,119 +1,161 @@
-# G-READBACK cost measurement — safe authorization runbook
+# G-READBACK cost measurement — operator runbook
 
-Status: **pending operator authorization** (one interactive step). Nothing below
-has been executed — the OAuth flow and the app-config push require explicit
-operator approval first.
+Status: **awaiting explicit operator approval for step 6** (the only
+interactive, dev-store-scoped step). Everything before it is local and
+reversible. Verified against Shopify CLI **4.8.0** (`shopify app dev --help`)
+and the current repo tooling — `shopify app config push` is **not** used (it is
+unsupported) and nothing deploys or touches production.
 
-Goal: run the five pinned read-only documents with
-`Shopify-GraphQL-Cost-Debug: 1` on `ordermergetest2.myshopify.com` as the
-**existing** MergeShip app (`client_id 04b77142ce8ad421f49735b05c7d0a86`,
-archived app id `gid://shopify/App/426185785345`), capturing
-`extensions.cost.{requestedQueryCost,actualQueryCost,fields}` per document
-and per agreement page.
+Goal: run the five pinned read-only documents (`Q-APPID`, `Q-RECHECK`,
+`Q-RECONCILE`, `Q-REFUND-DETAIL`, `Q-AGREEMENTS` — exact texts and sha256 from
+`app/lib/shipping-refund-queries.ts`) with `Shopify-GraphQL-Cost-Debug: 1` on
+`ordermergetest2.myshopify.com` as the existing MergeShip app
+(`gid://shopify/App/426185785345`), archiving
+`extensions.cost.{requestedQueryCost,actualQueryCost,fields}` per document and
+per agreement page. Acceptance: `requestedQueryCost <= 500` each.
 
-## Why `shopify app dev` cannot be used as-is
+## Why `shopify app dev --use-localhost`
 
-- `shopify.web.toml` `dev` = `npm exec prisma migrate deploy && npm exec remix
-  vite:dev` — runs migrations at dev startup. Safe **only** if `DATABASE_URL`
-  points at a verified disposable database.
-- `shopify.app.toml` `[build].automatically_update_urls_on_dev = true` —
-  during `dev` the CLI rewrites the app's remote `application_url` and
-  `redirect_urls` to the dev URL and restores them on clean exit.
-- **The flaw found in the earlier proposal:** setting
-  `automatically_update_urls_on_dev = false` keeps the configured callback at
-  the Railway URL, so OAuth would complete against the *deployed* app and the
-  session would land in the **production** database — the opposite of what we
-  need. The URL update is *required* to route OAuth to the isolated instance.
+- Officially supported, development-store-scoped preview. The CLI runs the app
+  locally behind a local HTTPS proxy and gives the **dev store** a preview URL.
+- The app uses Shopify-managed embedded auth with token exchange; a dev
+  preview exercises the **real** authentication flow — no `/auth/login`
+  guesses. With the app already installed on the store, opening the preview
+  issues/refreshes an **expiring offline token** stored by
+  `PrismaSessionStorage` in whatever `DATABASE_URL` points at — here, the
+  disposable database created below.
+- `shopify.web.toml` runs `npm exec prisma migrate deploy` at dev start, so
+  `DATABASE_URL` isolation (step 3) is what makes it safe — migrations land in
+  the disposable database only.
+- GraphiQL option evaluated: the dev preview's Admin GraphiQL is convenient
+  for spot reads but **cannot attach the `Shopify-GraphQL-Cost-Debug` header**,
+  so it cannot produce the required field-level breakdown. The runner's token
+  channel remains the measurement path. (If the dev GraphiQL happens to show
+  `extensions.cost` anyway, treat it as a cross-check only.)
 
-## Recommended procedure (Plan B — explicit, minimal blast radius)
+## Steps
 
-One additive remote change (an extra redirect URL), zero URL flapping, no
-`prisma migrate deploy` inside any `shopify dev` hook — we run it ourselves
-against a preflighted disposable DB.
+### 1. Create the disposable database (loopback only)
 
-**Step 1 — disposable database preflight**
-
-```bash
-# fresh disposable Postgres (or reuse an existing marked disposable DB)
-node scripts/test-db-provision.ts --name mergeship_cost_readback --fingerprint mergeship_cost_readback@<host>:<port>
-node scripts/test-db-provision.ts --confirm-db mergeship_cost_readback --fingerprint mergeship_cost_readback@<host>:<port>
-export DATABASE_URL=postgresql://postgres:<pw>@127.0.0.1:<port>/mergeship_cost_readback
-# verify: host must be loopback/172.x disposable, never Railway
-npx prisma migrate deploy          # runs ONLY against the disposable DB
-```
-
-**Step 2 — additive redirect via isolated config (operator runs)**
-
-`shopify.app.readback.toml` = copy of `shopify.app.toml` with:
-
-```toml
-[auth]
-redirect_urls = [
-  "https://upbeat-reflection-production.up.railway.app/auth/callback",
-  "http://localhost:3000/auth/callback",          # added — enables local OAuth
-]
-[build]
-automatically_update_urls_on_dev = false          # CLI must NOT flip URLs
-```
-
-`application_url` stays the Railway value → production embedding unchanged.
-The only remote change is one extra allowed redirect.
+Requires a local Postgres the provisioner can reach (e.g. the docker postgres
+used for test suites, bound to `127.0.0.1`). Pick a fresh operator token.
 
 ```bash
-shopify app config push --config readback         # operator: pushes the additive redirect
+export MERGESHIP_SHADOW_TOKEN=<fresh-random-token>   # operator's shell only
+npx vite-node --script scripts/test-db-provision.ts \
+  --server postgresql://postgres:<pw>@127.0.0.1:<port>/postgres \
+  --name mergeship_test_cost_readback
+# prints a live fingerprint like mergeship_test_cost_readback@172.17.0.x:5432
+npx vite-node --script scripts/test-db-provision.ts \
+  --server postgresql://postgres:<pw>@127.0.0.1:<port>/postgres \
+  --name mergeship_test_cost_readback \
+  --confirm-db <exact fingerprint from previous output>
 ```
 
-**Step 3 — local server + OAuth (operator, one browser action)**
+The provisioner creates, disposable-marks and **migrates** the database itself.
+Verification: `psql` → `obj_description('mergeship_test_cost_readback')`
+carries `mergeship-shadow-disposable:<token>`.
+
+### 2. Confirm no production path
 
 ```bash
-DATABASE_URL=<disposable url from step 1> npx remix vite:dev   # port 3000
-# browser: http://localhost:3000/auth/login?shop=ordermergetest2.myshopify.com
+echo "$DATABASE_URL"        # must be UNSET or the disposable URL — never Railway/railway.app
+export DATABASE_URL=postgresql://postgres:<pw>@127.0.0.1:<port>/mergeship_test_cost_readback
 ```
 
-The app's `auth.login` route starts OAuth for that shop; Shopify validates the
-`localhost` redirect (allowed by step 2); the callback writes the session row
-`offline_ordermergetest2.myshopify.com` into the **disposable** DB. The app is
-already installed on the store, so approval is typically a single click.
+### 3. Environment isolation
 
-**Step 4 — token retrieval + cost run (agent, no token exposure)**
+Only the dev shell gets: `DATABASE_URL` (disposable). `SHOPIFY_APP_URL` and the
+API key/secret are injected by `shopify app dev` — do **not** set them. `.env`
+contains only `BYPASS_BILLING` (unaffected).
 
-Read `accessToken` from the disposable DB's `Session` row locally; export it
-to an env var (e.g. `MERGESHIP_READBACK_TOKEN`), then:
+### 4. STOP — operator approval
+
+The next command changes a transient dev-preview URL on the app (auto-reverted
+on clean exit) and performs dev-store authentication. Requires explicit
+operator go-ahead.
+
+### 5. Dev preview on the dev store (operator runs)
 
 ```bash
-SHIPRB_TOKEN_ENV=MERGESHIP_READBACK_TOKEN npx vite-node --script scripts/shipping-refund-readback.ts
+cd <repo root>
+shopify app dev --use-localhost --localhost-port 3000 -s ordermergetest2.myshopify.com
+# first run may prompt: shopify app dev --install-mkcert (local HTTPS proxy cert)
 ```
 
-The runner's token channel: refuses stores other than `ordermergetest2`,
-refuses any document containing `mutation`, re-verifies `currentAppInstallation
-.app.id === gid://shopify/App/426185785345` before any order read, sends
-`Shopify-GraphQL-Cost-Debug: 1`, and records `extensions.cost` per document and
-per agreement page. The token never appears in output or artifacts.
+- `--use-localhost` is supported in CLI 4.8.0 — a local HTTPS proxy, no
+  third-party tunnel.
+- `automatically_update_urls_on_dev = true` (current config) lets the CLI point
+  the app's preview URL at `https://localhost:3000` **for the duration of the
+  session** and restores it on exit. This is transient and dev-store-scoped;
+  it is the supported mechanism that routes the auth flow into the local app.
+- The CLI prints the preview link. Open it (or `https://localhost:3000` +
+  select the store) — the app's embedded auth runs; since the app is already
+  installed on `ordermergetest2`, expect a silent session refresh or a single
+  approval click.
 
-**Step 5 — rollback**
+### 6. Verify the offline session (agent, read-only on disposable DB)
+
+```sql
+SELECT id, shop, "isOnline", expires, scope FROM "Session";
+-- expect: id = 'offline_ordermergetest2.myshopify.com', isOnline = false,
+--         scope = app's configured scopes, accessToken present.
+```
+
+Belonging check is hard-enforced by the runner itself: it refuses unless the
+token yields `currentAppInstallation.app.id === gid://shopify/App/426185785345`
+and the store is `ordermergetest2.myshopify.com`.
+
+### 7. Run the cost measurement (agent)
 
 ```bash
-shopify app config push                            # restores committed toml exactly
-# drop mergeship_cost_readback; remove the env var
+# token read from the disposable Session row into an env var — never printed
+export MERGESHIP_READBACK_TOKEN=<accessToken value>
+SHIPRB_TOKEN_ENV=MERGESHIP_READBACK_TOKEN \
+  npx vite-node --script scripts/shipping-refund-readback.ts
 ```
 
-## Side effects, scoped and reversible
+Runner behaviour on this channel: refuses non-`ordermergetest2` stores; refuses
+any document containing `mutation`; verifies app identity before any order
+read; sends `Shopify-GraphQL-Cost-Debug: 1`; archives `extensions.cost`
+per document and per agreement page; the register computes `costGate`
+(PASS/FAIL/UNMEASURED — missing data is never a pass). The token is never
+written to output or evidence.
+
+Note: token-exchange sessions can be **expiring** — run promptly after step 5;
+if the token is rejected, reopen the dev preview to refresh it.
+
+### 8. Cleanup
+
+```bash
+# Ctrl+C the dev process — CLI restores the app's configured URLs on exit.
+# verify: git diff shopify.app.toml  → must be empty
+# drop mergeship_test_cost_readback; unset MERGESHIP_READBACK_TOKEN DATABASE_URL
+```
+
+## Expected outcomes
+
+- `docs/evidence/shipping-v0/` artifacts now carry `cost` objects;
+  `validation-register.json` reports `costVerdicts` per document and page and
+  `costGate: PASS` iff every `requestedQueryCost <= 500`.
+- Any document over 500: report verbatim; do **not** edit the pinned text —
+  over-limit is evidence, not an error to hide.
+
+## Rollback / side-effect ledger
 
 | Effect | Scope | Revert |
 |---|---|---|
-| Extra `localhost` redirect in app config | app config; inert for production OAuth (that flow uses the Railway redirect) | `config push` of stock toml |
-| Session row `offline_ordermergetest2` | disposable DB only | drop DB |
-| `prisma migrate deploy` | disposable DB only (preflighted; loopback verified) | drop DB |
-| Dev-store app open during OAuth | store admin only; app already installed | none needed |
+| Preview URL pointed at localhost proxy | app dev config, transient | auto-restored on dev exit; `git diff` of toml stays empty |
+| `prisma migrate deploy` | disposable DB only | drop DB |
+| `offline_*` Session row | disposable DB only | drop DB |
+| mkcert local CA | operator machine | `shopify app dev` docs / OS cert store removal |
 
 ## Remaining uncertainty
 
-- Whether Shopify presents an install/approve dialog on re-OAuth (app already
-  installed — usually a single click or silent refresh).
-- `config push` scope granularity: it pushes the whole config file; keeping
-  `application_url` at the Railway value makes it safe.
-- Fallback if step 2 is refused: Plan A — stock toml +
-  `shopify app dev --use-localhost -s ordermergetest2.myshopify.com` with
-  `DATABASE_URL` set to the disposable DB; transient remote URL update,
-  auto-reverted on clean exit (hard-kill leaves localhost URLs — restore via
-  `config push`).
+- Re-auth UX on an already-installed dev store (usually silent, may be one
+  approval click).
+- Whether `shopify dev` on this CLI version writes its own `offline_` session
+  row on preview open vs. requiring an explicit app open — the session check
+  in step 6 answers it either way.
+- Offline-token lifetime under token exchange: unknown until observed; the
+  runner fails closed on a rejected token.

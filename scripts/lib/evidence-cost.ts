@@ -46,8 +46,20 @@ export function validateCostExtension(extensions: unknown): CostCheck {
     return { ok: false, reason: `actualQueryCost not numerical: ${JSON.stringify(c.actualQueryCost)}` };
   }
   const fields = c.fields;
-  if (!Array.isArray(fields)) {
-    return { ok: false, reason: "extensions.cost.fields absent — field-level debug breakdown missing" };
+  if (!Array.isArray(fields) || fields.length === 0) {
+    return { ok: false, reason: "extensions.cost.fields absent or empty — field-level debug breakdown missing" };
+  }
+  for (const [i, f] of fields.entries()) {
+    if (!f || typeof f !== "object" || Array.isArray(f)) {
+      return { ok: false, reason: `fields[${i}] is not an object` };
+    }
+    const fe = f as Record<string, unknown>;
+    if (!isNum(fe.requestedQueryCost)) {
+      return { ok: false, reason: `fields[${i}].requestedQueryCost not numerical` };
+    }
+    if (fe.actualQueryCost !== undefined && !isNum(fe.actualQueryCost)) {
+      return { ok: false, reason: `fields[${i}].actualQueryCost not numerical` };
+    }
   }
   return {
     ok: true,
@@ -101,6 +113,7 @@ export function verdictFromCost(document: string, extensions: unknown): Document
  */
 export function costGateStatus(verdicts: readonly DocumentCostVerdict[]): "PASS" | "FAIL" | "UNMEASURED" {
   const all = verdicts.flatMap((v) => [v, ...(v.pages ?? [])]);
+  if (all.length === 0) return "UNMEASURED"; // an empty collection is never a pass
   if (all.some((v) => v.status === "FAIL")) return "FAIL";
   if (all.some((v) => v.status === "UNMEASURED")) return "UNMEASURED";
   return "PASS";
