@@ -18,7 +18,7 @@
 // Env: SHIPRB_STORE (default ordermergetest2.myshopify.com), SHIPRB_VERSION
 // (default 2026-04), SHIPRB_OUT (default docs/evidence/shipping-v0).
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   Q_APPID, Q_RECHECK, Q_RECONCILE, Q_REFUND_DETAIL, Q_AGREEMENTS,
@@ -26,6 +26,7 @@ import {
   validateRefundDetailResponse, validateAgreementsPage,
 } from "../app/lib/shipping-refund-queries";
 import { buildManifestLines, MANIFEST_NAME } from "./lib/evidence-manifest";
+import { verdictFromCost, costGateStatus, type DocumentCostVerdict } from "./lib/evidence-cost";
 
 const STORE = process.env.SHIPRB_STORE ?? "ordermergetest2.myshopify.com";
 const VERSION = process.env.SHIPRB_VERSION ?? "2026-04";
@@ -41,6 +42,11 @@ const execQuery = async (
   doc: { name: string; document: string },
   variables?: Record<string, unknown>,
 ): Promise<ExecResult> => {
+  // Read-only boundary (3.2 rule 9): refuse any document containing a
+  // mutation operation, on either channel, before it reaches the wire.
+  if (/\bmutation\b/.test(doc.document)) {
+    throw new Error(`refusing non-read-only document ${doc.name}: contains 'mutation'`);
+  }
   if (TOKEN_ENV) {
     const token = process.env[TOKEN_ENV];
     if (!token) throw new Error(`${TOKEN_ENV} is not set`);
@@ -136,8 +142,17 @@ const costNote = TOKEN_ENV
   : "shopify app execute returns data only; extensions.cost is not exposed by this channel";
 const hasErrors = (r: ExecResult | null) => Array.isArray(r?.errors) && (r!.errors as unknown[]).length > 0;
 
+// Hard safety boundary for the token channel: before ANY order query runs,
+// the target must be the approved development store and Q-APPID must return
+// the independently archived MergeShip app id. Any mismatch aborts the run.
+const EXPECTED_STORE = "ordermergetest2.myshopify.com";
+const EXPECTED_APP_GID = "gid://shopify/App/426185785345";
+
 async function main() {
   mkdirSync(OUT, { recursive: true });
+  if (TOKEN_ENV && STORE !== EXPECTED_STORE) {
+    throw new Error(`refusing token-channel run against ${STORE} — only ${EXPECTED_STORE} is approved`);
+  }
 
   // ── Q-APPID ────────────────────────────────────────────────────────────────
   let appId = "";
@@ -147,6 +162,9 @@ async function main() {
     appId = v.ok ? v.appId! : "";
     rec(Q_APPID, "identity", undefined, r, v.ok && !hasErrors(r) ? "PASS" : `FAIL: ${v.ok ? "top-level errors" : v.reason}`);
   } catch (e) { rec(Q_APPID, "identity", undefined, null, fail(e)); }
+  if (TOKEN_ENV && appId !== EXPECTED_APP_GID) {
+    throw new Error(`refusing order reads: app identity ${appId || "(none)"} != expected ${EXPECTED_APP_GID}`);
+  }
 
   // ── Q-RECHECK: cancelled secondary (BASE) + PAID primary ───────────────────
   try {
@@ -218,7 +236,7 @@ async function main() {
         const v = hasErrors(r)
           ? { ok: false as const, reason: "top-level errors" }
           : validateAgreementsPage({ data: r.data }, { sourceOrderId: src });
-        pages.push({ page: p + 1, variables: { source: src, after }, validator: v.ok ? "ok" : v.reason, errors: r.errors ?? null, response: r.data });
+        pages.push({ page: p + 1, variables: { source: src, after }, validator: v.ok ? "ok" : v.reason, errors: r.errors ?? null, response: r.data, extensions: r.extensions ?? null });
         if (!v.ok) { vFail = v.reason ?? "validator failure"; break; }
         const pi = (r.data as any)?.order?.agreements?.pageInfo;
         if (pi?.hasNextPage !== true) { completed = pi?.hasNextPage === false; break; }
@@ -226,11 +244,15 @@ async function main() {
       }
       const verdict = vFail ? `FAIL: ${vFail}` : completed ? "PASS" : "INCOMPLETE: 5-page budget exhausted with hasNextPage";
       const nodes = pages.flatMap((p) => p.response?.order?.agreements?.nodes ?? []);
+      // Cost is per-request: every page keeps its own extensions.cost (was
+      // dropped in E-2's flattened fix — retain it here).
+      const pageCosts = pages.map((p) => ({ page: p.page, verdict: p.validator, cost: p.extensions?.cost ?? null }));
       rec(Q_AGREEMENTS, purpose, { source: src }, null, verdict, {
         pagesScanned: pages.length, pageComplete: completed, verifiedAppId: appId,
         agreementNodes: nodes,
         refundAgreements: nodes.filter((a: any) => a.__typename === "RefundAgreement"),
         rawPages: pages, // sanitized per-page responses incl. pageInfo (E-2)
+        costPerPage: pageCosts, // per-request cost retention
       });
     } catch (e) { rec(Q_AGREEMENTS, purpose, { source: src }, null, fail(e)); }
   }
@@ -263,10 +285,38 @@ async function main() {
     records.push({ name: "Q-EVENTS-BASE", purpose: "base-cancel-provenance", file: "base-cancel-events.json", sha256: sha256Hex(doc.document), verdict: hasErrors(r) ? "FAIL" : "PASS" });
   } catch (e) { records.push({ name: "Q-EVENTS-BASE", purpose: "base-cancel-provenance", file: "base-cancel-events.json", verdict: fail(e) }); }
 
+  // ── Cost gate (12.1.2): per document and per agreement page ───────────────
+  // UNMEASURED is never a pass: absent extensions fail the gate.
+  const costVerdicts: DocumentCostVerdict[] = records
+    .filter((r) => r.name !== "G-INTROSPECT" && r.name !== "Q-EVENTS-BASE")
+    .map((r) => {
+      try {
+        const artifact = JSON.parse(readFileSync(join(OUT, r.file), "utf8"));
+        if (r.name === "Q-AGREEMENTS") {
+          const pageVerdicts = (artifact.costPerPage ?? []).map((p: any) =>
+            verdictFromCost(`${r.name}-p${p.page}`, { cost: p.cost }));
+          const doc: DocumentCostVerdict = {
+            document: r.name, measured: pageVerdicts.every((v: DocumentCostVerdict) => v.measured),
+            requestedQueryCost: pageVerdicts.map((v: DocumentCostVerdict) => v.requestedQueryCost).filter((n): n is number => n !== null).reduce((a, b) => a + b, 0) || null,
+            actualQueryCost: pageVerdicts.map((v: DocumentCostVerdict) => v.actualQueryCost).filter((n): n is number => n !== null).reduce((a, b) => a + b, 0) || null,
+            withinThreshold: pageVerdicts.every((v: DocumentCostVerdict) => v.withinThreshold === true) ? true : null,
+            pages: pageVerdicts,
+            status: pageVerdicts.every((v: DocumentCostVerdict) => v.measured && v.withinThreshold) ? "PASS"
+              : pageVerdicts.every((v: DocumentCostVerdict) => v.measured) ? "FAIL" : "UNMEASURED",
+          };
+          return doc;
+        }
+        return verdictFromCost(r.name, artifact.cost ? { cost: artifact.cost } : artifact.extensions ?? null);
+      } catch {
+        return verdictFromCost(r.name, null);
+      }
+    });
+  const gate = costGateStatus(costVerdicts);
+
   // ── Register first, manifest LAST over every intended artifact (E-3) ──────
   writeArtifact("validation-register.json", {
     runAtUtc: RUN, store: STORE, apiVersion: VERSION, channel: CHANNEL, verifiedAppId: appId,
-    costNote, records,
+    costNote, costGate: gate, costVerdicts, records,
   });
   const files = [...written, "README.md"].filter((f, i, a) => a.indexOf(f) === i);
   writeFileSync(join(OUT, MANIFEST_NAME), buildManifestLines(OUT, files).join("\n") + "\n");
