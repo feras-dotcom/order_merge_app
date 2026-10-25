@@ -53,15 +53,28 @@
       rel="stylesheet"
       href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css"
     />
+    <script>
+      document.documentElement.classList.add("has-js");
+      try {
+        if (
+          !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ) {
+          document.documentElement.classList.add(
+            sessionStorage.getItem("ms-intro") === "1"
+              ? "intro-seen"
+              : "intro-pending",
+          );
+        }
+      } catch (error) {
+        document.documentElement.classList.add("intro-pending");
+      }
+    </script>
+    <link rel="preload" as="image" href="/brand/logo-180.png" />
     <link rel="preload" as="image" href="/brand/logo-64.png" />
-    <link
-      rel="preload"
-      as="image"
-      href="/assets/media/combined-order-960.jpg"
-      imagesrcset="/assets/media/combined-order-960.jpg 960w, /assets/media/combined-order-1440.jpg 1440w"
-      imagesizes="(max-width: 1040px) calc(100vw - 40px), 960px"
-    />
-    <link rel="stylesheet" href="/site.css?v=guides-20261014" />
+    <link rel="preload" as="image" href="/assets/media/product-hoodie.png" />
+    <link rel="preload" as="image" href="/assets/media/product-tote.png" />
+    <link rel="stylesheet" href="/site.css?v=motion-20261025" />
+    <link rel="stylesheet" href="/home.css?v=motion-20261025" />
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -115,6 +128,25 @@
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
 
+    <div class="intro" hidden>
+      <div class="intro-backdrop"></div>
+      <div class="intro-lockup">
+        <img
+          class="intro-mark"
+          src="/brand/logo-180.png"
+          alt=""
+          width="180"
+          height="180"
+        />
+        <span class="intro-word"
+          ><span class="intro-word-inner"
+            >Merge<span class="brand-accent">Ship</span></span
+          ></span
+        >
+      </div>
+      <button class="intro-skip" type="button">Skip intro</button>
+    </div>
+
     <header class="site-header" data-header>
       <div class="shell header-row">
         <a class="brand" href="/" aria-label="MergeShip home">
@@ -122,14 +154,36 @@
           <span>Merge<span class="brand-accent">Ship</span></span>
         </a>
 
-        <nav class="primary-nav" aria-label="Primary navigation">
+        <nav
+          class="primary-nav"
+          id="primary-nav"
+          aria-label="Primary navigation"
+          hidden
+        >
           <a href="#how-it-works">How it works</a>
           <a href="#use-cases">Use cases</a>
           <a href="#pricing">Pricing</a>
           <a href="#faq">FAQ</a>
           <a href="/demo">Demo</a>
           <a href="/guides">Guides</a>
+          <a
+            class="button button-small nav-cta"
+            href="https://apps.shopify.com/mergeship"
+            data-analytics-event="shopify_cta"
+            data-analytics-location="header_nav"
+            >Try free for 30 days</a
+          >
         </nav>
+
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="primary-nav"
+          aria-label="Open menu"
+        >
+          <span class="nav-toggle-lines" aria-hidden="true"></span>
+        </button>
 
         <a
           class="button button-small"
@@ -145,105 +199,243 @@
     <main id="main">
       <section class="hero">
         <div class="shell hero-content">
-          <div class="hero-copy" data-reveal>
-            <p class="eyebrow">Automatic order combining for Shopify</p>
-            <h1>Stop shipping the same customer twice.</h1>
-            <p class="hero-lead">
-              MergeShip automatically combines eligible repeat Shopify orders
-              before fulfillment, so repeat checkouts don't create repeat
-              fulfillment work.
-            </p>
-
-            <div class="hero-action">
-              <a
-                class="button button-hero"
-                href="https://apps.shopify.com/mergeship"
-                data-analytics-event="shopify_cta"
-                data-analytics-location="hero"
-              >
-                Try free for 30 days
-                <span aria-hidden="true">↗</span>
-              </a>
-              <p>Install through Shopify. $19/month after trial.</p>
-            </div>
-          </div>
-
-          <div class="hero-media" data-reveal>
-            <div
-              class="video-frame video-frame-hero"
-              id="hero-trailer"
-              data-video-facade
+          <h1 class="hero-title">
+            <span class="w" style="--i: 0"><span>Stop</span></span>
+            <span class="w" style="--i: 1"><span>shipping</span></span>
+            <span class="w" style="--i: 2"><span>the</span></span>
+            <span class="w" style="--i: 3"><span>same</span></span>
+            <span class="w" style="--i: 4"><span>customer</span></span>
+            <span class="w" style="--i: 5"><span>twice.</span></span>
+          </h1>
+          <p class="hero-lead">
+            MergeShip automatically finds eligible repeat Shopify orders and
+            combines them before fulfillment.
+          </p>
+          <div class="hero-actions">
+            <a
+              class="button button-large"
+              href="https://apps.shopify.com/mergeship"
+              data-analytics-event="shopify_cta"
+              data-analytics-location="hero"
+              >Try free for 30 days</a
             >
-              <img
-                src="/assets/media/combined-order-960.jpg"
-                srcset="
-                  /assets/media/combined-order-960.jpg   960w,
-                  /assets/media/combined-order-1440.jpg 1440w
-                "
-                sizes="(max-width: 1040px) calc(100vw - 40px), 960px"
-                alt="MergeShip combining repeat-order items into one order before fulfillment"
-                width="960"
-                height="540"
-                decoding="async"
-                fetchpriority="high"
-              />
-              <div class="video-shade"></div>
-              <button
-                class="video-play"
-                type="button"
-                aria-label="Watch the 24 second MergeShip product trailer"
-                data-video-src="/assets/media/trailer-final.mp4"
-                data-video-title="MergeShip 24 second product trailer"
-              >
-                <span aria-hidden="true">▶</span>
-                <strong>Watch the 24 second trailer</strong>
-              </button>
-              <span class="video-duration">0:24</span>
+            <a class="button button-large button-ghost" href="#how-it-works"
+              >See how it works</a
+            >
+          </div>
+          <p class="hero-facts">
+            Shopify app<span aria-hidden="true">·</span>$19/month after a 30-day
+            free trial<span aria-hidden="true">·</span>Unlimited automatic
+            combines<span aria-hidden="true">·</span>No per-combine fees
+          </p>
+
+          <div class="hero-stage">
+            <div
+              class="stage"
+              data-stage="auto"
+              data-state="orders"
+              aria-label="MergeShip combine demonstration"
+            >
+              <div class="stage-box">
+                <div class="stage-scene">
+                  <p class="stage-label">
+                    <span data-label="orders">Two separate orders</span>
+                    <span data-label="detect">Repeat order detected</span>
+                    <span data-label="check"
+                      >Eligibility checked before anything changes</span
+                    >
+                    <span data-label="combined"
+                      >Combined before fulfillment</span
+                    >
+                  </p>
+                  <svg
+                    class="stage-links"
+                    viewBox="0 0 100 56.25"
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                  >
+                    <path
+                      class="link-a"
+                      pathLength="100"
+                      d="M50 11 C 46 12.5 36 14 25 16"
+                    />
+                    <path
+                      class="link-b"
+                      pathLength="100"
+                      d="M50 11 C 54 12.5 64 14 75 16"
+                    />
+                  </svg>
+                  <div class="customer-chip">Sarah M. · 2 open orders</div>
+
+                  <div class="order-card card-a">
+                    <div class="order-head">
+                      <span class="order-num">#1104</span>
+                      <span class="badge badge-paid">Paid</span>
+                      <span class="badge badge-open b1">Unfulfilled</span>
+                      <span class="badge badge-open b2">Unfulfilled (2)</span>
+                      <span class="badge badge-ready">Ready to fulfill</span>
+                      <span class="order-time">10:02</span>
+                    </div>
+                    <div class="order-items">
+                      <div class="order-item">
+                        <img
+                          class="order-thumb"
+                          src="/assets/media/product-hoodie.png"
+                          alt=""
+                          width="44"
+                          height="44"
+                        />
+                        <span class="item-text">
+                          <span class="item-name">Premium Hoodie</span>
+                          <span class="item-var">Light Blue / M</span>
+                        </span>
+                        <span class="item-price">$84.55</span>
+                      </div>
+                      <div class="order-slot" aria-hidden="true"></div>
+                    </div>
+                  </div>
+
+                  <div class="order-card card-b">
+                    <div class="order-head">
+                      <span class="order-num">#1105</span>
+                      <span class="badge badge-paid">Paid</span>
+                      <span class="badge badge-open b1">Unfulfilled</span>
+                      <span class="badge badge-cancelled b2"
+                        >Cancelled · closed</span
+                      >
+                      <span class="order-time">10:09</span>
+                    </div>
+                    <div class="order-items">
+                      <div class="order-item">
+                        <img
+                          class="order-thumb"
+                          src="/assets/media/product-tote.png"
+                          alt=""
+                          width="44"
+                          height="44"
+                        />
+                        <span class="item-text">
+                          <span class="item-name">Canvas Tote</span>
+                          <span class="item-var">Natural / Navy</span>
+                        </span>
+                        <span class="item-price">$46.55</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="tote-fly order-item" aria-hidden="true">
+                    <img
+                      class="order-thumb"
+                      src="/assets/media/product-tote.png"
+                      alt=""
+                      width="44"
+                      height="44"
+                    />
+                    <span class="item-text">
+                      <span class="item-name">Canvas Tote</span>
+                      <span class="item-var">Natural / Navy</span>
+                    </span>
+                    <span class="item-price">$46.55</span>
+                  </div>
+
+                  <div class="check-panel">
+                    <span class="check-item">Same customer</span>
+                    <span class="check-item"
+                      >Shipping address and method</span
+                    >
+                    <span class="check-item">Paid, open, and unfulfilled</span>
+                    <span class="check-note">+ additional safety checks</span>
+                  </div>
+                </div>
+              </div>
+              <div class="stage-rail" role="group" aria-label="Combine steps">
+                <button
+                  class="stage-step"
+                  type="button"
+                  data-step-target="orders"
+                  aria-pressed="true"
+                >
+                  <em>01</em> Two orders
+                </button>
+                <button
+                  class="stage-step"
+                  type="button"
+                  data-step-target="detect"
+                  aria-pressed="false"
+                >
+                  <em>02</em> Repeat detected
+                </button>
+                <button
+                  class="stage-step"
+                  type="button"
+                  data-step-target="check"
+                  aria-pressed="false"
+                >
+                  <em>03</em> Eligibility checked
+                </button>
+                <button
+                  class="stage-step"
+                  type="button"
+                  data-step-target="combined"
+                  aria-pressed="false"
+                >
+                  <em>04</em> Combined
+                </button>
+                <button class="stage-replay" type="button" hidden>
+                  Replay
+                </button>
+              </div>
             </div>
-            <a class="hero-demo-link" href="/demo">
-              Prefer the full walkthrough? Watch the 4 minute demo
-              <span aria-hidden="true">→</span>
-            </a>
           </div>
         </div>
       </section>
 
-      <aside class="offer-strip" aria-label="MergeShip plan facts">
-        <div class="shell">
-          <ul>
-            <li><strong>30 days</strong><span>Free trial</span></li>
-            <li><strong>$19/mo</strong><span>After trial</span></li>
-            <li><strong>Unlimited</strong><span>Automatic combines</span></li>
-            <li><strong>$0</strong><span>Per combine</span></li>
-          </ul>
-        </div>
-      </aside>
-
-      <section
-        class="use-cases section-pad"
-        id="use-cases"
-        aria-labelledby="use-cases-title"
-      >
-        <div class="shell compact-split">
+      <section class="trailer section-pad" aria-labelledby="trailer-title">
+        <div class="shell trailer-grid">
           <div class="section-heading" data-reveal>
-            <p class="eyebrow">Where repeat orders happen</p>
-            <h2 id="use-cases-title">
-              Built for the moments customers order twice.
-            </h2>
+            <p class="eyebrow">Trailer</p>
+            <h2 id="trailer-title">See a combine happen in 24 seconds.</h2>
             <p>
-              When excitement brings a shopper back to checkout, MergeShip helps
-              keep fulfillment simple.
+              The trailer shows two repeat orders becoming one order that is
+              ready to fulfill. The four-minute demo walks through setup, the
+              combine window, and the safety checks.
             </p>
+            <a class="trailer-link" href="/demo"
+              >Watch the 4 minute demo <span aria-hidden="true">→</span></a
+            >
           </div>
 
-          <ul class="use-case-list" data-reveal>
-            <li>Product drops</li>
-            <li>Preorders</li>
-            <li>Live sales</li>
-            <li>Limited releases</li>
-            <li>Launches</li>
-            <li>Restocks</li>
-          </ul>
+          <div class="video-frame" data-video-facade data-reveal>
+            <img
+              src="/assets/media/combined-order-960.jpg"
+              srcset="
+                /assets/media/combined-order-960.jpg   960w,
+                /assets/media/combined-order-1440.jpg 1440w
+              "
+              sizes="(max-width: 1040px) calc(100vw - 40px), 620px"
+              alt="MergeShip combining repeat-order items into one order before fulfillment"
+              width="960"
+              height="540"
+              loading="lazy"
+              decoding="async"
+            />
+            <div class="video-shade"></div>
+            <button
+              class="video-play"
+              type="button"
+              aria-label="Watch the 24 second MergeShip product trailer"
+              data-video-src="/assets/media/trailer-final.mp4"
+            >
+              <span aria-hidden="true">▶</span>
+              <strong>Watch the 24 second trailer</strong>
+            </button>
+            <span class="video-duration">0:24</span>
+            <noscript
+              ><a class="video-noscript-link" href="/demo"
+                >Watch the demo instead <span aria-hidden="true">→</span></a
+              ></noscript
+            >
+          </div>
         </div>
       </section>
 
@@ -253,125 +445,429 @@
         aria-labelledby="how-title"
       >
         <div class="shell">
-          <div class="section-heading centered" data-reveal>
+          <div class="section-heading" data-reveal>
             <p class="eyebrow">How it works</p>
             <h2 id="how-title">
               Repeat orders are checked before anything changes.
             </h2>
-            <p>
-              Eligible orders are combined. Anything MergeShip cannot verify
-              stays unchanged.
-            </p>
           </div>
 
-          <div class="workflow-surface" data-reveal>
-            <ol class="workflow-main">
-              <li class="workflow-stage workflow-detect">
-                <div class="workflow-title">
-                  <span>01</span>
-                  <h3>Detect</h3>
+          <div class="hiw-grid">
+            <ol class="steps">
+              <li data-step="orders">
+                <div class="step-inner">
+                  <span class="step-num">01</span>
+                  <h3>A customer places more than one order.</h3>
+                  <p>
+                    During a drop, a preorder, or a live sale, the same customer
+                    often checks out twice before the first order ships.
+                  </p>
                 </div>
-                <picture class="workflow-art">
-                  <source
-                    srcset="
-                      /assets/media/image1-720.png  720w,
-                      /assets/media/image1.png     1448w
-                    "
-                    sizes="(max-width: 960px) calc(100vw - 112px), 340px"
-                  />
-                  <img
-                    src="/assets/media/image1-720.png"
-                    alt="Two repeat Shopify orders from the same customer"
-                    width="1448"
-                    height="1086"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </picture>
-                <p>Find repeat orders from the same customer.</p>
               </li>
-
-              <li class="workflow-stage workflow-check">
-                <div class="workflow-title">
-                  <span>02</span>
-                  <h3>Check</h3>
+              <li data-step="detect">
+                <div class="step-inner">
+                  <span class="step-num">02</span>
+                  <h3>MergeShip detects the repeat.</h3>
+                  <p>
+                    Open, paid, unfulfilled orders from the same customer inside
+                    your combine window are flagged as candidates.
+                  </p>
                 </div>
-                <picture class="workflow-art">
-                  <source
-                    srcset="
-                      /assets/media/image2-720.png  720w,
-                      /assets/media/image2.png     1448w
-                    "
-                    sizes="(max-width: 960px) calc(100vw - 112px), 340px"
-                  />
-                  <img
-                    src="/assets/media/image2-720.png"
-                    alt="MergeShip checking customer, shipping, and order eligibility"
-                    width="1448"
-                    height="1086"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </picture>
-                <p>Verify eligibility before either order is changed.</p>
               </li>
-
-              <li class="workflow-stage workflow-combined">
-                <div class="workflow-title">
-                  <span>03</span>
-                  <h3>Combined</h3>
-                  <strong>Checks pass</strong>
+              <li data-step="check">
+                <div class="step-inner">
+                  <span class="step-num">03</span>
+                  <h3>Every candidate is checked before anything changes.</h3>
+                  <p>
+                    Customer, shipping address and method, currency, and
+                    transferable items all have to match. Anything MergeShip
+                    cannot verify stays exactly as it was.
+                  </p>
                 </div>
-                <picture class="workflow-art">
-                  <source
-                    srcset="
-                      /assets/media/image3-720.png  720w,
-                      /assets/media/image3.png     1448w
-                    "
-                    sizes="(max-width: 960px) calc(100vw - 112px), 360px"
-                  />
-                  <img
-                    src="/assets/media/image3-720.png"
-                    alt="Two Shopify orders combined into one primary fulfillment order"
-                    width="1448"
-                    height="1086"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </picture>
-                <p>Move the items into one primary order ready to fulfill.</p>
+              </li>
+              <li data-step="combined">
+                <div class="step-inner">
+                  <span class="step-num">04</span>
+                  <h3>Eligible items are combined before fulfillment.</h3>
+                  <p>
+                    Items move into the oldest eligible order, the extra order
+                    is cancelled and closed, and one order is left to fulfill.
+                  </p>
+                </div>
               </li>
             </ol>
 
-            <aside class="workflow-safety" aria-labelledby="safety-title">
-              <div class="workflow-safety-copy">
-                <span>If a check does not pass</span>
-                <h3 id="safety-title">Left untouched</h3>
-                <p>
-                  If MergeShip cannot verify the pair, both orders stay
-                  unchanged.
-                </p>
+            <div class="stage-col">
+              <div
+                class="stage"
+                data-stage="scroll"
+                data-state="orders"
+                aria-label="MergeShip combine demonstration"
+              >
+                <div class="stage-box">
+                  <div class="stage-scene">
+                    <p class="stage-label">
+                      <span data-label="orders">Two separate orders</span>
+                      <span data-label="detect">Repeat order detected</span>
+                      <span data-label="check"
+                        >Eligibility checked before anything changes</span
+                      >
+                      <span data-label="combined"
+                        >Combined before fulfillment</span
+                      >
+                    </p>
+                    <svg
+                      class="stage-links"
+                      viewBox="0 0 100 56.25"
+                      preserveAspectRatio="none"
+                      aria-hidden="true"
+                    >
+                      <path
+                        class="link-a"
+                        pathLength="100"
+                        d="M50 11 C 46 12.5 36 14 25 16"
+                      />
+                      <path
+                        class="link-b"
+                        pathLength="100"
+                        d="M50 11 C 54 12.5 64 14 75 16"
+                      />
+                    </svg>
+                    <div class="customer-chip">Sarah M. · 2 open orders</div>
+
+                    <div class="order-card card-a">
+                      <div class="order-head">
+                        <span class="order-num">#1104</span>
+                        <span class="badge badge-paid">Paid</span>
+                        <span class="badge badge-open b1">Unfulfilled</span>
+                        <span class="badge badge-open b2">Unfulfilled (2)</span>
+                        <span class="badge badge-ready">Ready to fulfill</span>
+                        <span class="order-time">10:02</span>
+                      </div>
+                      <div class="order-items">
+                        <div class="order-item">
+                          <img
+                            class="order-thumb"
+                            src="/assets/media/product-hoodie.png"
+                            alt=""
+                            width="44"
+                            height="44"
+                          />
+                          <span class="item-text">
+                            <span class="item-name">Premium Hoodie</span>
+                            <span class="item-var">Light Blue / M</span>
+                          </span>
+                          <span class="item-price">$84.55</span>
+                        </div>
+                        <div class="order-slot" aria-hidden="true"></div>
+                      </div>
+                    </div>
+
+                    <div class="order-card card-b">
+                      <div class="order-head">
+                        <span class="order-num">#1105</span>
+                        <span class="badge badge-paid">Paid</span>
+                        <span class="badge badge-open b1">Unfulfilled</span>
+                        <span class="badge badge-cancelled b2"
+                          >Cancelled · closed</span
+                        >
+                        <span class="order-time">10:09</span>
+                      </div>
+                      <div class="order-items">
+                        <div class="order-item">
+                          <img
+                            class="order-thumb"
+                            src="/assets/media/product-tote.png"
+                            alt=""
+                            width="44"
+                            height="44"
+                          />
+                          <span class="item-text">
+                            <span class="item-name">Canvas Tote</span>
+                            <span class="item-var">Natural / Navy</span>
+                          </span>
+                          <span class="item-price">$46.55</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="tote-fly order-item" aria-hidden="true">
+                      <img
+                        class="order-thumb"
+                        src="/assets/media/product-tote.png"
+                        alt=""
+                        width="44"
+                        height="44"
+                      />
+                      <span class="item-text">
+                        <span class="item-name">Canvas Tote</span>
+                        <span class="item-var">Natural / Navy</span>
+                      </span>
+                      <span class="item-price">$46.55</span>
+                    </div>
+
+                    <div class="check-panel">
+                      <span class="check-item">Same customer</span>
+                      <span class="check-item"
+                        >Shipping address and method</span
+                      >
+                      <span class="check-item">Paid, open, and unfulfilled</span>
+                      <span class="check-note">+ additional safety checks</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <picture class="workflow-safety-art">
-                <source
-                  srcset="
-                    /assets/media/image5-720.png   720w,
-                    /assets/media/image5-1200.png 1200w,
-                    /assets/media/image5.png      1672w
-                  "
-                  sizes="(max-width: 680px) calc(100vw - 112px), (max-width: 960px) calc(100vw - 160px), 430px"
-                />
-                <img
-                  src="/assets/media/image5-720.png"
-                  alt="Orders that fail a safety check remain separate and unchanged"
-                  width="1672"
-                  height="941"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </picture>
-            </aside>
+            </div>
           </div>
+        </div>
+      </section>
+
+      <section
+        class="safety section-pad"
+        id="safety"
+        aria-labelledby="safety-title"
+      >
+        <div class="shell">
+          <div class="section-heading" data-reveal>
+            <p class="eyebrow">Safety and eligibility</p>
+            <h2 id="safety-title">
+              If MergeShip cannot verify that a combine is safe, it leaves the
+              orders alone.
+            </h2>
+            <p>
+              Every candidate pair has to pass the same checks. Pairs that pass
+              are combined. Anything uncertain or unsupported is left untouched
+              for you to review or fulfill separately.
+            </p>
+          </div>
+
+          <div class="outcomes" data-reveal-group>
+            <div class="outcome outcome-pass">
+              <span class="outcome-tag">Checks pass</span>
+              <h3>Combined</h3>
+              <div class="outcome-cards">
+                <div class="order-card">
+                  <div class="order-head">
+                    <span class="order-num">#1104</span>
+                    <span class="badge badge-paid">Paid</span>
+                    <span class="badge badge-open">Unfulfilled (2)</span>
+                    <span class="badge badge-ready">Ready to fulfill</span>
+                    <span class="order-time">10:02</span>
+                  </div>
+                  <div class="order-items">
+                    <div class="order-item">
+                      <img
+                        class="order-thumb"
+                        src="/assets/media/product-hoodie.png"
+                        alt=""
+                        width="44"
+                        height="44"
+                      />
+                      <span class="item-text">
+                        <span class="item-name">Premium Hoodie</span>
+                        <span class="item-var">Light Blue / M</span>
+                      </span>
+                      <span class="item-price">$84.55</span>
+                    </div>
+                    <div class="order-item">
+                      <img
+                        class="order-thumb"
+                        src="/assets/media/product-tote.png"
+                        alt=""
+                        width="44"
+                        height="44"
+                      />
+                      <span class="item-text">
+                        <span class="item-name">Canvas Tote</span>
+                        <span class="item-var">Natural / Navy</span>
+                      </span>
+                      <span class="item-price">$46.55</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="order-card is-dim">
+                  <div class="order-head">
+                    <span class="order-num">#1105</span>
+                    <span class="badge badge-paid">Paid</span>
+                    <span class="badge badge-cancelled">Cancelled · closed</span>
+                    <span class="order-time">10:09</span>
+                  </div>
+                </div>
+              </div>
+              <p>
+                Items move into the oldest order. The extra order is cancelled
+                and closed.
+              </p>
+            </div>
+
+            <div class="outcome outcome-fail">
+              <span class="outcome-tag">A check fails</span>
+              <h3>Left untouched</h3>
+              <div class="outcome-cards">
+                <div class="order-card is-flagged">
+                  <div class="order-head">
+                    <span class="order-num">#1104</span>
+                    <span class="badge badge-paid">Paid</span>
+                    <span class="badge badge-open">Unfulfilled</span>
+                    <span class="order-time">10:02</span>
+                  </div>
+                  <div class="order-items">
+                    <div class="order-item">
+                      <img
+                        class="order-thumb"
+                        src="/assets/media/product-hoodie.png"
+                        alt=""
+                        width="44"
+                        height="44"
+                      />
+                      <span class="item-text">
+                        <span class="item-name">Premium Hoodie</span>
+                        <span class="item-var">Light Blue / M</span>
+                      </span>
+                      <span class="item-price">$84.55</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="order-card is-flagged">
+                  <div class="order-head">
+                    <span class="order-num">#1105</span>
+                    <span class="badge badge-paid">Paid</span>
+                    <span class="badge badge-open">Unfulfilled</span>
+                    <span class="order-time">10:09</span>
+                  </div>
+                  <div class="order-items">
+                    <div class="order-item">
+                      <img
+                        class="order-thumb"
+                        src="/assets/media/product-tote.png"
+                        alt=""
+                        width="44"
+                        height="44"
+                      />
+                      <span class="item-text">
+                        <span class="item-name">Canvas Tote</span>
+                        <span class="item-var">Natural / Navy</span>
+                      </span>
+                      <span class="item-price">$46.55</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <span class="flag-chip">Different shipping address</span>
+              <p>
+                Both orders stay exactly as they were. Nothing is changed,
+                cancelled, or refunded.
+              </p>
+            </div>
+          </div>
+
+          <div class="safety-lists">
+            <div data-reveal>
+              <h3>What is verified</h3>
+              <ul>
+                <li>Same customer</li>
+                <li>Shipping address and method</li>
+                <li>Currency</li>
+                <li>Transferable items</li>
+                <li>Paid, open, and unfulfilled</li>
+                <li>Inside your combine window</li>
+              </ul>
+            </div>
+            <div data-reveal>
+              <h3>What MergeShip does not do</h3>
+              <ul class="list-no">
+                <li>
+                  Issue refunds automatically, including for duplicate shipping
+                  charges
+                </li>
+                <li>Change what the customer paid for shipping</li>
+                <li>Combine anything it cannot verify</li>
+                <li>
+                  Run automatic combining until you turn it on and set a combine
+                  window
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="use-cases section-pad"
+        id="use-cases"
+        aria-labelledby="use-cases-title"
+      >
+        <div class="shell">
+          <div class="section-heading" data-reveal>
+            <p class="eyebrow">Where repeat orders happen</p>
+            <h2 id="use-cases-title">Built for short buying windows.</h2>
+            <p>
+              Drops, preorders, and live sales bring the same customer back to
+              checkout within minutes. MergeShip watches that window so the
+              second order doesn't become a second fulfillment.
+            </p>
+          </div>
+
+          <div class="window-timeline" data-reveal>
+            <span class="wt-line" aria-hidden="true"></span>
+            <span class="wt-band"
+              ><span class="wt-band-label">Your combine window</span></span
+            >
+            <ol class="wt-markers">
+              <li class="wt-marker">
+                <span class="wt-time">10:00</span
+                ><span class="wt-dot" aria-hidden="true"></span
+                ><span class="wt-name">Drop opens</span>
+              </li>
+              <li class="wt-marker">
+                <span class="wt-time">10:02</span
+                ><span class="wt-dot" aria-hidden="true"></span
+                ><span class="wt-name">Order #1104</span>
+              </li>
+              <li class="wt-marker">
+                <span class="wt-time">10:09</span
+                ><span class="wt-dot" aria-hidden="true"></span
+                ><span class="wt-name">Order #1105</span>
+              </li>
+              <li class="wt-marker">
+                <span class="wt-time"></span
+                ><span class="wt-dot" aria-hidden="true"></span
+                ><span class="wt-name">Combine window closes</span>
+              </li>
+              <li class="wt-marker">
+                <span class="wt-time"></span
+                ><span class="wt-dot" aria-hidden="true"></span
+                ><span class="wt-name">Fulfillment</span>
+              </li>
+            </ol>
+          </div>
+
+          <ul class="scenarios" data-reveal-group>
+            <li>
+              <h3>Product drops</h3>
+              <p>Hype releases where fans check out more than once.</p>
+            </li>
+            <li>
+              <h3>Preorders</h3>
+              <p>Long gaps between order and ship date invite a second order.</p>
+            </li>
+            <li>
+              <h3>Live sales</h3>
+              <p>Shoppers buy item by item during a stream.</p>
+            </li>
+            <li>
+              <h3>Limited releases</h3>
+              <p>Scarce stock means grabbing one now and another later.</p>
+            </li>
+            <li>
+              <h3>Launches</h3>
+              <p>New collections prompt follow-up purchases the same day.</p>
+            </li>
+            <li>
+              <h3>Restocks</h3>
+              <p>Waitlisted customers return the moment stock lands.</p>
+            </li>
+          </ul>
         </div>
       </section>
 
@@ -380,38 +876,38 @@
         id="pricing"
         aria-labelledby="pricing-title"
       >
-        <div class="shell pricing-panel" data-reveal>
-          <div class="section-heading">
-            <p class="eyebrow">Simple pricing</p>
-            <h2 class="pricing-price" id="pricing-title">$19/month</h2>
-            <p class="pricing-trial">30 day free trial</p>
-            <p>No usage tiers and no fees per combine.</p>
-          </div>
+        <div class="shell">
+          <div class="pricing-panel" data-reveal>
+            <div>
+              <p class="eyebrow">Simple pricing</p>
+              <h2 class="pricing-price" id="pricing-title">
+                <span class="price-num">$19</span
+                ><span class="price-per">/month</span>
+              </h2>
+              <p class="pricing-trial">30-day free trial</p>
+              <p class="pricing-note">
+                One plan. No usage tiers and no fees per combine.
+              </p>
+            </div>
 
-          <ul class="pricing-features">
-            <li>
-              <span aria-hidden="true">✓</span>Unlimited automatic combines
-            </li>
-            <li><span aria-hidden="true">✓</span>No fees per combine</li>
-            <li>
-              <span aria-hidden="true">✓</span>Safety checks before every
-              combine
-            </li>
-            <li><span aria-hidden="true">✓</span>Flexible combine windows</li>
-            <li><span aria-hidden="true">✓</span>Combine history</li>
-          </ul>
+            <ul class="pricing-features">
+              <li>Unlimited automatic combines</li>
+              <li>No fees per combine</li>
+              <li>Safety checks before every combine</li>
+              <li>Flexible combine windows</li>
+              <li>Combine history</li>
+            </ul>
 
-          <div class="pricing-action">
-            <a
-              class="button button-large"
-              href="https://apps.shopify.com/mergeship"
-              data-analytics-event="shopify_cta"
-              data-analytics-location="pricing"
-            >
-              Try free for 30 days
-              <span aria-hidden="true">↗</span>
-            </a>
-            <p>Install through Shopify. $19/month after trial.</p>
+            <div class="pricing-action">
+              <a
+                class="button button-large"
+                href="https://apps.shopify.com/mergeship"
+                data-analytics-event="shopify_cta"
+                data-analytics-location="pricing"
+                >Try free for 30 days</a
+              >
+              <p>Install through Shopify. $19/month after trial.</p>
+            </div>
           </div>
         </div>
       </section>
@@ -505,24 +1001,20 @@
         </div>
       </section>
 
-      <section class="final-cta">
-        <div class="shell final-cta-card" data-reveal>
-          <div>
-            <p class="eyebrow">Simpler fulfillment starts here</p>
-            <h2>One customer. One shipment. Less work.</h2>
-          </div>
-          <div class="final-action">
-            <a
-              class="button button-light button-large"
-              href="https://apps.shopify.com/mergeship"
-              data-analytics-event="shopify_cta"
-              data-analytics-location="final"
-            >
-              Try free for 30 days
-              <span aria-hidden="true">↗</span>
-            </a>
-            <p>Install through Shopify. $19/month after trial.</p>
-          </div>
+      <section class="final-cta" aria-labelledby="final-cta-title">
+        <div class="shell" data-reveal>
+          <p class="eyebrow">Simpler fulfillment starts here</p>
+          <h2 id="final-cta-title">One customer. One order to fulfill.</h2>
+          <a
+            class="button button-light button-large"
+            href="https://apps.shopify.com/mergeship"
+            data-analytics-event="shopify_cta"
+            data-analytics-location="final"
+            >Try free for 30 days</a
+          >
+          <p class="final-cta-note">
+            Install through Shopify. 30-day free trial, then $19/month.
+          </p>
         </div>
       </section>
     </main>
@@ -559,6 +1051,7 @@
       </div>
     </footer>
 
-    <script src="/site.js?v=20261017-cursor" defer></script>
+    <script src="/site.js?v=motion-20261025" defer></script>
+    <script src="/home.js?v=motion-20261025" defer></script>
   </body>
 </html>

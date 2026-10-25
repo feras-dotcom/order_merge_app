@@ -38,7 +38,10 @@
       rel="stylesheet"
       href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css"
     />
-    <link rel="stylesheet" href="/site.css?v=guides-20261014" />
+    <script>
+      document.documentElement.classList.add("has-js");
+    </script>
+    <link rel="stylesheet" href="/site.css?v=motion-20261025" />
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -49,14 +52,35 @@
           <img src="/brand/logo-64.png" alt="" width="64" height="64" />
           <span>Merge<span class="brand-accent">Ship</span></span>
         </a>
-        <nav class="primary-nav" aria-label="Primary navigation">
+        <nav
+          class="primary-nav"
+          id="primary-nav"
+          aria-label="Primary navigation"
+          hidden
+        >
           <a href="/#how-it-works">How it works</a>
           <a href="/#use-cases">Use cases</a>
           <a href="/#pricing">Pricing</a>
           <a href="/#faq">FAQ</a>
           <a href="/demo" aria-current="page">Demo</a>
           <a href="/guides">Guides</a>
+          <a
+            class="button button-small nav-cta"
+            href="https://apps.shopify.com/mergeship"
+            data-analytics-event="shopify_cta"
+            data-analytics-location="header_nav"
+            >Try free for 30 days</a
+          >
         </nav>
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="primary-nav"
+          aria-label="Open menu"
+        >
+          <span class="nav-toggle-lines" aria-hidden="true"></span>
+        </button>
         <a
           class="button button-small"
           href="https://apps.shopify.com/mergeship"
@@ -149,6 +173,6 @@
       </div>
     </footer>
 
-    <script src="/site.js?v=20261017-cursor" defer></script>
+    <script src="/site.js?v=motion-20261025" defer></script>
   </body>
 </html>

@@ -1,80 +1,6 @@
-document.documentElement.classList.add("has-js");
-
-const customCursorQuery = window.matchMedia(
-  "(hover: hover) and (pointer: fine)",
-);
-const customCursor = document.createElement("div");
-customCursor.className = "custom-cursor";
-customCursor.setAttribute("aria-hidden", "true");
-customCursor.innerHTML = `
-  <svg viewBox="0 0 28 32" aria-hidden="true" focusable="false">
-    <path
-      d="M2.5 2.5 24.2 14.8l-8.3 2.1 5 8.8-4.5 2.5-4.9-8.9-6.1 6.3Z"
-      fill="#07142f"
-      stroke="#ffffff"
-      stroke-linejoin="round"
-      stroke-width="2.2"
-    />
-  </svg>
-`;
-document.body.append(customCursor);
-
-let cursorFrame = 0;
-let cursorX = -48;
-let cursorY = -48;
-
-const hideCustomCursor = () => {
-  if (cursorFrame) {
-    window.cancelAnimationFrame(cursorFrame);
-    cursorFrame = 0;
-  }
-  document.documentElement.classList.remove("has-custom-cursor");
-  customCursor.classList.remove("is-visible", "is-active");
-};
-
-const updateCustomCursor = () => {
-  customCursor.style.transform = `translate3d(${cursorX - 2}px, ${cursorY - 2}px, 0)`;
-  customCursor.classList.add("is-visible");
-  document.documentElement.classList.add("has-custom-cursor");
-  cursorFrame = 0;
-};
-
-window.addEventListener(
-  "pointermove",
-  (event) => {
-    if (
-      !customCursorQuery.matches ||
-      event.pointerType === "touch" ||
-      event.target.closest?.("[data-native-cursor]")
-    ) {
-      hideCustomCursor();
-      return;
-    }
-
-    cursorX = event.clientX;
-    cursorY = event.clientY;
-    if (!cursorFrame) {
-      cursorFrame = window.requestAnimationFrame(updateCustomCursor);
-    }
-  },
-  { passive: true },
-);
-
-window.addEventListener("pointerdown", () => {
-  if (document.documentElement.classList.contains("has-custom-cursor")) {
-    customCursor.classList.add("is-active");
-  }
-});
-window.addEventListener("pointerup", () =>
-  customCursor.classList.remove("is-active"),
-);
-window.addEventListener("pointercancel", hideCustomCursor);
-window.addEventListener("blur", hideCustomCursor);
-window.addEventListener("mouseout", (event) => {
-  if (!event.relatedTarget) hideCustomCursor();
-});
-window.addEventListener("mergeship:cursor-suspend", hideCustomCursor);
-customCursorQuery.addEventListener("change", hideCustomCursor);
+// Shared behaviour: header scroll state, mobile navigation, scroll reveals,
+// video facade, analytics events, footer year.
+// `has-js` is added by an inline script in <head> before first paint.
 
 const header = document.querySelector("[data-header]");
 const updateHeader = () =>
@@ -82,7 +8,73 @@ const updateHeader = () =>
 updateHeader();
 window.addEventListener("scroll", updateHeader, { passive: true });
 
-const revealItems = document.querySelectorAll("[data-reveal]");
+/* Mobile navigation */
+
+const navToggle = document.querySelector(".nav-toggle");
+const primaryNav = document.getElementById("primary-nav");
+
+if (navToggle && primaryNav) {
+  let closeTimer = 0;
+  const NAV_TRANSITION_MS = 200;
+
+  const setNavOpen = (open) => {
+    window.clearTimeout(closeTimer);
+    navToggle.setAttribute("aria-expanded", String(open));
+    navToggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+    if (open) {
+      primaryNav.hidden = false;
+      requestAnimationFrame(() => primaryNav.classList.add("is-open"));
+    } else {
+      primaryNav.classList.remove("is-open");
+      closeTimer = window.setTimeout(() => {
+        primaryNav.hidden = true;
+      }, NAV_TRANSITION_MS);
+    }
+  };
+
+  navToggle.addEventListener("click", () => {
+    setNavOpen(navToggle.getAttribute("aria-expanded") !== "true");
+  });
+
+  primaryNav.addEventListener("click", (event) => {
+    if (event.target.closest("a")) setNavOpen(false);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && navToggle.getAttribute("aria-expanded") === "true") {
+      setNavOpen(false);
+      navToggle.focus();
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (
+      navToggle.getAttribute("aria-expanded") === "true" &&
+      !event.target.closest(".site-header")
+    ) {
+      setNavOpen(false);
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 960 && navToggle.getAttribute("aria-expanded") === "true") {
+      setNavOpen(false);
+    }
+  });
+}
+
+/* Scroll reveals */
+
+const revealItems = document.querySelectorAll("[data-reveal], [data-reveal-group]");
+
+document
+  .querySelectorAll("[data-reveal-group]")
+  .forEach((group) =>
+    Array.from(group.children).forEach((child, index) =>
+      child.style.setProperty("--i", index),
+    ),
+  );
+
 if ("IntersectionObserver" in window) {
   const revealObserver = new IntersectionObserver(
     (entries, observer) => {
@@ -92,12 +84,14 @@ if ("IntersectionObserver" in window) {
         observer.unobserve(entry.target);
       });
     },
-    { rootMargin: "0px 0px -8%", threshold: 0.12 },
+    { rootMargin: "0px 0px -10%", threshold: 0.08 },
   );
   revealItems.forEach((item) => revealObserver.observe(item));
 } else {
   revealItems.forEach((item) => item.classList.add("is-visible"));
 }
+
+/* Analytics events */
 
 const dispatchAnalyticsEvent = (name, detail = {}) => {
   window.dispatchEvent(
@@ -113,15 +107,14 @@ document.querySelectorAll("[data-analytics-event]").forEach((link) => {
   });
 });
 
+/* Video facades */
+
 document
   .querySelectorAll("[data-video-id], [data-video-src]")
   .forEach((button) => {
     button.addEventListener("click", () => {
       const facade = button.closest("[data-video-facade]");
       if (!facade) return;
-
-      facade.setAttribute("data-native-cursor", "");
-      window.dispatchEvent(new Event("mergeship:cursor-suspend"));
 
       if (button.dataset.videoSrc) {
         const video = document.createElement("video");
@@ -148,6 +141,8 @@ document
       dispatchAnalyticsEvent("video_play", { videoId: button.dataset.videoId });
     });
   });
+
+/* Footer year */
 
 document.querySelectorAll("[data-year]").forEach((year) => {
   year.textContent = String(new Date().getFullYear());

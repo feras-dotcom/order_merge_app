@@ -6,6 +6,8 @@ COPY website-static/favicon.ico /usr/share/nginx/html/favicon.ico
 COPY website-static/404.html /usr/share/nginx/html/404.html
 COPY website-static/site.css /usr/share/nginx/html/site.css
 COPY website-static/site.js /usr/share/nginx/html/site.js
+COPY website-static/home.css /usr/share/nginx/html/home.css
+COPY website-static/home.js /usr/share/nginx/html/home.js
 COPY website-static/robots.txt /usr/share/nginx/html/robots.txt
 COPY website-static/sitemap.xml /usr/share/nginx/html/sitemap.xml
 COPY website-static/assets /usr/share/nginx/html/assets
