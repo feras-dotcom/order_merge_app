@@ -1,9 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T15:30:32.396Z",
+ "runAtUtc": "2026-10-25T10:29:49.706Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
- "channel": "shopify-app-execute",
+ "channel": "admin-graphql-http",
  "document": {
   "name": "Q-REFUND-DETAIL",
   "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
@@ -92,5 +92,580 @@
    }
   ]
  },
- "cost": null
+ "cost": {
+  "requestedQueryCost": 31,
+  "actualQueryCost": 21,
+  "throttleStatus": {
+   "maximumAvailable": 2000,
+   "currentlyAvailable": 1979,
+   "restoreRate": 100
+  },
+  "fields": [
+   {
+    "path": [
+     "nodes",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "note"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "createdAt"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "processedAt"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "order",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "order"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "totalRefundedSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "totalRefundedSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "totalRefundedSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "totalRefundedSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "duties",
+     "amountSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "duties",
+     "amountSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "duties",
+     "amountSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "duties",
+     "amountSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "duties"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "subtotalAmountSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "subtotalAmountSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "subtotalAmountSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "subtotalAmountSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "taxAmountSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "taxAmountSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "taxAmountSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes",
+     "taxAmountSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "nodes"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "pageInfo",
+     "hasNextPage"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines",
+     "pageInfo"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundShippingLines"
+    ],
+    "definedCost": null,
+    "requestedTotalCost": 6,
+    "requestedChildrenCost": 1
+   },
+   {
+    "path": [
+     "nodes",
+     "refundLineItems",
+     "nodes",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundLineItems",
+     "nodes"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundLineItems",
+     "pageInfo",
+     "hasNextPage"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundLineItems",
+     "pageInfo"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "refundLineItems"
+    ],
+    "definedCost": null,
+    "requestedTotalCost": 6,
+    "requestedChildrenCost": 1
+   },
+   {
+    "path": [
+     "nodes",
+     "orderAdjustments",
+     "nodes",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "orderAdjustments",
+     "nodes"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "orderAdjustments",
+     "pageInfo",
+     "hasNextPage"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "orderAdjustments",
+     "pageInfo"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "orderAdjustments"
+    ],
+    "definedCost": null,
+    "requestedTotalCost": 6,
+    "requestedChildrenCost": 1
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "kind"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "status"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "gateway"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "test"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "amountSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "amountSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "amountSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "amountSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "parentTransaction",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes",
+     "parentTransaction"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "nodes"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 2,
+    "requestedChildrenCost": 1
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "pageInfo",
+     "hasNextPage"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions",
+     "pageInfo"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "nodes",
+     "transactions"
+    ],
+    "definedCost": null,
+    "requestedTotalCost": 10,
+    "requestedChildrenCost": 2
+   },
+   {
+    "path": [
+     "nodes"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 31,
+    "requestedChildrenCost": 30
+   }
+  ]
+ }
 }

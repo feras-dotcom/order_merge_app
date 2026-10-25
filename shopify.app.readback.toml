@@ -1,0 +1,40 @@
+# Isolated config for the G-READBACK cost measurement (docs/COST-MEASUREMENT-RUNBOOK.md).
+# Identical app identity to shopify.app.toml. Webhook URIs are written as the
+# absolute production URLs so the dev URL-updater leaves them alone — the
+# preview exists only to mint an offline session and never receives webhooks.
+client_id = "04b77142ce8ad421f49735b05c7d0a86"
+application_url = "https://upbeat-reflection-production.up.railway.app"
+embedded = true
+name = "MergeShip"
+
+[access_scopes]
+scopes = "read_customers,write_order_edits,write_orders,write_products"
+optional_scopes = [ "read_merchant_managed_fulfillment_orders", "read_locations" ]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  uri = "https://upbeat-reflection-production.up.railway.app/webhooks/orders/create"
+  topics = [ "orders/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "https://upbeat-reflection-production.up.railway.app/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "https://upbeat-reflection-production.up.railway.app/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  [webhooks.privacy_compliance]
+  customer_data_request_url = "https://upbeat-reflection-production.up.railway.app/webhooks/customers/data_request"
+  customer_deletion_url = "https://upbeat-reflection-production.up.railway.app/webhooks/customers/redact"
+  shop_deletion_url = "https://upbeat-reflection-production.up.railway.app/webhooks/shop/redact"
+
+[auth]
+redirect_urls = [ "https://upbeat-reflection-production.up.railway.app/auth/callback" ]
+
+[build]
+automatically_update_urls_on_dev = true
+name = "remix"
+roles = ["frontend", "backend"]

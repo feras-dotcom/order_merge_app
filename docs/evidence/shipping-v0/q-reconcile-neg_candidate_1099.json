@@ -1,9 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T15:30:32.396Z",
+ "runAtUtc": "2026-10-25T10:29:49.706Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
- "channel": "shopify-app-execute",
+ "channel": "admin-graphql-http",
  "document": {
   "name": "Q-RECONCILE",
   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
@@ -81,6 +81,370 @@
    ]
   }
  },
- "cost": null,
+ "cost": {
+  "requestedQueryCost": 4,
+  "actualQueryCost": 4,
+  "throttleStatus": {
+   "maximumAvailable": 2000,
+   "currentlyAvailable": 1996,
+   "restoreRate": 100
+  },
+  "fields": [
+   {
+    "path": [
+     "order",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "cancelledAt"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "closed"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "displayFinancialStatus"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedShippingSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedShippingSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedShippingSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "totalRefundedShippingSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "note"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "createdAt"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "processedAt"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "totalRefundedSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "totalRefundedSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "totalRefundedSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds",
+     "totalRefundedSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "refunds"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "kind"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "status"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "gateway"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "test"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "amountSet",
+     "presentmentMoney",
+     "amount"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "amountSet",
+     "presentmentMoney",
+     "currencyCode"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "amountSet",
+     "presentmentMoney"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "amountSet"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "parentTransaction",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions",
+     "parentTransaction"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "order",
+     "transactions"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 2,
+    "requestedChildrenCost": 1
+   },
+   {
+    "path": [
+     "order"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 4,
+    "requestedChildrenCost": 3
+   }
+  ]
+ },
  "refundCount": 1
 }

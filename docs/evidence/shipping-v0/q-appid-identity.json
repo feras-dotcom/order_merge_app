@@ -1,9 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T15:30:32.396Z",
+ "runAtUtc": "2026-10-25T10:29:49.706Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
- "channel": "shopify-app-execute",
+ "channel": "admin-graphql-http",
  "document": {
   "name": "Q-APPID",
   "sha256": "616d5da0b45467c102c60e368a7f339fbbb4b2f7f68a5d145c50c2c8175caf16",
@@ -18,5 +18,42 @@
    }
   }
  },
- "cost": null
+ "cost": {
+  "requestedQueryCost": 2,
+  "actualQueryCost": 2,
+  "throttleStatus": {
+   "maximumAvailable": 2000,
+   "currentlyAvailable": 1998,
+   "restoreRate": 100
+  },
+  "fields": [
+   {
+    "path": [
+     "currentAppInstallation",
+     "app",
+     "id"
+    ],
+    "definedCost": 0,
+    "requestedTotalCost": 0,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "currentAppInstallation",
+     "app"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 1,
+    "requestedChildrenCost": 0
+   },
+   {
+    "path": [
+     "currentAppInstallation"
+    ],
+    "definedCost": 1,
+    "requestedTotalCost": 2,
+    "requestedChildrenCost": 1
+   }
+  ]
+ }
 }

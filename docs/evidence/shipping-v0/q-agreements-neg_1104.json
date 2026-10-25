@@ -1,9 +1,9 @@
 {
  "experiment": "G-READBACK/GA-A",
- "runAtUtc": "2026-10-24T15:30:32.396Z",
+ "runAtUtc": "2026-10-25T10:29:49.706Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
- "channel": "shopify-app-execute",
+ "channel": "admin-graphql-http",
  "document": {
   "name": "Q-AGREEMENTS",
   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
@@ -78,6 +78,334 @@
       }
      }
     }
+   },
+   "extensions": {
+    "cost": {
+     "requestedQueryCost": 24,
+     "actualQueryCost": 4,
+     "throttleStatus": {
+      "maximumAvailable": 2000,
+      "currentlyAvailable": 1996,
+      "restoreRate": 100
+     },
+     "fields": [
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "__typename"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "id"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "happenedAt"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "reason"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "app",
+        "id"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "app"
+       ],
+       "definedCost": 1,
+       "requestedTotalCost": 1,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "refund",
+        "id"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes",
+        "refund"
+       ],
+       "definedCost": 1,
+       "requestedTotalCost": 1,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "nodes"
+       ],
+       "definedCost": 1,
+       "requestedTotalCost": 3,
+       "requestedChildrenCost": 2
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "pageInfo",
+        "hasNextPage"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "pageInfo",
+        "endCursor"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements",
+        "pageInfo"
+       ],
+       "definedCost": 0,
+       "requestedTotalCost": 0,
+       "requestedChildrenCost": 0
+      },
+      {
+       "path": [
+        "order",
+        "agreements"
+       ],
+       "definedCost": null,
+       "requestedTotalCost": 23,
+       "requestedChildrenCost": 3
+      },
+      {
+       "path": [
+        "order"
+       ],
+       "definedCost": 1,
+       "requestedTotalCost": 24,
+       "requestedChildrenCost": 23
+      }
+     ]
+    }
+   }
+  }
+ ],
+ "costPerPage": [
+  {
+   "page": 1,
+   "verdict": "ok",
+   "cost": {
+    "requestedQueryCost": 24,
+    "actualQueryCost": 4,
+    "throttleStatus": {
+     "maximumAvailable": 2000,
+     "currentlyAvailable": 1996,
+     "restoreRate": 100
+    },
+    "fields": [
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "__typename"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "id"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "happenedAt"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "reason"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "app",
+       "id"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "app"
+      ],
+      "definedCost": 1,
+      "requestedTotalCost": 1,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "refund",
+       "id"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes",
+       "refund"
+      ],
+      "definedCost": 1,
+      "requestedTotalCost": 1,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "nodes"
+      ],
+      "definedCost": 1,
+      "requestedTotalCost": 3,
+      "requestedChildrenCost": 2
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "pageInfo",
+       "hasNextPage"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "pageInfo",
+       "endCursor"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements",
+       "pageInfo"
+      ],
+      "definedCost": 0,
+      "requestedTotalCost": 0,
+      "requestedChildrenCost": 0
+     },
+     {
+      "path": [
+       "order",
+       "agreements"
+      ],
+      "definedCost": null,
+      "requestedTotalCost": 23,
+      "requestedChildrenCost": 3
+     },
+     {
+      "path": [
+       "order"
+      ],
+      "definedCost": 1,
+      "requestedTotalCost": 24,
+      "requestedChildrenCost": 23
+     }
+    ]
    }
   }
  ]

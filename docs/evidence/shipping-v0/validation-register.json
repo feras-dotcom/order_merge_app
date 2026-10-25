@@ -1,10 +1,209 @@
 {
- "runAtUtc": "2026-10-24T15:30:32.396Z",
+ "runAtUtc": "2026-10-25T10:29:49.706Z",
  "store": "ordermergetest2.myshopify.com",
  "apiVersion": "2026-04",
- "channel": "shopify-app-execute",
+ "channel": "admin-graphql-http",
  "verifiedAppId": "gid://shopify/App/426185785345",
- "costNote": "shopify app execute returns data only; extensions.cost is not exposed by this channel",
+ "costNote": "extensions.cost captured via Shopify-GraphQL-Cost-Debug: 1",
+ "costGate": "PASS",
+ "costVerdicts": [
+  {
+   "document": "Q-APPID",
+   "measured": true,
+   "requestedQueryCost": 2,
+   "actualQueryCost": 2,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECHECK",
+   "measured": true,
+   "requestedQueryCost": 5,
+   "actualQueryCost": 5,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECONCILE",
+   "measured": true,
+   "requestedQueryCost": 4,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECONCILE",
+   "measured": true,
+   "requestedQueryCost": 4,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECONCILE",
+   "measured": true,
+   "requestedQueryCost": 4,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECONCILE",
+   "measured": true,
+   "requestedQueryCost": 4,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECONCILE",
+   "measured": true,
+   "requestedQueryCost": 4,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECONCILE",
+   "measured": true,
+   "requestedQueryCost": 4,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-RECONCILE",
+   "measured": true,
+   "requestedQueryCost": 4,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-REFUND-DETAIL",
+   "measured": true,
+   "requestedQueryCost": 31,
+   "actualQueryCost": 27,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-REFUND-DETAIL",
+   "measured": true,
+   "requestedQueryCost": 31,
+   "actualQueryCost": 21,
+   "withinThreshold": true,
+   "status": "PASS"
+  },
+  {
+   "document": "Q-AGREEMENTS",
+   "measured": true,
+   "requestedQueryCost": 24,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "pages": [
+    {
+     "document": "Q-AGREEMENTS-p1",
+     "measured": true,
+     "requestedQueryCost": 24,
+     "actualQueryCost": 4,
+     "withinThreshold": true,
+     "status": "PASS"
+    }
+   ],
+   "status": "PASS"
+  },
+  {
+   "document": "Q-AGREEMENTS",
+   "measured": true,
+   "requestedQueryCost": 24,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "pages": [
+    {
+     "document": "Q-AGREEMENTS-p1",
+     "measured": true,
+     "requestedQueryCost": 24,
+     "actualQueryCost": 4,
+     "withinThreshold": true,
+     "status": "PASS"
+    }
+   ],
+   "status": "PASS"
+  },
+  {
+   "document": "Q-AGREEMENTS",
+   "measured": true,
+   "requestedQueryCost": 24,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "pages": [
+    {
+     "document": "Q-AGREEMENTS-p1",
+     "measured": true,
+     "requestedQueryCost": 24,
+     "actualQueryCost": 4,
+     "withinThreshold": true,
+     "status": "PASS"
+    }
+   ],
+   "status": "PASS"
+  },
+  {
+   "document": "Q-AGREEMENTS",
+   "measured": true,
+   "requestedQueryCost": 24,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "pages": [
+    {
+     "document": "Q-AGREEMENTS-p1",
+     "measured": true,
+     "requestedQueryCost": 24,
+     "actualQueryCost": 4,
+     "withinThreshold": true,
+     "status": "PASS"
+    }
+   ],
+   "status": "PASS"
+  },
+  {
+   "document": "Q-AGREEMENTS",
+   "measured": true,
+   "requestedQueryCost": 24,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "pages": [
+    {
+     "document": "Q-AGREEMENTS-p1",
+     "measured": true,
+     "requestedQueryCost": 24,
+     "actualQueryCost": 4,
+     "withinThreshold": true,
+     "status": "PASS"
+    }
+   ],
+   "status": "PASS"
+  },
+  {
+   "document": "Q-AGREEMENTS",
+   "measured": true,
+   "requestedQueryCost": 24,
+   "actualQueryCost": 4,
+   "withinThreshold": true,
+   "pages": [
+    {
+     "document": "Q-AGREEMENTS-p1",
+     "measured": true,
+     "requestedQueryCost": 24,
+     "actualQueryCost": 4,
+     "withinThreshold": true,
+     "status": "PASS"
+    }
+   ],
+   "status": "PASS"
+  }
+ ],
  "records": [
   {
    "name": "Q-APPID",

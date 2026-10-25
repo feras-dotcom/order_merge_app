@@ -1,54 +1,39 @@
 # Shipping v0 Phase 2 evidence archive — G-READBACK / G-AGREEMENT-A / G-INTROSPECT
 
-Runs: 2026-10-24 (UTC, two runs; current artifacts are from the corrected runner
-`scripts/shipping-refund-readback.ts`, run 2+). Store `ordermergetest2.myshopify.com`,
-pinned API `2026-04`, verified app id `gid://shopify/App/426185785345` (Q-APPID
-live read). Channel: `shopify app execute` (authorized CLI session) — returns
-`data` only; `extensions.cost` is not exposed by this channel, so cost fields
-remain unmeasured (see below). Read-only queries only; no mutations were sent.
-Manifest: `MANIFEST.sha256` covers every file in this directory including this
-README and the register; `tests/evidence-manifest.test.ts` verifies it.
-Register: `validation-register.json`.
+Runs: 2026-10-24/25 (UTC). Store `ordermergetest2.myshopify.com`, pinned API
+`2026-04`, verified app id `gid://shopify/App/426185785345` (Q-APPID live
+read). Channels: `shopify app execute` (shape validation) and
+`admin-graphql-http` with `Shopify-GraphQL-Cost-Debug: 1` over an expiring
+offline session minted via `shopify app dev --use-localhost` into disposable
+DB `mergeship_test_cost_readback` (cost measurement). Read-only only; no
+mutations sent. Runner: `scripts/shipping-refund-readback.ts` — enforces
+store, app id and no-`mutation` before any order read. Manifest:
+`MANIFEST.sha256` covers every file; `tests/evidence-manifest.test.ts`
+verifies it. Register: `validation-register.json`.
 
 ## Document results
 
 | Document / run | Verdict |
 |---|---|
-| Q-APPID | PASS — app id read from `currentAppInstallation` |
-| Q-RECHECK (cancelled secondary + PAID primary) | PASS |
-| Q-RECONCILE ×7 (no-refund, refunded, cancelled, NEG candidates) | PASS each |
-| Q-REFUND-DETAIL, 5 ids | **INCOMPLETE (honest)** — document executes and all identities/order associations are correct, but refund `1120895828215` (`#1104`, zero-value restock-shaped record) reports `refundLineItems.pageInfo.hasNextPage = true`, so its nested evidence is not complete. `nodes(ids:)` accepts Refund GIDs; `duties` array; E6 refund fully complete. |
-| Q-REFUND-DETAIL, strict single (E6) | PASS via `validateRefundDetailResponse` |
-| Q-AGREEMENTS ×6 (BASE/POS/NEG orders) | PASS — one page each, `pageInfo.hasNextPage: false`; raw per-page responses archived under `rawPages` (E-2 fix) |
-| G-INTROSPECT | PASS — `idempotent(key: String!)` at FIELD location, 2026-04 |
-| Query cost (all 5) | **INCOMPLETE** — channel cannot expose `extensions.cost`; see cost gap below |
+| Q-APPID | PASS — app id from `currentAppInstallation`; requested/actual cost 2/2 |
+| Q-RECHECK (cancelled secondary + PAID primary) | PASS — cost 5/5 |
+| Q-RECONCILE ×7 | PASS — cost 4/4 each |
+| Q-REFUND-DETAIL, 5 ids | **INCOMPLETE (honest)** — executes, identities/order-association correct, costs 31/27; refund `1120895828215` (`#1104`, zero-value restock-shaped) reports `refundLineItems.hasNextPage = true`, nested evidence incomplete |
+| Q-REFUND-DETAIL, strict single (E6) | PASS via `validateRefundDetailResponse` — cost 31/21 |
+| Q-AGREEMENTS ×6 | PASS — one page each, `hasNextPage: false`, raw pages archived; cost 24/4 per page |
+| G-INTROSPECT | PASS — `idempotent(key: String!)` at FIELD location |
+| **Query cost gate (12.1.2)** | **PASS — every document and every agreement page far below `requestedQueryCost <= 500`** |
 
 ## G-AGREEMENT Part A (§12.8.2): INCONCLUSIVE
 
 - **BASE** `gid://shopify/Order/8052786135287`: `refunds: []`, `PAID`,
-  `SALE`-only transactions; its only agreement is `OrderAgreement/ORDER`
-  carrying our app id. **Cancellation provenance VERIFIED** via
-  `base-cancel-events.json`: order events `MergeShip restocked 1 line item.`
-  and `MergeShip canceled this order.` (appTitle `MergeShip`,
-  `2026-10-05T10:32:57Z` = `cancelledAt`) — a Protocol v2 `restock: true`
-  cancellation leaving zero refund records → `STRICT_EMPTY` is safe **for this
-  tested secondary** (no claim that all cancellations behave identically).
-- **POS** E1/E2/E6 refunds: each has exactly one `RefundAgreement/REFUND` with
-  our app id and linked refund id, shipping-only shape, one SUCCESS REFUND
-  transaction, marker note. Creation provenance remains **inferred** — original
-  E-run records are unrecoverable; the RefundAgreement itself does not
-  establish who called `refundCreate`.
-- **NEG**: no staff-created Admin refund exists on the store. #1104's
-  zero-value/10-line-item refund (no linked RefundAgreement) is restock-shaped,
-  informative only; #1099's refund is app-attributed.
-- **Classification: INCONCLUSIVE** — POS present but no comparable NEG and POS
-  provenance is inferred. `ATTRIBUTION_STATUS` stays `UNVERIFIED`.
-
-## Cost gap (open)
-
-`shopify app execute` prints only `data`; `extensions.cost` requires a
-header-capable session (`Shopify-GraphQL-Cost-Debug: 1`). A stale CLI dev
-session token exists but returns 401. The runner supports a token channel
-(`SHIPRB_TOKEN_ENV=<env name>`) for when a valid offline session exists;
-`cost` fields will then be populated per document. The smallest unblocking
-operator step is listed in the delivery report.
+  `SALE`-only; only `OrderAgreement/ORDER` with our app id. Cancellation
+  provenance VERIFIED via `base-cancel-events.json` (MergeShip restock +
+  cancel events at `cancelledAt`) — `STRICT_EMPTY` supported for this
+  secondary.
+- **POS** E1/E2/E6: each exactly one `RefundAgreement/REFUND` with our app id,
+  shipping-only shape, SUCCESS REFUND txn, marker note. Provenance remains
+  inferred (run records unrecoverable).
+- **NEG**: none exists on the store; #1104's zero-value restock-shaped refund
+  and #1099's app-attributed refund are informative only.
+- `ATTRIBUTION_STATUS` stays `UNVERIFIED`.

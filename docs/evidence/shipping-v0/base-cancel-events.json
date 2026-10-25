@@ -1,9 +1,9 @@
 {
  "experiment": "G-AGREEMENT-A/BASE-provenance",
- "runAtUtc": "2026-10-24T15:30:32.396Z",
+ "runAtUtc": "2026-10-25T10:29:49.706Z",
  "apiVersion": "2026-04",
  "store": "ordermergetest2.myshopify.com",
- "channel": "shopify-app-execute",
+ "channel": "admin-graphql-http",
  "document": {
   "name": "Q-EVENTS-BASE",
   "sha256": "c370d50d022b7507481f71b996345373cb1d41d86be50b8acb1120ecb3444844",
