@@ -228,7 +228,7 @@ html.intro-pending .intro {
 }
 
 .hero-title {
-  max-width: 14ch;
+  max-width: 11.5em;
   font-size: clamp(44px, 6.2vw, 84px);
   font-weight: 700;
   letter-spacing: -0.045em;
@@ -266,14 +266,26 @@ html.intro-pending .intro {
 }
 
 .hero-facts {
-  margin-top: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  margin: 22px 0 0;
+  padding: 0;
   color: var(--ink-faint);
   font-size: 13px;
   font-weight: 550;
   line-height: 1.6;
+  list-style: none;
 }
 
-.hero-facts span[aria-hidden] {
+.hero-facts li {
+  white-space: nowrap;
+}
+
+.hero-facts li + li::before {
+  content: "·";
   margin-inline: 9px;
   color: var(--line-strong);
 }
@@ -286,13 +298,12 @@ html.intro-pending .intro {
 /* Hero intro sequencing: everything under intro-pending / intro-seen starts
    hidden by animation fill and snaps to final state when the class drops. */
 
-html.intro-pending .site-header .brand,
-html.intro-seen .site-header .brand {
-  animation: intro-fade 1ms linear calc(var(--t0, 0ms) + 550ms) both;
+html.intro-pending .site-header .brand {
+  opacity: 0;
 }
 
-html.intro-seen .site-header .brand {
-  animation-delay: calc(var(--t0, 0ms) + 450ms);
+html.intro-landed .site-header .brand {
+  opacity: 1;
 }
 
 html.intro-pending .site-header .primary-nav,
@@ -379,7 +390,7 @@ html.intro-seen .hero-stage {
 
 .stage-box {
   position: relative;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 2 / 1;
   width: min(100%, 920px);
   margin-inline: auto;
   overflow: hidden;
@@ -396,19 +407,14 @@ html.intro-seen .hero-stage {
   inset: 0;
   container-type: inline-size;
 
-  /* geometry (cqw = 1% of scene width; scene is 100cqw x 56.25cqw) */
+  /* geometry (cqw = 1% of scene width; scene is 100cqw x 50cqw) */
   --card-w: 36cqw;
   --card-a-x: 7cqw;
-  --card-a-y: 16cqw;
+  --card-a-y: 13.5cqw;
   --card-b-x: 57cqw;
-  --card-b-y: 16cqw;
-  --fly-x: 58.8cqw;
-  --fly-y: 21cqw;
-  --fly-w: 32.4cqw;
-  --fly-dx: -50cqw;
-  --fly-dy: 6.1cqw;
-  --chip-top: 7.5cqw;
-  --panel-bottom: 3cqw;
+  --card-b-y: 13.5cqw;
+  --chip-top: 5cqw;
+  --panel-bottom: 4cqw;
 }
 
 .stage-label {
@@ -529,7 +535,8 @@ html.intro-seen .hero-stage {
 .order-head {
   display: flex;
   align-items: center;
-  gap: 0.5em;
+  flex-wrap: wrap;
+  gap: 0.4em 0.5em;
   padding: 1em 1.15em 0.8em;
   border-bottom: 1px solid var(--line);
 }
@@ -689,37 +696,51 @@ html.intro-seen .hero-stage {
     border-color 200ms linear;
 }
 
+.order-slot .order-item {
+  opacity: 0;
+  transition: opacity 200ms linear;
+}
+
+.stage.is-landed .card-a .order-slot .order-item {
+  opacity: 1;
+}
+
 .stage[data-state="combined"] .card-a .order-slot {
   max-height: 4.6em;
   border-top-color: var(--line);
   transition-delay: 0ms, 400ms;
 }
 
-/* The tote row that travels between cards */
+/* Card B collapses to header-only once its item has left */
+
+.card-b .order-items {
+  overflow: hidden;
+  max-height: 12em;
+  transition:
+    max-height 400ms var(--ease-inout),
+    padding 400ms var(--ease-inout),
+    opacity 200ms linear;
+}
+
+.stage[data-state="combined"] .card-b .order-items {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+}
+
+/* The tote row that travels between cards (JS-measured FLIP) */
 
 .tote-fly {
   position: absolute;
   z-index: 4;
-  top: var(--fly-y);
-  left: var(--fly-x);
-  width: var(--fly-w);
-  padding-top: 0.85em;
-  font-size: calc(1.55cqw + 0px);
-  opacity: 0;
-  transition:
-    transform 600ms var(--ease-inout),
-    opacity 180ms linear;
+  top: 0;
+  left: 0;
+  display: none;
 }
 
-.stage[data-state="combined"] .tote-fly {
-  opacity: 1;
-  transform: translate(var(--fly-dx), var(--fly-dy));
-}
-
-/* Card B's real row hands off to the fly element */
-.stage[data-state="combined"] .card-b .order-item {
-  opacity: 0;
-  transition: opacity 150ms linear;
+.tote-fly.is-flying {
+  display: flex;
 }
 
 .stage[data-state="combined"] .card-b {
@@ -964,8 +985,12 @@ html.intro-seen .hero-stage {
 
 .steps > li {
   display: flex;
-  min-height: 62vh;
+  min-height: min(62vh, 560px);
   align-items: center;
+}
+
+.steps > li:first-child {
+  min-height: min(42vh, 380px);
 }
 
 .step-inner {
@@ -1007,7 +1032,7 @@ html:not(.has-js) .steps > li {
 
 .stage-col {
   position: sticky;
-  top: calc(64px + 20px);
+  top: max(84px, calc(50vh - 170px));
 }
 
 /* ---------- Safety ---------- */
@@ -1216,6 +1241,9 @@ html:not(.has-js) .steps > li {
 }
 
 .wt-band-label {
+  position: absolute;
+  top: -22px;
+  left: 0;
   color: var(--blue);
   font-size: 11px;
   font-weight: 800;
@@ -1598,15 +1626,10 @@ html:not(.has-js) .steps > li {
   .stage-scene {
     --card-w: 88cqw;
     --card-a-x: 6cqw;
-    --card-a-y: 16cqw;
+    --card-a-y: 18cqw;
     --card-b-x: 6cqw;
-    --card-b-y: 68cqw;
-    --fly-x: 9.24cqw;
-    --fly-y: 79.4cqw;
-    --fly-w: 81.5cqw;
-    --fly-dx: 0cqw;
-    --fly-dy: -37.6cqw;
-    --chip-top: 7.5cqw;
+    --card-b-y: 66cqw;
+    --chip-top: 9cqw;
     --panel-bottom: 2.5cqw;
   }
 
@@ -1656,13 +1679,13 @@ html:not(.has-js) .steps > li {
     transform: translate(2cqw, 2cqw) scale(0.92);
   }
 
-  /* different connector geometry for stacked cards */
+  /* different connector geometry for stacked cards (scene is 100 x 125cqw) */
   .stage-links .link-a {
-    d: path("M50 13.6 L50 16");
+    d: path("M50 15.4 L50 18");
   }
 
   .stage-links .link-b {
-    d: path("M50 13.6 C 74 24 93 42 91 68");
+    d: path("M50 15.4 C 76 26 94 44 91 66");
   }
 }
 
@@ -1676,6 +1699,7 @@ html:not(.has-js) .steps > li {
   .stage-col {
     z-index: 10;
     top: 76px;
+    order: -1;
   }
 
   .stage-col .stage-box {
@@ -1698,16 +1722,11 @@ html:not(.has-js) .steps > li {
   .stage-col .stage-scene {
     --card-w: 36cqw;
     --card-a-x: 7cqw;
-    --card-a-y: 16cqw;
+    --card-a-y: 13.5cqw;
     --card-b-x: 57cqw;
-    --card-b-y: 16cqw;
-    --fly-x: 58.8cqw;
-    --fly-y: 22.3cqw;
-    --fly-w: 32.4cqw;
-    --fly-dx: -50cqw;
-    --fly-dy: 6.2cqw;
-    --chip-top: 6cqw;
-    --panel-bottom: 2cqw;
+    --card-b-y: 13.5cqw;
+    --chip-top: 4cqw;
+    --panel-bottom: 2.5cqw;
   }
 
   .stage-col .stage-scene > .order-card,
@@ -1748,11 +1767,11 @@ html:not(.has-js) .steps > li {
   }
 
   .stage-col .stage-links .link-a {
-    d: path("M50 11 C 46 12.5 36 14 25 16");
+    d: path("M50 7.4 C 45 9 33 11 25 13.5");
   }
 
   .stage-col .stage-links .link-b {
-    d: path("M50 11 C 54 12.5 64 14 75 16");
+    d: path("M50 7.4 C 55 9 67 11 75 13.5");
   }
 }
 
@@ -1852,17 +1871,22 @@ html:not(.has-js) .steps > li {
     transform-origin: top;
   }
 
+  /* band becomes a full-width block behind rows 1–4 */
   .wt-band {
-    top: 4%;
-    left: 18px;
-    width: 36px;
-    height: 70%;
-    transform: translateX(-50%);
+    top: -8px;
+    right: -8px;
+    bottom: 15%;
+    left: -8px;
+    width: auto;
+    height: auto;
+    border-radius: 14px;
     transform-origin: top;
   }
 
   .wt-band-label {
-    writing-mode: vertical-rl;
+    top: 12px;
+    right: 16px;
+    left: auto;
   }
 
   .wt-markers {
@@ -1901,7 +1925,7 @@ html:not(.has-js) .steps > li {
   }
 
   .has-js .window-timeline .wt-band {
-    transform: translateX(-50%) scaleY(0);
+    transform: scaleY(0);
     transform-origin: top;
   }
 
@@ -1910,7 +1934,7 @@ html:not(.has-js) .steps > li {
   }
 
   .has-js .window-timeline.is-visible .wt-band {
-    transform: translateX(-50%) scaleY(1);
+    transform: scaleY(1);
   }
 }
 
@@ -1936,6 +1960,6 @@ html:not(.has-js) .steps > li {
   }
 
   .has-js .window-timeline .wt-band {
-    transform: translateX(-50%) scaleY(1);
+    transform: scaleY(1);
   }
 }

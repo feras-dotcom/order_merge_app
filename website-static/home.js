@@ -17,14 +17,73 @@ const STAGE_SEQUENCE = [
 const railsOf = (stage) =>
   Array.from(stage.querySelectorAll(".stage-step[data-step-target]"));
 
-const setStageState = (stage, state) => {
-  stage.dataset.state = state;
+const syncRail = (stage) =>
   railsOf(stage).forEach((button) =>
     button.setAttribute(
       "aria-pressed",
-      String(button.dataset.stepTarget === state),
+      String(button.dataset.stepTarget === stage.dataset.state),
     ),
   );
+
+// The tote row's flight into #1104 is a measured FLIP, only on the
+// autoplay-driven transition. Instant transitions (rail jumps, scroll
+// stage, reduced motion) reveal the slotted row directly via is-landed.
+const setStageState = (stage, state, { animateFly = false } = {}) => {
+  const scene = stage.querySelector(".stage-scene");
+  const fly = stage.querySelector(".tote-fly");
+  const source = stage.querySelector(".card-b .order-item");
+  const target = stage.querySelector(".card-a .order-slot .order-item");
+  const enteringCombined =
+    state === "combined" && stage.dataset.state !== "combined";
+
+  if (!enteringCombined) {
+    if (stage._flyAnim) {
+      stage._flyAnim.cancel();
+      stage._flyAnim = null;
+    }
+    stage.dataset.state = state;
+    if (state !== "combined") stage.classList.remove("is-landed");
+    syncRail(stage);
+    return;
+  }
+
+  if (!animateFly || reduceMotion.matches || !scene || !fly || !source || !target) {
+    stage.dataset.state = state;
+    stage.classList.add("is-landed");
+    syncRail(stage);
+    return;
+  }
+
+  // measure the source row before the state change
+  const fromRect = source.getBoundingClientRect();
+  stage.dataset.state = state;
+  const sceneRect = scene.getBoundingClientRect(); // reflow
+  const toRect = target.getBoundingClientRect();
+
+  fly.style.left = `${toRect.left - sceneRect.left}px`;
+  fly.style.top = `${toRect.top - sceneRect.top}px`;
+  fly.style.width = `${toRect.width}px`;
+  fly.style.fontSize = getComputedStyle(target).fontSize;
+  fly.classList.add("is-flying");
+
+  const dx = fromRect.left - toRect.left;
+  const dy = fromRect.top - toRect.top;
+  const anim = fly.animate(
+    [
+      { transform: `translate(${dx}px, ${dy}px)` },
+      { transform: "translate(0px, 0px)" },
+    ],
+    { duration: 600, easing: "cubic-bezier(0.7, 0, 0.2, 1)", fill: "forwards" },
+  );
+  stage._flyAnim = anim;
+
+  const finish = () => {
+    stage._flyAnim = null;
+    stage.classList.add("is-landed");
+    window.setTimeout(() => fly.classList.remove("is-flying"), 120);
+  };
+  anim.onfinish = finish;
+  anim.oncancel = finish;
 };
 
 window.MergeShipStage = { set: setStageState };
@@ -71,7 +130,9 @@ const startAutoplay = () => {
     startedAt = performance.now();
     timer = window.setTimeout(() => {
       timer = 0;
-      setStageState(heroStage, pendingStep);
+      setStageState(heroStage, pendingStep, {
+        animateFly: pendingStep === "combined",
+      });
       stepIndex += 1;
       scheduleStep();
     }, delay);
@@ -111,7 +172,9 @@ const startAutoplay = () => {
       startedAt = performance.now();
       timer = window.setTimeout(() => {
         timer = 0;
-        setStageState(heroStage, pendingStep);
+        setStageState(heroStage, pendingStep, {
+          animateFly: pendingStep === "combined",
+        });
         stepIndex += 1;
         scheduleStep();
       }, Math.max(0, remaining));
@@ -149,13 +212,35 @@ const intro = document.querySelector(".intro");
 
 if (intro && introPending && !reduceMotion.matches) {
   const lockup = intro.querySelector(".intro-lockup");
+  const mark = intro.querySelector(".intro-mark");
   const skipButton = intro.querySelector(".intro-skip");
   const headerBrandImg = document.querySelector(".site-header .brand img");
   const timers = [];
   let flight = null;
   let done = false;
 
-  const later = (fn, ms) => timers.push(window.setTimeout(fn, ms));
+  // Anchor every timer to the CSS animation clock so the deferred-script
+  // offset cannot skew the sequence.
+  const markAnim = mark?.getAnimations?.()[0];
+  const base = markAnim?.startTime ?? document.timeline.currentTime;
+  const at = (T, fn) =>
+    timers.push(
+      window.setTimeout(
+        fn,
+        Math.max(0, base + T - document.timeline.currentTime),
+      ),
+    );
+
+  const onKey = (event) => {
+    if (
+      event.key === "Escape" ||
+      event.key === "Enter" ||
+      event.key === " "
+    ) {
+      finishIntro({ skipped: true });
+    }
+  };
+  const onPointerDown = () => finishIntro({ skipped: true });
 
   const finishIntro = ({ skipped = false } = {}) => {
     if (done) return;
@@ -165,8 +250,10 @@ if (intro && introPending && !reduceMotion.matches) {
       flight = null;
     }
     timers.forEach((id) => window.clearTimeout(id));
+    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("pointerdown", onPointerDown);
     docEl.classList.remove("intro-pending");
-    docEl.classList.add("intro-done");
+    docEl.classList.add("intro-done", "intro-landed");
     if (lockup) lockup.style.visibility = "hidden";
     intro.hidden = true;
     try {
@@ -178,11 +265,9 @@ if (intro && introPending && !reduceMotion.matches) {
   };
 
   // 1150–1850: FLIP flight of the lockup onto the header brand
-  later(() => {
+  at(1150, () => {
     if (!lockup || !headerBrandImg) return;
-    const from = lockup
-      .querySelector("img")
-      .getBoundingClientRect();
+    const from = lockup.querySelector("img").getBoundingClientRect();
     const to = headerBrandImg.getBoundingClientRect();
     if (!from.width || !to.width) return;
     const scale = to.width / from.width;
@@ -203,28 +288,19 @@ if (intro && introPending && !reduceMotion.matches) {
     );
     flight.onfinish = () => {
       lockup.style.visibility = "hidden";
+      docEl.classList.add("intro-landed");
       flight = null;
     };
-  }, 1150);
+  });
 
   // 3100: stage autoplay; 3200: intro done; 4000: safety skip
-  later(startAutoplay, 3100);
-  later(() => finishIntro(), 3200);
-  later(() => finishIntro({ skipped: true }), 4000);
+  at(3100, startAutoplay);
+  at(3200, () => finishIntro());
+  at(4000, () => finishIntro({ skipped: true }));
 
-  const skipIntro = () => finishIntro({ skipped: true });
-  skipButton?.addEventListener("click", skipIntro);
-  intro.addEventListener("click", skipIntro);
-  document.addEventListener("keydown", (event) => {
-    if (
-      !done &&
-      (event.key === "Escape" ||
-        event.key === "Enter" ||
-        event.key === " ")
-    ) {
-      skipIntro();
-    }
-  });
+  skipButton?.addEventListener("click", () => finishIntro({ skipped: true }));
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("pointerdown", onPointerDown);
 } else if (heroStage) {
   // Return visit this session, or reduced motion: hero timings already
   // compressed by --t0; autoplay follows the same t0 + 1800ms offset.
@@ -240,7 +316,11 @@ document.querySelectorAll(".faq-list details").forEach((details) => {
   let animating = false;
 
   summary.addEventListener("click", (event) => {
-    if (reduceMotion.matches || typeof details.animate !== "function" || animating) {
+    if (
+      reduceMotion.matches ||
+      typeof details.animate !== "function" ||
+      animating
+    ) {
       return; // native toggle
     }
     event.preventDefault();

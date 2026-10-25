@@ -208,6 +208,7 @@ section[id] {
   font-size: 14px;
   font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
   transition: color 160ms var(--ease-soft);
 }
 
@@ -251,7 +252,7 @@ section[id] {
 }
 
 /* The in-panel CTA only exists for the collapsed menu */
-.nav-cta {
+.primary-nav > .nav-cta {
   display: none;
 }
 
@@ -885,9 +886,22 @@ section[id] {
     display: none;
   }
 
-  .primary-nav .nav-cta {
+  /* The panel CTA is a button, not a nav link — reset the link styles */
+  .primary-nav > .nav-cta {
     display: inline-flex;
+    width: 100%;
+    justify-content: center;
     margin-top: 14px;
+    padding: 0 15px;
+    border-top: 0;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 780;
+    letter-spacing: -0.01em;
+  }
+
+  .primary-nav > .nav-cta::after {
+    display: none;
   }
 
   .nav-toggle {
@@ -959,9 +973,11 @@ section[id] {
     opacity: 0;
   }
 
-  /* The header CTA moves inside the sheet on narrow screens */
+  /* The header CTA shrinks next to the toggle between 680–960px */
   .header-row > .button {
-    display: none;
+    min-height: 36px;
+    padding-inline: 12px;
+    font-size: 12px;
   }
 
   .editorial-header-row {
@@ -999,6 +1015,11 @@ section[id] {
   .brand img {
     width: 34px;
     height: 34px;
+  }
+
+  /* Below 680px the header CTA gives way to the in-panel CTA */
+  .header-row > .button {
+    display: none;
   }
 
   .video-frame {

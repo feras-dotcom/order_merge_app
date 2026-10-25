@@ -60,7 +60,10 @@ Durations: micro `160ms`, reveal `640ms`, flight `700ms`, word rise `700ms`.
    Sticky; gains a hairline and white background after 10px of scroll.
    Below 960px the navigation collapses into a disclosure panel opened by a
    menu button (`aria-expanded`, `aria-controls`); it closes on link click,
-   Escape, or outside click and returns focus to the button.
+   Escape, or outside click and returns focus to the button. The header CTA
+   stays beside the toggle (compact label) down to 680px; below 680 it hides
+   and the panel's own CTA takes over. The homepage carries five Shopify App
+   Store links: header, panel CTA, hero, pricing, final.
 2. **Hero** — single centred column: H1 "Stop shipping the same customer
    twice." (dominant), approved lead, primary CTA "Try free for 30 days"
    (Shopify App Store), secondary CTA "See how it works" (`#how-it-works`),
@@ -121,6 +124,11 @@ users always get the final layout immediately.
 
 Times are milliseconds from first paint. Every hero delay is written as
 `calc(var(--t0) + offset)` so the whole hero reveal shifts with one variable.
+JS timers are anchored to the CSS animation clock: `base` is the
+`.intro-mark` animation's `startTime` (fallback `document.timeline.currentTime`)
+and each timed event below fires via `setTimeout` at
+`base + T − document.timeline.currentTime`, so the deferred-script offset
+cannot skew the sequence.
 
 | Time | Element | Motion |
 | --- | --- | --- |
@@ -132,13 +140,13 @@ Times are milliseconds from first paint. Every hero delay is written as
 | 1150–1850 | lockup | **FLIP flight** to the header brand (JS, Web Animations API, `--ease-inout`). The lockup is a 2.67× replica of the header brand, so a single translate+scale lands it exactly on the header logo. Scale factor is measured from the two `img` rects at flight start. |
 | 1200–1700 | `.intro-backdrop` | opacity 1→0. |
 | 1300 + 55·n | H1 words | Each word (`.w > span`) rises translateY 110%→0 inside an overflow-hidden mask, 700ms `--ease-soft`; six words, last finishes ≈2275. |
-| 1750 | header nav + header CTA | opacity 0→1, 300ms; the header brand becomes visible on the same frame the lockup is hidden (1850). |
+| 1750 | header nav + header CTA | opacity 0→1, 300ms. The header brand stays `opacity: 0` while `intro-pending` is set; JS adds `html.intro-landed` on flight finish (or on skip), revealing it the same frame the lockup is hidden. |
 | 1900 | `.hero-lead` | opacity + translateY 16→0, 600ms. |
 | 2050 | `.hero-actions` | same, 600ms. |
 | 2150 | `.hero-facts` | opacity only, 500ms. |
 | 2250–3050 | `.hero-stage` | opacity + translateY 28→0 + scale 0.98→1, 800ms. |
 | 3100 | combine stage | Autoplay begins (see below). |
-| 3200 | `html` | `intro-pending` → `intro-done`; `.intro` gets `hidden`. No visual change: all animations have already reached their `forwards` fill. |
+| 3200 | `html` | `intro-pending` → `intro-done` + `intro-landed`; `.intro` gets `hidden`. No visual change: all animations have already reached their `forwards` fill. |
 
 Mobile (<680px): the lockup mark is 72px instead of 96px and the same timeline
 runs with `--t0: 1100ms`.
@@ -151,12 +159,15 @@ Autoplay starts at ≈1800ms.
 
 ### Skip
 
-`finishIntro({ skipped: true })` runs on: the "Skip intro" button, any click on
-the overlay, Escape/Enter/Space, or the 4000ms safety timer. It cancels the
-flight animation, removes `intro-pending`, adds `intro-done`, hides `.intro`,
-shows the header brand, and starts the stage autoplay. Because every hero
-animation lives under `html.intro-pending`/`html.intro-seen`, removing the
-class snaps every element to its final, fully visible state in one frame.
+`finishIntro({ skipped: true })` runs on: the "Skip intro" button, any
+`pointerdown` on the document during the intro (the overlay is
+`pointer-events: none`, so clicks pass through), Escape/Enter/Space, or the
+4000ms safety timer. It cancels the flight animation, removes `intro-pending`,
+adds `intro-done` and `intro-landed` (the header brand appears), hides
+`.intro`, removes the keydown/pointerdown listeners, and starts the stage
+autoplay. Because every hero animation lives under
+`html.intro-pending`/`html.intro-seen`, removing the class snaps every element
+to its final, fully visible state in one frame.
 
 ### Guarantees
 
@@ -181,7 +192,16 @@ in "How it works" (`data-stage="scroll"`). Its appearance is driven entirely by
 | `orders` | Two separate order cards from Sarah M.: #1104 (Premium Hoodie, Light Blue / M, $84.55, placed 10:02) and #1105 (Canvas Tote, Natural / Navy, $46.55, placed 10:09). Both Paid · Unfulfilled. |
 | `detect` | A customer chip ("Sarah M. · 2 open orders") appears above the cards and connector lines draw to each card (`stroke-dashoffset`). Label: "Repeat order detected". |
 | `check` | An eligibility panel slides in; rows tick in sequence (350ms apart): Same customer · Shipping address and method · Paid, open, and unfulfilled · "+ additional safety checks". Label: "Eligibility checked before anything changes". |
-| `combined` | The tote line item travels into #1104, whose badge becomes "Unfulfilled (2)" and gains "Ready to fulfill"; #1105 shrinks, dims, moves behind and reads "Cancelled · closed". Label: "Combined before fulfillment". |
+| `combined` | The tote line item travels into #1104, whose badge becomes "Unfulfilled (2)" and gains "Ready to fulfill"; #1105's item body collapses to header-only as it shrinks, dims, moves behind and reads "Cancelled · closed". Label: "Combined before fulfillment". |
+
+The stage box is `aspect-ratio: 2/1` (scene coordinates are `cqw` percentages
+of a 100×50 grid). On the autoplay transition into `combined`, home.js runs a
+measured FLIP for the tote row: it records `.card-b .order-item`'s rect,
+flips `data-state`, forces reflow, reads `.card-a .order-slot .order-item`'s
+rect, then animates `.tote-fly` from `translate(from−to)` to identity over
+600ms `--ease-inout`. On finish the stage gets `.is-landed` (the real slotted
+row fades in, the fly element hides). Rail jumps, the scroll stage, and
+reduced motion skip the flight entirely and land instantly.
 
 Deliberately **not** shown: shipping charges, refunds, packages, undo. The
 copy never implies that identical customer details alone make a pair eligible.

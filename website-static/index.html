@@ -223,21 +223,29 @@
               >See how it works</a
             >
           </div>
-          <p class="hero-facts">
-            Shopify app<span aria-hidden="true">·</span>$19/month after a 30-day
-            free trial<span aria-hidden="true">·</span>Unlimited automatic
-            combines<span aria-hidden="true">·</span>No per-combine fees
-          </p>
+          <ul class="hero-facts">
+            <li>Shopify app</li>
+            <li>$19/month after a 30-day free trial</li>
+            <li>Unlimited automatic combines</li>
+            <li>No per-combine fees</li>
+          </ul>
 
           <div class="hero-stage">
             <div
               class="stage"
               data-stage="auto"
               data-state="orders"
+              role="group"
               aria-label="MergeShip combine demonstration"
             >
+              <p class="sr-only">
+                MergeShip flags repeat orders from the same customer, checks
+                that the customer, shipping details, currency and items all
+                match, then moves eligible items into the oldest order and
+                cancels the extra order.
+              </p>
               <div class="stage-box">
-                <div class="stage-scene">
+                <div class="stage-scene" aria-hidden="true">
                   <p class="stage-label">
                     <span data-label="orders">Two separate orders</span>
                     <span data-label="detect">Repeat order detected</span>
@@ -250,19 +258,19 @@
                   </p>
                   <svg
                     class="stage-links"
-                    viewBox="0 0 100 56.25"
+                    viewBox="0 0 100 50"
                     preserveAspectRatio="none"
                     aria-hidden="true"
                   >
                     <path
                       class="link-a"
                       pathLength="100"
-                      d="M50 11 C 46 12.5 36 14 25 16"
+                      d="M50 8.6 C 45 10 33 11.5 25 13.5"
                     />
                     <path
                       class="link-b"
                       pathLength="100"
-                      d="M50 11 C 54 12.5 64 14 75 16"
+                      d="M50 8.6 C 55 10 67 11.5 75 13.5"
                     />
                   </svg>
                   <div class="customer-chip">Sarah M. · 2 open orders</div>
@@ -291,7 +299,22 @@
                         </span>
                         <span class="item-price">$84.55</span>
                       </div>
-                      <div class="order-slot" aria-hidden="true"></div>
+                      <div class="order-slot">
+                        <div class="order-item">
+                          <img
+                            class="order-thumb"
+                            src="/assets/media/product-tote.png"
+                            alt=""
+                            width="44"
+                            height="44"
+                          />
+                          <span class="item-text">
+                            <span class="item-name">Canvas Tote</span>
+                            <span class="item-var">Natural / Navy</span>
+                          </span>
+                          <span class="item-price">$46.55</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -502,10 +525,17 @@
                 class="stage"
                 data-stage="scroll"
                 data-state="orders"
+                role="group"
                 aria-label="MergeShip combine demonstration"
               >
+                <p class="sr-only">
+                  MergeShip flags repeat orders from the same customer, checks
+                  that the customer, shipping details, currency and items all
+                  match, then moves eligible items into the oldest order and
+                  cancels the extra order.
+                </p>
                 <div class="stage-box">
-                  <div class="stage-scene">
+                  <div class="stage-scene" aria-hidden="true">
                     <p class="stage-label">
                       <span data-label="orders">Two separate orders</span>
                       <span data-label="detect">Repeat order detected</span>
@@ -518,19 +548,19 @@
                     </p>
                     <svg
                       class="stage-links"
-                      viewBox="0 0 100 56.25"
+                      viewBox="0 0 100 50"
                       preserveAspectRatio="none"
                       aria-hidden="true"
                     >
                       <path
                         class="link-a"
                         pathLength="100"
-                        d="M50 11 C 46 12.5 36 14 25 16"
+                        d="M50 8.6 C 45 10 33 11.5 25 13.5"
                       />
                       <path
                         class="link-b"
                         pathLength="100"
-                        d="M50 11 C 54 12.5 64 14 75 16"
+                        d="M50 8.6 C 55 10 67 11.5 75 13.5"
                       />
                     </svg>
                     <div class="customer-chip">Sarah M. · 2 open orders</div>
@@ -559,7 +589,22 @@
                           </span>
                           <span class="item-price">$84.55</span>
                         </div>
-                        <div class="order-slot" aria-hidden="true"></div>
+                        <div class="order-slot">
+                          <div class="order-item">
+                            <img
+                              class="order-thumb"
+                              src="/assets/media/product-tote.png"
+                              alt=""
+                              width="44"
+                              height="44"
+                            />
+                            <span class="item-text">
+                              <span class="item-name">Canvas Tote</span>
+                              <span class="item-var">Natural / Navy</span>
+                            </span>
+                            <span class="item-price">$46.55</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
