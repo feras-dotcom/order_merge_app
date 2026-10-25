@@ -54,11 +54,21 @@ export function validateCostExtension(extensions: unknown): CostCheck {
       return { ok: false, reason: `fields[${i}] is not an object` };
     }
     const fe = f as Record<string, unknown>;
-    if (!isNum(fe.requestedQueryCost)) {
-      return { ok: false, reason: `fields[${i}].requestedQueryCost not numerical` };
+    // Real Shopify Cost-Debug entries look like
+    // { path: [...], definedCost: n|null, requestedTotalCost: n,
+    //   requestedChildrenCost: n|null } — the document-level
+    // requestedQueryCost/actualQueryCost live on extensions.cost itself,
+    // not inside field entries.
+    if (!Array.isArray(fe.path)) {
+      return { ok: false, reason: `fields[${i}].path missing or not an array` };
     }
-    if (fe.actualQueryCost !== undefined && !isNum(fe.actualQueryCost)) {
-      return { ok: false, reason: `fields[${i}].actualQueryCost not numerical` };
+    if (!isNum(fe.requestedTotalCost)) {
+      return { ok: false, reason: `fields[${i}].requestedTotalCost not numerical` };
+    }
+    for (const prop of ["definedCost", "requestedChildrenCost"] as const) {
+      if (fe[prop] !== undefined && fe[prop] !== null && !isNum(fe[prop])) {
+        return { ok: false, reason: `fields[${i}].${prop} must be a number or null` };
+      }
     }
   }
   return {

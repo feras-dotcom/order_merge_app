@@ -12,16 +12,39 @@ const goodExt = (requested = 10, actual = 2) => ({
   cost: {
     requestedQueryCost: requested,
     actualQueryCost: actual,
-    fields: [{ path: ["order", "refunds"], requestedQueryCost: 5, actualQueryCost: 1 }],
+    fields: [{ path: ["order", "refunds"], definedCost: 2, requestedTotalCost: 5, requestedChildrenCost: null }],
     throttleStatus: { currentlyAvailable: 990 },
   },
 });
+
+// Representative of real Shopify Admin API Cost-Debug output: top-level
+// requestedQueryCost/actualQueryCost; per-field entries carry path,
+// definedCost (nullable), requestedTotalCost, requestedChildrenCost
+// (nullable) — no requestedQueryCost inside entries.
+const realShopifyExt = {
+  cost: {
+    requestedQueryCost: 42,
+    actualQueryCost: 7,
+    throttleStatus: { maximumAvailable: 2000, currentlyAvailable: 1958, restoreRate: 100 },
+    fields: [
+      { path: ["order"], definedCost: 2, requestedTotalCost: 2, requestedChildrenCost: null },
+      { path: ["order", "refunds"], definedCost: 10, requestedTotalCost: 20, requestedChildrenCost: 10 },
+      { path: ["order", "agreements", "nodes", "app"], definedCost: null, requestedTotalCost: 5, requestedChildrenCost: null },
+    ],
+  },
+};
 
 describe("validateCostExtension", () => {
   it("accepts a well-formed debug-cost extension", () => {
     const r = validateCostExtension(goodExt(37, 4));
     expect(r).toMatchObject({ ok: true, requestedQueryCost: 37, actualQueryCost: 4 });
     if (r.ok) expect(r.fields[0].path).toEqual(["order", "refunds"]);
+  });
+
+  it("accepts representative Shopify debug output incl. nullable field cost props", () => {
+    const r = validateCostExtension(realShopifyExt);
+    expect(r).toMatchObject({ ok: true, requestedQueryCost: 42, actualQueryCost: 7 });
+    if (r.ok) expect(r.fields).toHaveLength(3);
   });
 
   it.each([
@@ -33,8 +56,10 @@ describe("validateCostExtension", () => {
     ["fields not array", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: {} } }],
     ["empty fields breakdown", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [] } }],
     ["fields entry not object", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [null] } }],
-    ["fields entry missing cost", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ path: ["order"] }] } }],
-    ["fields entry non-numeric actual", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ requestedQueryCost: 3, actualQueryCost: "x" }] } }],
+    ["fields entry missing path", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ requestedTotalCost: 3 }] } }],
+    ["fields entry missing requestedTotalCost", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ path: ["order"] }] } }],
+    ["fields entry non-numeric definedCost", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ path: ["o"], requestedTotalCost: 3, definedCost: "x" }] } }],
+    ["fields entry non-numeric requestedChildrenCost", { cost: { requestedQueryCost: 12, actualQueryCost: 2, fields: [{ path: ["o"], requestedTotalCost: 3, requestedChildrenCost: "x" }] } }],
   ])("fails on %s", (_label, ext) => {
     expect(validateCostExtension(ext).ok).toBe(false);
   });
