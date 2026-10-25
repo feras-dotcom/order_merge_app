@@ -448,6 +448,18 @@ html.intro-seen .hero-stage {
 
 /* Customer chip */
 
+.chip-combined {
+  display: none;
+}
+
+.stage[data-state="combined"] .chip-open {
+  display: none;
+}
+
+.stage[data-state="combined"] .chip-combined {
+  display: inline;
+}
+
 .customer-chip {
   position: absolute;
   z-index: 5;
@@ -505,24 +517,19 @@ html.intro-seen .hero-stage {
   stroke: var(--blue);
   stroke-width: 1.5px;
   stroke-linecap: round;
-  stroke-dasharray: 100;
-  stroke-dashoffset: 100;
   vector-effect: non-scaling-stroke;
   opacity: 0;
-  transition:
-    stroke-dashoffset 600ms var(--ease-out) 120ms,
-    opacity 300ms var(--ease-soft);
+  transition: opacity 300ms var(--ease-soft);
+}
+
+.stage-links .link-b {
+  transition-delay: 140ms;
 }
 
 .stage[data-state="detect"] .stage-links path,
 .stage[data-state="check"] .stage-links path,
 .stage[data-state="combined"] .stage-links path {
-  stroke-dashoffset: 0;
   opacity: 0.75;
-}
-
-.stage-links .link-b {
-  transition-delay: 240ms;
 }
 
 /* Order cards — shared component (also used statically in #safety) */
@@ -584,7 +591,7 @@ html.intro-seen .hero-stage {
 
 .order-time {
   margin-left: auto;
-  color: var(--ink-faint);
+  color: var(--ink-soft);
   font-size: 0.78em;
   font-weight: 650;
   white-space: nowrap;
@@ -858,6 +865,10 @@ html.intro-seen .hero-stage {
 
 /* Step rail (auto stage only) */
 
+.stage:not(.controls-bound) .stage-rail {
+  display: none;
+}
+
 .stage-rail {
   display: flex;
   align-items: center;
@@ -993,11 +1004,17 @@ html.intro-seen .hero-stage {
 
 .steps > li {
   display: flex;
-  min-height: min(62vh, 560px);
+  min-height: 0;
   align-items: center;
+  padding-block: 26px;
 }
 
-.steps > li:first-child {
+html.home-ready .steps > li {
+  min-height: min(62vh, 560px);
+  padding-block: 0;
+}
+
+html.home-ready .steps > li:first-child {
   min-height: min(42vh, 380px);
 }
 
@@ -1006,7 +1023,7 @@ html.intro-seen .hero-stage {
 }
 
 .step-num {
-  color: var(--blue);
+  color: var(--blue-dark);
   font-size: 13px;
   font-weight: 850;
   letter-spacing: 0.14em;
@@ -1027,16 +1044,7 @@ html.intro-seen .hero-stage {
   line-height: 1.65;
 }
 
-.steps > li {
-  opacity: 0.38;
-  transition: opacity 300ms var(--ease-soft);
-}
 
-.steps > li[aria-current="step"],
-.no-js .steps > li,
-html:not(.has-js) .steps > li {
-  opacity: 1;
-}
 
 .stage-col {
   position: sticky;
@@ -1314,17 +1322,17 @@ html:not(.has-js) .steps > li {
 
 /* draw-in animation, triggered by the shared reveal observer */
 
-.has-js .window-timeline .wt-line,
-.has-js .window-timeline .wt-band {
+.reveal-ready .window-timeline .wt-line,
+.reveal-ready .window-timeline .wt-band {
   transform: scaleX(0);
   transition: transform 700ms var(--ease-out);
 }
 
-.has-js .window-timeline .wt-band {
+.reveal-ready .window-timeline .wt-band {
   transition-delay: 350ms;
 }
 
-.has-js .window-timeline .wt-marker {
+.reveal-ready .window-timeline .wt-marker {
   opacity: 0;
   transform: translateY(10px) scale(0.9);
   transition:
@@ -1332,24 +1340,24 @@ html:not(.has-js) .steps > li {
     transform 500ms var(--ease-out);
 }
 
-.has-js .window-timeline.is-visible .wt-line {
+.reveal-ready .window-timeline.is-visible .wt-line {
   transform: scaleX(1);
 }
 
-.has-js .window-timeline.is-visible .wt-band {
+.reveal-ready .window-timeline.is-visible .wt-band {
   transform: scaleX(1);
 }
 
-.has-js .window-timeline.is-visible .wt-marker {
+.reveal-ready .window-timeline.is-visible .wt-marker {
   opacity: 1;
   transform: none;
 }
 
-.has-js .window-timeline.is-visible .wt-marker:nth-child(1) { transition-delay: 200ms; }
-.has-js .window-timeline.is-visible .wt-marker:nth-child(2) { transition-delay: 300ms; }
-.has-js .window-timeline.is-visible .wt-marker:nth-child(3) { transition-delay: 400ms; }
-.has-js .window-timeline.is-visible .wt-marker:nth-child(4) { transition-delay: 500ms; }
-.has-js .window-timeline.is-visible .wt-marker:nth-child(5) { transition-delay: 600ms; }
+.reveal-ready .window-timeline.is-visible .wt-marker:nth-child(1) { transition-delay: 200ms; }
+.reveal-ready .window-timeline.is-visible .wt-marker:nth-child(2) { transition-delay: 300ms; }
+.reveal-ready .window-timeline.is-visible .wt-marker:nth-child(3) { transition-delay: 400ms; }
+.reveal-ready .window-timeline.is-visible .wt-marker:nth-child(4) { transition-delay: 500ms; }
+.reveal-ready .window-timeline.is-visible .wt-marker:nth-child(5) { transition-delay: 600ms; }
 
 /* Scenario grid */
 
@@ -1689,14 +1697,6 @@ html:not(.has-js) .steps > li {
     transform: translate(2cqw, 2cqw) scale(0.92);
   }
 
-  /* different connector geometry for stacked cards (scene is 100 x 125cqw) */
-  .stage-links .link-a {
-    d: path("M50 15.4 L50 18");
-  }
-
-  .stage-links .link-b {
-    d: path("M50 15.4 C 76 26 94 44 91 66");
-  }
 }
 
 /* Scroll-driven stage: sticky mini-map under the header on small screens */
@@ -1718,7 +1718,7 @@ html:not(.has-js) .steps > li {
     max-height: 300px;
   }
 
-  .steps > li {
+  html.home-ready .steps > li {
     min-height: 46vh;
   }
 }
@@ -1778,13 +1778,6 @@ html:not(.has-js) .steps > li {
     font-size: calc(1.3cqw + 0.5px);
   }
 
-  .stage-col .stage-links .link-a {
-    d: path("M50 10.6 C 45 12.5 34 16 25 19");
-  }
-
-  .stage-col .stage-links .link-b {
-    d: path("M50 10.6 C 55 12.5 66 16 75 19");
-  }
 }
 
 /* ---------- Responsive sections ---------- */
@@ -1830,14 +1823,16 @@ html:not(.has-js) .steps > li {
 
   .hero-facts {
     display: grid;
-    grid-template-columns: repeat(2, auto);
-    justify-content: center;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px 18px;
     font-size: 12px;
   }
 
   .hero-facts li {
+    min-width: 0;
     text-align: center;
+    white-space: normal;
   }
 
   .hero-facts li + li::before {
@@ -1943,21 +1938,21 @@ html:not(.has-js) .steps > li {
     max-width: none;
   }
 
-  .has-js .window-timeline .wt-line {
+  .reveal-ready .window-timeline .wt-line {
     transform: scaleY(0);
     transform-origin: top;
   }
 
-  .has-js .window-timeline .wt-band {
+  .reveal-ready .window-timeline .wt-band {
     transform: scaleY(0);
     transform-origin: top;
   }
 
-  .has-js .window-timeline.is-visible .wt-line {
+  .reveal-ready .window-timeline.is-visible .wt-line {
     transform: scaleY(1);
   }
 
-  .has-js .window-timeline.is-visible .wt-band {
+  .reveal-ready .window-timeline.is-visible .wt-band {
     transform: scaleY(1);
   }
 }
@@ -1969,27 +1964,32 @@ html:not(.has-js) .steps > li {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .has-js .window-timeline .wt-line,
-  .has-js .window-timeline .wt-marker {
+  html.home-ready .steps > li {
+    min-height: 0;
+    padding-block: 22px;
+  }
+
+  .reveal-ready .window-timeline .wt-line,
+  .reveal-ready .window-timeline .wt-marker {
     opacity: 1;
     transform: none;
   }
 
-  .has-js .window-timeline .wt-line {
+  .reveal-ready .window-timeline .wt-line {
     transform: scaleX(1);
   }
 
-  .has-js .window-timeline .wt-band {
+  .reveal-ready .window-timeline .wt-band {
     transform: scaleX(1);
   }
 }
 
 @media (max-width: 680px) and (prefers-reduced-motion: reduce) {
-  .has-js .window-timeline .wt-line {
+  .reveal-ready .window-timeline .wt-line {
     transform: scaleY(1);
   }
 
-  .has-js .window-timeline .wt-band {
+  .reveal-ready .window-timeline .wt-band {
     transform: scaleY(1);
   }
 }

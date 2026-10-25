@@ -18,16 +18,19 @@
     <link rel="preconnect" href="https://cdn.shopify.com" />
     <link rel="stylesheet" href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css" />
     <script>
-      document.documentElement.classList.add("has-js");
+      document.documentElement.classList.add("has-js", "nav-pending");
+      window.__msNavFallback = window.setTimeout(function () {
+        document.documentElement.classList.remove("nav-pending");
+      }, 4000);
     </script>
-    <link rel="stylesheet" href="/site.css?v=motion-20261025" />
+    <link rel="stylesheet" href="/site.css?v=motion-20261027" />
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header" data-header>
       <div class="shell header-row editorial-header-row">
         <a class="brand" href="/" aria-label="MergeShip home">
-          <img src="/brand/logo-64.png" alt="" width="64" height="64" />
+          <img src="/brand/logo-64.png" srcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" sizes="36px" alt="" width="64" height="64" />
           <span>Merge<span class="brand-accent">Ship</span></span>
         </a>
         <nav
@@ -73,7 +76,7 @@
     <footer class="editorial-footer">
       <div class="guide-container editorial-footer-row">
         <a class="brand" href="/" aria-label="MergeShip home">
-          <img src="/brand/logo-64.png" alt="" width="64" height="64" />
+          <img src="/brand/logo-64.png" srcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" sizes="36px" alt="" width="64" height="64" />
           <span>MergeShip</span>
         </a>
         <nav class="editorial-footer-nav" aria-label="Footer navigation">
@@ -84,6 +87,6 @@
         </nav>
       </div>
     </footer>
-    <script src="/site.js?v=motion-20261025" defer></script>
+    <script src="/site.js?v=motion-20261027" defer></script>
   </body>
 </html>

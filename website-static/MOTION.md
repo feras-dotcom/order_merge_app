@@ -6,7 +6,7 @@ animated introduction, the product demonstration ("combine stage"), the shared
 motion system, triggers, cleanup, and the reduced-motion / no-JS fallbacks.
 
 Everything is plain HTML, CSS, and vanilla JavaScript. No animation library is
-used: the sequence is short, entirely transform/opacity based, and the one step
+used: the sequence is short and almost entirely transform/opacity based (the combine also animates max-height to collapse the cancelled order's item body), and the one step
 that needs measurement (the logo flight into the header) is a FLIP animation
 driven by the Web Animations API.
 
@@ -72,7 +72,7 @@ Durations: micro `160ms`, reveal `640ms`, flight `700ms`, word rise `700ms`.
    the **combine stage** (section 5 below), which plays once after the hero
    settles.
 3. **Trailer** — "See a combine happen in 24 seconds." with the existing
-   24-second trailer facade (poster + play, video element created on click,
+   24-second trailer facade (poster + play, video element created on click — without JS the facade keeps its play button and a `<noscript>` link to /demo,
    `preload="none"`) and a link to the four-minute `/demo`.
 4. **How it works** (`#how-it-works`) — two columns: four numbered steps on the
    left (places more than one order → detects the repeat → checks eligibility
@@ -110,15 +110,36 @@ An inline script in `<head>` runs before first paint:
 
 ```
 html.has-js                      always (replaces the old deferred class)
+html.nav-pending                 set with has-js; removed by site.js once the
+                                 disclosure listeners are bound — keeps the
+                                 collapsed mobile nav hidden during boot so it
+                                 doesn't render then collapse (CLS fix)
 html.intro-pending               first visit this session, motion allowed
 html.intro-seen                  sessionStorage["ms-intro"] === "1", motion allowed
 (no class)                       prefers-reduced-motion: reduce, or no JS
 ```
 
+`html.nav-ready` is added by site.js only after the nav listeners are wired —
+the ≤960px disclosure-panel styles are gated on it, so a blocked site.js
+leaves the nav as a static, always-visible list. `html.reveal-ready` gates the
+hidden-start reveal styles the same way. `html.home-ready` is added after the
+scroll-step observer binds and gates the generous step min-heights; without it
+(or under `prefers-reduced-motion`) the steps render compact and fully
+readable.
+
 The intro overlay (`.intro`) is `display: none` unless `html.intro-pending`.
 Hero elements are fully visible unless `html.intro-pending` or
 `html.intro-seen` is present, so crawlers, no-JS visitors, and reduced-motion
 users always get the final layout immediately.
+
+Two independent guards cover a blocked or delayed `home.js`: a 4000ms inline
+`setTimeout` (`__msIntroFallback`) removes `intro-pending`, reveals the header
+brand and hides the overlay; and named delegated `pointerdown`/`keydown`
+listeners skip the intro immediately. When `home.js` is present it exports
+`__msIntroController` (the real `finishIntro`, which cancels the logo flight
+and timers), so the inline handler delegates to it and cleans up via
+`__msIntroCleanup`. If `home.js` arrives after the fallback fired, it finds no
+`intro-pending` and does not replay the intro.
 
 ### Timeline — first visit (desktop; `--t0: 1300ms`)
 
@@ -190,7 +211,7 @@ in "How it works" (`data-stage="scroll"`). Its appearance is driven entirely by
 | `data-state` | What the visitor sees |
 | --- | --- |
 | `orders` | Two separate order cards from Sarah M.: #1104 (Premium Hoodie, Light Blue / M, $84.55, placed 10:02) and #1105 (Canvas Tote, Natural / Navy, $46.55, placed 10:09). Both Paid · Unfulfilled. |
-| `detect` | A customer chip ("Sarah M. · 2 open orders") appears above the cards and connector lines draw to each card (`stroke-dashoffset`). Label: "Repeat order detected". |
+| `detect` | A customer chip ("Sarah M. · 2 open orders" — in `combined` it switches to "Sarah M. · 1 combined order" via state-driven spans) appears above the cards and connector lines appear at each card (solid stroke, opacity 0→0.75; the second connector is staggered 140ms). The SVG viewBox and path `d` attributes are set by a ResizeObserver so the same geometry stays correct in desktop, stacked-mobile and compact-scroll variants (resize-event fallback). Label: "Repeat order detected". |
 | `check` | An eligibility panel slides in; rows tick in sequence (350ms apart): Same customer · Shipping address and method · Paid, open, and unfulfilled · "+ additional safety checks". Label: "Eligibility checked before anything changes". |
 | `combined` | The tote line item travels into #1104, whose badge becomes "Unfulfilled (2)" and gains "Ready to fulfill"; #1105's item body collapses to header-only as it shrinks, dims, moves behind and reads "Cancelled · closed". Label: "Combined before fulfillment". |
 
@@ -206,7 +227,7 @@ reduced motion skip the flight entirely and land instantly.
 Deliberately **not** shown: shipping charges, refunds, packages, undo. The
 copy never implies that identical customer details alone make a pair eligible.
 
-Below each stage a step rail lists the four states as buttons
+Below the hero stage (`data-stage="auto"`) a step rail (hidden until the stage controls are bound) lists the four states as buttons
 (`aria-pressed`). Clicking one jumps to that state and pauses autoplay; a
 "Replay" button appears once the sequence has finished.
 
@@ -225,7 +246,7 @@ the header at a reduced height and the steps scroll beneath it.
 ## Shared motion system
 
 - **Scroll reveals** — `[data-reveal]` elements start at `opacity: 0;
-  translateY(14px)` only when `html.has-js` is present and get `.is-visible`
+  translateY(14px)` only when `html.reveal-ready` is present (set by site.js only after the observer is wired, so a blocked site.js leaves content visible) and get `.is-visible`
   from one `IntersectionObserver` (`threshold: 0.08`, `rootMargin: 0 0 -10%`),
   then are unobserved. `[data-reveal-group]` staggers direct children by
   `--i × 70ms`.
@@ -247,11 +268,19 @@ the header at a reduced height and the steps scroll beneath it.
 - All hero elements are visible immediately; the hero stage shows `combined`.
 - `[data-reveal]` elements are visible; all transitions and animations are
   shortened to 1ms; `scroll-behavior` is `auto`.
-- Stage state changes still happen but snap instantly.
+- Stage state changes still happen but snap instantly — under reduce the hero
+  stage renders `combined` immediately, the rail and Replay stay functional
+  (rail jumps switch states, Replay re-settles `combined`), and a live media
+  switch into reduce cancels pending timers and any tote flight, settles the
+  stage to `combined`, and finishes the intro. Removing reduce restarts
+  nothing.
+- Manual controls still work: rail buttons switch states (instantly), Replay
+  settles `combined`, the mobile nav and FAQ toggles behave normally.
 
 No JavaScript: no classes are added, so the full page renders statically with
-every section visible, the facade shows the poster with a non-functional play
-button replaced by a direct link to `/demo`, and `<details>` work natively.
+every section visible (reveal rules never apply), the trailer facade keeps its
+poster and play button plus a `<noscript>` link to `/demo`, the collapsed nav
+stays a static stacked list, and `<details>` work natively.
 
 ## Cleanup
 

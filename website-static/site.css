@@ -180,7 +180,7 @@ section[id] {
 }
 
 .brand-accent {
-  color: var(--blue);
+  color: var(--blue-dark);
 }
 
 .primary-nav,
@@ -492,7 +492,7 @@ section[id] {
 
 /* Scroll reveals (progressive: visible without JavaScript) */
 
-.has-js [data-reveal] {
+.reveal-ready [data-reveal] {
   opacity: 0;
   transform: translateY(14px);
   transition:
@@ -500,12 +500,12 @@ section[id] {
     transform 640ms var(--ease-out);
 }
 
-.has-js [data-reveal].is-visible {
+.reveal-ready [data-reveal].is-visible {
   opacity: 1;
   transform: translateY(0);
 }
 
-.has-js [data-reveal-group] > * {
+.reveal-ready [data-reveal-group] > * {
   opacity: 0;
   transform: translateY(14px);
   transition:
@@ -513,7 +513,7 @@ section[id] {
     transform 640ms var(--ease-out) calc(var(--i, 0) * 70ms);
 }
 
-.has-js [data-reveal-group].is-visible > * {
+.reveal-ready [data-reveal-group].is-visible > * {
   opacity: 1;
   transform: translateY(0);
 }
@@ -829,64 +829,24 @@ section[id] {
 /* Responsive */
 
 @media (max-width: 960px) {
+  /* Avoid flashing the expanded fallback before the controller is ready. */
+  html.nav-pending .primary-nav {
+    display: none;
+  }
+
   .header-row {
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 12px;
   }
 
-  /* Collapsed navigation becomes a sheet below the header */
+  /* Without bound JS the nav is a static stacked list below the header row */
   .primary-nav {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    left: 0;
-    z-index: 5;
+    grid-column: 1 / -1;
     flex-direction: column;
     align-items: stretch;
     gap: 0;
-    padding: 10px var(--gutter) 18px;
-    border-top: 1px solid var(--line);
-    border-bottom: 1px solid var(--line);
-    background: #fff;
-    box-shadow: 0 18px 34px rgb(24 45 87 / 8%);
-    opacity: 0;
-    visibility: hidden;
-    transform: translateY(-8px);
-    transition:
-      opacity 200ms var(--ease-soft),
-      transform 200ms var(--ease-soft),
-      visibility 0s 200ms;
-  }
-
-  .primary-nav.is-open {
-    opacity: 1;
-    visibility: visible;
-    transform: translateY(0);
-    transition:
-      opacity 200ms var(--ease-soft),
-      transform 200ms var(--ease-soft),
-      visibility 0s;
-  }
-
-  .primary-nav[hidden] {
-    display: none;
-  }
-
-  /* No-JS fallback: show the collapsed nav as a static stacked list */
-  html:not(.has-js) .primary-nav[hidden] {
-    position: static;
-    grid-column: 1 / -1;
-    display: flex;
     padding: 8px 0 10px;
-    border-bottom: 0;
-    box-shadow: none;
-    opacity: 1;
-    visibility: visible;
-    transform: none;
-  }
-
-  html:not(.has-js) .nav-toggle {
-    display: none;
+    border-top: 1px solid var(--line);
   }
 
   .primary-nav > a {
@@ -903,8 +863,47 @@ section[id] {
     display: none;
   }
 
+  /* Once JS binds the disclosure behaviour (nav-ready), the nav becomes a
+     toggleable sheet below the header. */
+  html.nav-ready .primary-nav {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    left: 0;
+    z-index: 5;
+    padding: 10px var(--gutter) 18px;
+    border-bottom: 1px solid var(--line);
+    background: #fff;
+    box-shadow: 0 18px 34px rgb(24 45 87 / 8%);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-8px);
+    transition:
+      opacity 200ms var(--ease-soft),
+      transform 200ms var(--ease-soft),
+      visibility 0s 200ms;
+  }
+
+  html.nav-ready .primary-nav.is-open {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+    transition:
+      opacity 200ms var(--ease-soft),
+      transform 200ms var(--ease-soft),
+      visibility 0s;
+  }
+
+  html.nav-ready .primary-nav[hidden] {
+    display: none;
+  }
+
+  html.nav-ready .nav-toggle {
+    display: inline-flex;
+  }
+
   /* The panel CTA is a button, not a nav link — reset the link styles */
-  .primary-nav > .nav-cta {
+  html.nav-ready .primary-nav > .nav-cta {
     display: inline-flex;
     width: 100%;
     justify-content: center;
@@ -917,13 +916,13 @@ section[id] {
     letter-spacing: -0.01em;
   }
 
-  .primary-nav > .nav-cta::after {
+  html.nav-ready .primary-nav > .nav-cta::after {
     display: none;
   }
 
   .nav-toggle {
     position: relative;
-    display: inline-flex;
+    display: none;
     width: 40px;
     height: 40px;
     align-items: center;
@@ -1100,8 +1099,8 @@ section[id] {
     transition-duration: 0.01ms !important;
   }
 
-  .has-js [data-reveal],
-  .has-js [data-reveal-group] > * {
+  .reveal-ready [data-reveal],
+  .reveal-ready [data-reveal-group] > * {
     opacity: 1;
     transform: none;
   }

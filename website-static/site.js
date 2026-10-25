@@ -61,6 +61,10 @@ if (navToggle && primaryNav) {
       setNavOpen(false);
     }
   });
+
+  document.documentElement.classList.add("nav-ready");
+  document.documentElement.classList.remove("nav-pending");
+  window.clearTimeout(window.__msNavFallback);
 }
 
 /* Scroll reveals */
@@ -87,6 +91,7 @@ if ("IntersectionObserver" in window) {
     { rootMargin: "0px 0px -10%", threshold: 0.08 },
   );
   revealItems.forEach((item) => revealObserver.observe(item));
+  document.documentElement.classList.add("reveal-ready");
 } else {
   revealItems.forEach((item) => item.classList.add("is-visible"));
 }

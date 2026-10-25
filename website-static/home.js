@@ -29,6 +29,20 @@ const syncRail = (stage) =>
 // autoplay-driven transition. Instant transitions (rail jumps, scroll
 // stage, reduced motion) reveal the slotted row directly via is-landed.
 const setStageState = (stage, state, { animateFly = false } = {}) => {
+  // Synchronously retire any in-flight tote animation before touching state.
+  const oldFlyAnim = stage._flyAnim;
+  stage._flyAnim = null;
+  if (oldFlyAnim) {
+    oldFlyAnim.onfinish = null;
+    oldFlyAnim.oncancel = null;
+    oldFlyAnim.cancel();
+  }
+  if (stage._flyHideTimer) {
+    window.clearTimeout(stage._flyHideTimer);
+    stage._flyHideTimer = 0;
+  }
+  stage.querySelector(".tote-fly")?.classList.remove("is-flying");
+
   const scene = stage.querySelector(".stage-scene");
   const fly = stage.querySelector(".tote-fly");
   const source = stage.querySelector(".card-b .order-item");
@@ -37,12 +51,8 @@ const setStageState = (stage, state, { animateFly = false } = {}) => {
     state === "combined" && stage.dataset.state !== "combined";
 
   if (!enteringCombined) {
-    if (stage._flyAnim) {
-      stage._flyAnim.cancel();
-      stage._flyAnim = null;
-    }
     stage.dataset.state = state;
-    if (state !== "combined") stage.classList.remove("is-landed");
+    stage.classList.toggle("is-landed", state === "combined");
     syncRail(stage);
     return;
   }
@@ -77,52 +87,71 @@ const setStageState = (stage, state, { animateFly = false } = {}) => {
   );
   stage._flyAnim = anim;
 
-  const finish = () => {
+  anim.onfinish = () => {
+    if (stage._flyAnim !== anim) return; // stale callback, a newer flight owns it
     stage._flyAnim = null;
-    stage.classList.add("is-landed");
-    window.setTimeout(() => fly.classList.remove("is-flying"), 120);
+    if (stage.dataset.state === "combined") stage.classList.add("is-landed");
+    stage._flyHideTimer = window.setTimeout(() => {
+      stage._flyHideTimer = 0;
+      fly.classList.remove("is-flying");
+      anim.cancel();
+    }, 120);
   };
-  anim.onfinish = finish;
-  anim.oncancel = finish;
+  anim.oncancel = () => {
+    if (stage._flyAnim !== anim) return;
+    stage._flyAnim = null;
+    fly.classList.remove("is-flying");
+  };
 };
 
 window.MergeShipStage = { set: setStageState };
 
-/* Keep connector SVGs uniformly scaled: the viewBox height tracks the
-   box's real aspect ratio so dash patterns and stroke width stay correct. */
+/* Keep connector coordinates in the same uniform grid as the cards. */
 
+const DESKTOP_D = { a: "M50 8.6 C 45 10 33 11.5 25 13.5", b: "M50 8.6 C 55 10 67 11.5 75 13.5" };
+const STACKED_D = { a: "M50 15.4 L50 18", b: "M50 15.4 C 76 26 94 44 91 66" };
+const COMPACT_D = { a: "M50 10.6 C 45 12.5 34 16 25 19", b: "M50 10.6 C 55 12.5 66 16 75 19" };
+
+const fitStageLinks = (box, rect) => {
+  const svg = box.querySelector(".stage-links");
+  if (!svg) return;
+  const width = rect?.width ?? box.clientWidth;
+  const height = rect?.height ?? box.clientHeight;
+  if (!(width > 0 && height > 0)) return;
+  const h = (100 * height) / width;
+  svg.setAttribute("viewBox", `0 0 100 ${h.toFixed(3)}`);
+  const narrow = window.matchMedia("(max-width: 680px)").matches;
+  const kind = box.closest("[data-stage]")?.dataset.stage;
+  const paths = narrow
+    ? kind === "scroll"
+      ? COMPACT_D
+      : STACKED_D
+    : DESKTOP_D;
+  svg.querySelector(".link-a")?.setAttribute("d", paths.a);
+  svg.querySelector(".link-b")?.setAttribute("d", paths.b);
+};
+
+const stageBoxes = Array.from(document.querySelectorAll(".stage-box"));
 if ("ResizeObserver" in window) {
-  const linksObserver = new ResizeObserver((entries) => {
-    entries.forEach((entry) => {
-      const svg = entry.target.querySelector(".stage-links");
-      if (!svg) return;
-      const { width, height } = entry.contentRect;
-      if (width > 0 && height > 0) {
-        svg.setAttribute(
-          "viewBox",
-          `0 0 100 ${((100 * height) / width).toFixed(3)}`,
-        );
-      }
-    });
-  });
-  document
-    .querySelectorAll(".stage-box")
-    .forEach((box) => linksObserver.observe(box));
+  const linksObserver = new ResizeObserver((entries) =>
+    entries.forEach((entry) => fitStageLinks(entry.target, entry.contentRect)),
+  );
+  stageBoxes.forEach((box) => linksObserver.observe(box));
+} else {
+  const fitAll = () => stageBoxes.forEach(fitStageLinks);
+  window.addEventListener("resize", fitAll);
+  fitAll();
 }
 
 /* ---------- Hero stage autoplay ---------- */
 
 const heroStage = document.querySelector('.stage[data-stage="auto"]');
 let autoplayStarted = false;
+let settleAutoplayForReduced = () => {};
 
 const startAutoplay = () => {
   if (!heroStage || autoplayStarted) return;
   autoplayStarted = true;
-
-  if (reduceMotion.matches) {
-    setStageState(heroStage, "combined");
-    return;
-  }
 
   const replayButton = heroStage.querySelector(".stage-replay");
   let stepIndex = 0;
@@ -141,6 +170,7 @@ const startAutoplay = () => {
   };
 
   const scheduleStep = () => {
+    if (reduceMotion.matches) return;
     if (stepIndex >= STAGE_SEQUENCE.length) {
       finished = true;
       if (replayButton) replayButton.hidden = false;
@@ -152,6 +182,7 @@ const startAutoplay = () => {
     startedAt = performance.now();
     timer = window.setTimeout(() => {
       timer = 0;
+      if (reduceMotion.matches) return;
       setStageState(heroStage, pendingStep, {
         animateFly: pendingStep === "combined",
       });
@@ -168,12 +199,18 @@ const startAutoplay = () => {
 
   railsOf(heroStage).forEach((button) => {
     button.addEventListener("click", () => {
-      if (!finished) stop(); // jumping pauses autoplay
+      if (!finished) stop(); // jumping stops autoplay
+      finished = true;
+      if (replayButton) replayButton.hidden = false;
       setStageState(heroStage, button.dataset.stepTarget);
     });
   });
 
   replayButton?.addEventListener("click", () => {
+    if (reduceMotion.matches) {
+      settleAutoplayForReduced();
+      return;
+    }
     replayButton.hidden = true;
     setStageState(heroStage, "orders");
     stepIndex = 0;
@@ -203,6 +240,22 @@ const startAutoplay = () => {
     }
   });
 
+  settleAutoplayForReduced = () => {
+    stop();
+    finished = true;
+    if (heroStage._flyAnim) heroStage._flyAnim.cancel();
+    if (replayButton) replayButton.hidden = false;
+    setStageState(heroStage, "combined");
+  };
+
+  // Rail jumps stop autoplay, mark finished and expose Replay.
+  heroStage.classList.add("controls-bound");
+  if (reduceMotion.matches) {
+    setStageState(heroStage, "combined");
+    finished = true;
+    if (replayButton) replayButton.hidden = false;
+    return;
+  }
   scheduleStep();
 };
 
@@ -224,6 +277,7 @@ if (scrollStage && stepItems.length && "IntersectionObserver" in window) {
     { rootMargin: "-45% 0px -45% 0px", threshold: 0 },
   );
   stepItems.forEach((item) => stepObserver.observe(item));
+  docEl.classList.add("home-ready");
 } else {
   stepItems.forEach((item) => item.setAttribute("aria-current", "step"));
 }
@@ -272,6 +326,8 @@ if (intro && introPending && !reduceMotion.matches) {
       flight = null;
     }
     timers.forEach((id) => window.clearTimeout(id));
+    if (window.__msIntroFallback) window.clearTimeout(window.__msIntroFallback);
+    window.__msIntroCleanup?.();
     document.removeEventListener("keydown", onKey);
     document.removeEventListener("pointerdown", onPointerDown);
     docEl.classList.remove("intro-pending");
@@ -320,6 +376,7 @@ if (intro && introPending && !reduceMotion.matches) {
   at(3200, () => finishIntro());
   at(4000, () => finishIntro({ skipped: true }));
 
+  window.__msIntroController = finishIntro;
   skipButton?.addEventListener("click", () => finishIntro({ skipped: true }));
   document.addEventListener("keydown", onKey);
   document.addEventListener("pointerdown", onPointerDown);
@@ -330,6 +387,14 @@ if (intro && introPending && !reduceMotion.matches) {
   else window.setTimeout(startAutoplay, t0 + 1800);
 }
 
+reduceMotion.addEventListener?.("change", (ev) => {
+  if (!ev.matches) return; // do not restart anything when reduce is removed
+  startAutoplay();
+  settleAutoplayForReduced();
+  if (window.__msIntroController) window.__msIntroController({ skipped: true });
+  else if (window.__msIntroFinish) window.__msIntroFinish();
+});
+
 /* ---------- FAQ: animated details height ---------- */
 
 document.querySelectorAll(".faq-list details").forEach((details) => {
@@ -338,11 +403,11 @@ document.querySelectorAll(".faq-list details").forEach((details) => {
   let animating = false;
 
   summary.addEventListener("click", (event) => {
-    if (
-      reduceMotion.matches ||
-      typeof details.animate !== "function" ||
-      animating
-    ) {
+    if (animating) {
+      event.preventDefault();
+      return;
+    }
+    if (reduceMotion.matches || typeof details.animate !== "function") {
       return; // native toggle
     }
     event.preventDefault();

@@ -54,7 +54,10 @@
       href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css"
     />
     <script>
-      document.documentElement.classList.add("has-js");
+      document.documentElement.classList.add("has-js", "nav-pending");
+      window.__msNavFallback = window.setTimeout(function () {
+        document.documentElement.classList.remove("nav-pending");
+      }, 4000);
       try {
         if (
           !window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -68,13 +71,59 @@
       } catch (error) {
         document.documentElement.classList.add("intro-pending");
       }
+      // Independent intro fallback: if home.js never runs (blocked or slow),
+      // the overlay still clears itself after 4s, and any tap/key skips it.
+      (function () {
+        var root = document.documentElement;
+        if (!root.classList.contains("intro-pending")) return;
+        window.__msIntroCleanup = function () {
+          document.removeEventListener("pointerdown", window.__msIntroDown);
+          document.removeEventListener("keydown", window.__msIntroKey);
+        };
+        window.__msIntroFinish = function () {
+          // The full controller (home.js) cancels the flight + timers itself.
+          if (window.__msIntroController) {
+            window.__msIntroCleanup();
+            window.__msIntroController({ skipped: true });
+            return;
+          }
+          window.__msIntroCleanup();
+          if (!root.classList.contains("intro-pending")) return;
+          window.clearTimeout(window.__msIntroFallback);
+          root.classList.remove("intro-pending");
+          root.classList.add("intro-done", "intro-landed");
+          var intro = document.querySelector(".intro");
+          if (intro) intro.hidden = true;
+          try {
+            sessionStorage.setItem("ms-intro", "1");
+          } catch (e) {}
+        };
+        window.__msIntroFallback = window.setTimeout(
+          window.__msIntroFinish,
+          4000,
+        );
+        window.__msIntroDown = function () {
+          window.__msIntroFinish();
+        };
+        window.__msIntroKey = function (ev) {
+          if (
+            ev.key === "Escape" ||
+            ev.key === "Enter" ||
+            ev.key === " "
+          ) {
+            window.__msIntroFinish();
+          }
+        };
+        document.addEventListener("pointerdown", window.__msIntroDown);
+        document.addEventListener("keydown", window.__msIntroKey);
+      })();
     </script>
-    <link rel="preload" as="image" href="/brand/logo-180.png" />
-    <link rel="preload" as="image" href="/brand/logo-64.png" />
+    <link rel="preload" as="image" href="/brand/logo-180.png" imagesrcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" imagesizes="(max-width: 679px) 72px, 96px" />
+    <link rel="preload" as="image" href="/brand/logo-64.png" imagesrcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" imagesizes="36px" />
     <link rel="preload" as="image" href="/assets/media/product-hoodie.png" />
     <link rel="preload" as="image" href="/assets/media/product-tote.png" />
-    <link rel="stylesheet" href="/site.css?v=motion-20261025" />
-    <link rel="stylesheet" href="/home.css?v=motion-20261025" />
+    <link rel="stylesheet" href="/site.css?v=motion-20261027" />
+    <link rel="stylesheet" href="/home.css?v=motion-20261027" />
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -133,7 +182,7 @@
       <div class="intro-lockup">
         <img
           class="intro-mark"
-          src="/brand/logo-180.png"
+          src="/brand/logo-180.png" srcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" sizes="(max-width: 679px) 72px, 96px"
           alt=""
           width="180"
           height="180"
@@ -150,7 +199,9 @@
     <header class="site-header" data-header>
       <div class="shell header-row">
         <a class="brand" href="/" aria-label="MergeShip home">
-          <img src="/brand/logo-64.png" alt="" width="64" height="64" />
+          <img src="/brand/logo-64.png"
+              srcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w"
+              sizes="36px" alt="" width="64" height="64" />
           <span>Merge<span class="brand-accent">Ship</span></span>
         </a>
 
@@ -239,10 +290,7 @@
               aria-label="MergeShip combine demonstration"
             >
               <p class="sr-only">
-                MergeShip flags repeat orders from the same customer, checks
-                that the customer, shipping details, currency and items all
-                match, then moves eligible items into the oldest order and
-                cancels the extra order.
+                MergeShip flags repeat orders from the same customer, checks that the customer, shipping details and currency match and the items can be transferred, then moves eligible items into the oldest order and cancels the extra order.
               </p>
               <div class="stage-box">
                 <div class="stage-scene" aria-hidden="true">
@@ -259,21 +307,24 @@
                   <svg
                     class="stage-links"
                     viewBox="0 0 100 50"
-                   
+
                     aria-hidden="true"
                   >
                     <path
                       class="link-a"
-                      pathLength="100"
+
                       d="M50 8.6 C 45 10 33 11.5 25 13.5"
                     />
                     <path
                       class="link-b"
-                      pathLength="100"
+
                       d="M50 8.6 C 55 10 67 11.5 75 13.5"
                     />
                   </svg>
-                  <div class="customer-chip">Sarah M. · 2 open orders</div>
+                  <div class="customer-chip">
+                        <span class="chip-open">Sarah M. · 2 open orders</span>
+                        <span class="chip-combined">Sarah M. · 1 combined order</span>
+                      </div>
 
                   <div class="order-card card-a">
                     <div class="order-head">
@@ -502,9 +553,9 @@
                   <span class="step-num">03</span>
                   <h3>Every candidate is checked before anything changes.</h3>
                   <p>
-                    Customer, shipping address and method, currency, and
-                    transferable items all have to match. Anything MergeShip
-                    cannot verify stays exactly as it was.
+                    MergeShip checks the customer, shipping address and method,
+                    currency, and whether each item can be transferred.
+                    Anything MergeShip cannot verify stays exactly as it was.
                   </p>
                 </div>
               </li>
@@ -529,10 +580,7 @@
                 aria-label="MergeShip combine demonstration"
               >
                 <p class="sr-only">
-                  MergeShip flags repeat orders from the same customer, checks
-                  that the customer, shipping details, currency and items all
-                  match, then moves eligible items into the oldest order and
-                  cancels the extra order.
+                  MergeShip flags repeat orders from the same customer, checks that the customer, shipping details and currency match and the items can be transferred, then moves eligible items into the oldest order and cancels the extra order.
                 </p>
                 <div class="stage-box">
                   <div class="stage-scene" aria-hidden="true">
@@ -549,21 +597,24 @@
                     <svg
                       class="stage-links"
                       viewBox="0 0 100 50"
-                     
+
                       aria-hidden="true"
                     >
                       <path
                         class="link-a"
-                        pathLength="100"
+
                         d="M50 8.6 C 45 10 33 11.5 25 13.5"
                       />
                       <path
                         class="link-b"
-                        pathLength="100"
+
                         d="M50 8.6 C 55 10 67 11.5 75 13.5"
                       />
                     </svg>
-                    <div class="customer-chip">Sarah M. · 2 open orders</div>
+                    <div class="customer-chip">
+                        <span class="chip-open">Sarah M. · 2 open orders</span>
+                        <span class="chip-combined">Sarah M. · 1 combined order</span>
+                      </div>
 
                     <div class="order-card card-a">
                       <div class="order-head">
@@ -1070,6 +1121,8 @@
           <a class="brand" href="/" aria-label="MergeShip home">
             <img
               src="/brand/logo-64.png"
+              srcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w"
+              sizes="36px"
               alt=""
               width="64"
               height="64"
@@ -1096,7 +1149,7 @@
       </div>
     </footer>
 
-    <script src="/site.js?v=motion-20261025" defer></script>
-    <script src="/home.js?v=motion-20261025" defer></script>
+    <script src="/site.js?v=motion-20261027" defer></script>
+    <script src="/home.js?v=motion-20261027" defer></script>
   </body>
 </html>
