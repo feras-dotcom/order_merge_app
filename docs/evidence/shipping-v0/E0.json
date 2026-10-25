@@ -1,0 +1,184 @@
+{
+ "experiment": "E0",
+ "archiveKind": "recovered-contemporaneous-session-record",
+ "archivedAtUtc": "2026-10-25T13:20:00Z",
+ "developmentStore": "ordermergetest2.myshopify.com",
+ "apiVersion": {
+  "value": "2026-04",
+  "basis": "--version 2026-04 on every CLI invocation in the logged commands; app/shopify.server.ts pinned ApiVersion.April26 (T1 message 109)"
+ },
+ "applicationCommit": {
+  "value": "c04bf2b",
+  "basis": "reported by the original session (repository untouched at c04bf2b); the experiments ran from out-of-repository scripts, so no application code executed them",
+  "classification": "original-session-statement"
+ },
+ "operatorInitials": {
+  "value": null,
+  "classification": "missing",
+  "note": "never recorded"
+ },
+ "recoveryMethod": "The original evidence directory %TEMP%/mergeship-shipping-feas/evidence/ (33 files, listed in T3 message 121) no longer exists. Every item below is copied from the contemporaneous records in `sources` and keyed by message number / shell session id. Mutation responses were printed with `tee` and are verbatim; most read-backs survive only as the projected summaries the session printed. `excerptSha256` is the sha256 of the unsanitized tool-output text, `commandSha256` of the unsanitized logged command, so an auditor holding the source files can verify each item.",
+ "sources": {
+  "T1": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_a94a6a87ccc54795.md",
+   "kind": "Devin CLI session transcript written by the agent host during the E0-E6 session (tool outputs verbatim)",
+   "sha256": "22e469de96bec58f6286f83c0d2edc7e1a83079746cf42be64d857249a6b9a64",
+   "bytes": 377442
+  },
+  "T2": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_59bda577dfa44c75.md",
+   "kind": "continuation transcript of the same session after context compaction (E6-5 result and final E2/E6 report)",
+   "sha256": "245684114e0b94f54798f06e4e001216ceaae633a74b4d95f9aebde5f075118f",
+   "bytes": 236732
+  },
+  "T3": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_b7482c24a8634c83.md",
+   "kind": "later session transcript that printed original evidence files from %TEMP%/mergeship-shipping-feas/evidence/ before that directory was lost",
+   "sha256": "762dd1c802346438b0d352aa68eab44651cdd5bd844520c6ff3cb63d65aff5ba",
+   "bytes": 268988
+  },
+  "L1": {
+   "path": "%APPDATA%/Windsurf/logs/20261006T115002/window1/exthost/output_logging_20261014T132834/3-Devin ACP devin-cli.log",
+   "kind": "agent host execution log: every shell command with its session id and UTC start time (E0/E1)",
+   "sha256": "142b85fc5ea4489f34d31808c09ab47b061c1fdd29c3a7d67bf44e9c1cb29ff8",
+   "bytes": 4484970
+  },
+  "L2": {
+   "path": "%APPDATA%/Windsurf/logs/20261015T104659/window1/exthost/output_logging_20261015T104707/2-Devin ACP devin-cli.log",
+   "kind": "agent host execution log: every shell command with its session id and UTC start time (E2/E6)",
+   "sha256": "a843213cb7e8d2ed981b2c448f4b4a4edb7be60fe9f0662706d1eed1331087c1",
+   "bytes": 1407372
+  }
+ },
+ "purpose": "Read-only validation of the 2026-04 refund schema and documents (no financial mutation).",
+ "steps": [
+  {
+   "step": "E0-1 store and app identity",
+   "classification": "original-readback",
+   "output": {
+    "source": "T1",
+    "message": 116,
+    "shellSession": null,
+    "excerptSha256": "ba8a61f5c701c304d0acf23c6f3735718069bbd6cd84eacc89c9507cb896525f",
+    "redactions": []
+   },
+   "observed": {
+    "note": "verbatim excerpt for ordermergetest2 only; the excerpt for ordermergetest (store tied to the production deployment) is deliberately not archived",
+    "ordermergetest2": "\"primaryDomain\": {\n      \"host\": \"ordermergetest2.myshopify.com\"\n    }\n  },\n  \"currentAppInstallation\": {\n    \"app\": {\n      \"id\": \"gid://shopify/App/426185785345\",\n      \"handle\": \"order-merge-app\"\n    },\n    \"accessScopes\": [\n      {\n        \"handle\": \"read_customers\"\n      },\n      {\n        \"handle\": \"write_order_edits\"\n      },\n      {\n        \"handle\": \"write_orders\"\n      },\n      {\n        \"handle\": \"write_products\"\n      },\n      {\n        \"handle\": \"read_merchant_managed_fulfillment_orders\"\n      },\n      {\n        \"handle\": \"read_locations\"\n      },\n      {\n        \"handle\": \"read_order_edits\"\n      },\n      {\n        \"handle\": \"read_orders\"\n      },\n      {\n        \"handle\": \"read_products\"\n      }\n    ]\n  }\n}",
+    "shopPlan": {
+     "output": {
+      "source": "T1",
+      "message": 118,
+      "shellSession": null,
+      "excerptSha256": "c2e45ec0495605d3acbd7834ba55cfb6a907de6b4fea52cfeee4cfe20a0a7bef",
+      "redactions": []
+     },
+     "excerpt": "=== ordermergetest2.myshopify.com\n  \"shop\": {\n    \"name\": \"ordermergetest2\",\n    \"myshopifyDomain\": \"ordermergetest2.myshopify.com\",\n    \"currencyCode\": \"USD\",\n    \"taxesIncluded\": false,\n    \"taxShipping\": false,\n    \"plan\": {\n      \"displayName\": \"Basic App Development\",\n      \"partnerDevelopment\": true,\n      \"shopifyPlus\": false\n    },\n    \"primaryDomain\": {\n      \"host\": \"ordermergetest2.myshopify.com\"\n    }\n  },\n  \"currentAppInstallation\": {"
+    }
+   }
+  },
+  {
+   "step": "E0-2 live introspection of the refund types",
+   "classification": "original-readback (summary printed from the raw introspection; the raw introspect.out is lost)",
+   "document": {
+    "text": "fragment T on __Type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }\nfragment F on __Type {\n  name kind description\n  fields(includeDeprecated: true) { name isDeprecated deprecationReason args { name type { ...T } defaultValue } type { ...T } }\n  inputFields { name type { ...T } defaultValue }\n  enumValues(includeDeprecated: true) { name }\n}\nquery Introspect {\n  __schema {\n    directives { name locations args { name type { ...T } } }\n    mutationType { name }\n  }\n  order: __type(name: \"Order\") { fields(includeDeprecated: true) { name isDeprecated args { name type { ...T } defaultValue } type { ...T } } }\n  mutation: __type(name: \"Mutation\") { fields(includeDeprecated: true) { name isDeprecated deprecationReason args { name type { ...T } defaultValue } type { ...T } } }\n  SuggestedRefund: __type(name: \"SuggestedRefund\") { ...F }\n  ShippingRefundInput: __type(name: \"ShippingRefundInput\") { ...F }\n  RefundShippingInput: __type(name: \"RefundShippingInput\") { ...F }\n  RefundInput: __type(name: \"RefundInput\") { ...F }\n  RefundLineItemInput: __type(name: \"RefundLineItemInput\") { ...F }\n  OrderTransactionInput: __type(name: \"OrderTransactionInput\") { ...F }\n  RefundCreatePayload: __type(name: \"RefundCreatePayload\") { ...F }\n  Refund: __type(name: \"Refund\") { ...F }\n  OrderTransaction: __type(name: \"OrderTransaction\") { ...F }\n  SuggestedOrderTransaction: __type(name: \"SuggestedOrderTransaction\") { ...F }\n  ShippingRefund: __type(name: \"ShippingRefund\") { ...F }\n  SuggestedRefundMethod: __type(name: \"SuggestedRefundMethod\") { ...F }\n  RefundMethodInput: __type(name: \"RefundMethodInput\") { ...F }\n  OrderTransactionKind: __type(name: \"OrderTransactionKind\") { ...F }\n  OrderTransactionStatus: __type(name: \"OrderTransactionStatus\") { ...F }\n  RefundDutyInput: __type(name: \"RefundDutyInput\") { name kind }\n  RefundShippingLine: __type(name: \"RefundShippingLine\") { ...F }\n  OrderCancelPayload: __type(name: \"OrderCancelPayload\") { ...F }\n}",
+    "sha256": "9eea1beaef3009ead0bfbd1e46f0218459fcb2cbcd5fbf30e859579585e6082b",
+    "recovery": "byte-exact heredoc text from the logged command"
+   },
+   "command": {
+    "source": "L1",
+    "shellSession": "e5aa30",
+    "loggedStartUtc": "2026-10-14T13:45:01.609602Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && cat > \"$D/introspect.graphql\" <<'EOF'\nfragment T on __Type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }\nfragment F on __Type {\n  name kind description\n  fields(includeDeprecated: true) { name isDeprecated deprecationReason args { name type { ...T } defaultValue } type { ...T } }\n  inputFields { name type { ...T } defaultValue }\n  enumValues(includeDeprecated: true) { name }\n}\nquery Introspect {\n  __schema {\n    directives { name locations args { name type { ...T } } }\n    mutationType { name }\n  }\n  order: __type(name: \"Order\") { fields(includeDeprecated: true) { name isDeprecated args { name type { ...T } defaultValue } type { ...T } } }\n  mutation: __type(name: \"Mutation\") { fields(includeDeprecated: true) { name isDeprecated deprecationReason args { name type { ...T } defaultValue } type { ...T } } }\n  SuggestedRefund: __type(name: \"SuggestedRefund\") { ...F }\n  ShippingRefundInput: __type(name: \"ShippingRefundInput\") { ...F }\n  RefundShippingInput: __type(name: \"RefundShippingInput\") { ...F }\n  RefundInput: __type(name: \"RefundInput\") { ...F }\n  RefundLineItemInput: __type(name: \"RefundLineItemInput\") { ...F }\n  OrderTransactionInput: __type(name: \"OrderTransactionInput\") { ...F }\n  RefundCreatePayload: __type(name: \"RefundCreatePayload\") { ...F }\n  Refund: __type(name: \"Refund\") { ...F }\n  OrderTransaction: __type(name: \"OrderTransaction\") { ...F }\n  SuggestedOrderTransaction: __type(name: \"SuggestedOrderTransaction\") { ...F }\n  ShippingRefund: __type(name: \"ShippingRefund\") { ...F }\n  SuggestedRefundMethod: __type(name: \"SuggestedRefundMethod\") { ...F }\n  RefundMethodInput: __type(name: \"RefundMethodInput\") { ...F }\n  OrderTransactionKind: __type(name: \"OrderTransactionKind\") { ...F }\n  OrderTransactionStatus: __type(name: \"OrderTransactionStatus\") { ...F }\n  RefundDutyInput: __type(name: \"RefundDutyInput\") { name kind }\n  RefundShippingLine: __type(name: \"RefundShippingLine\") { ...F }\n  OrderCancelPayload: __type(name: \"OrderCancelPayload\") { ...F }\n}\nEOF\nnpx shopify app execute --store ordermergetest2.myshopify.com --version 2026-04 --query-file \"$D/introspect.graphql\" > \"$D/introspect.out\" 2>&1; wc -c \"$D/introspect.out\"; head -c 600 \"$D/introspect.out\"",
+    "commandSha256": "52ea07b6ea6f380e1a52b2cac8b189af23bfaaac51da6d579a7a2e53399536e3"
+   },
+   "output": {
+    "source": "T1",
+    "message": 126,
+    "shellSession": "c95e37",
+    "excerptSha256": "aedd4172beb687b6a71321a88f736f444a6d727410569c55cd9311af55cd5e8c",
+    "redactions": []
+   },
+   "observedSummary": "Output from command in shell c95e37:\n## SuggestedRefund (OBJECT)\n  out amount: Money!  [DEPRECATED: Use `amountSet` instead.]\n  out amountSet: MoneyBag!\n  out discountedSubtotalSet: MoneyBag!\n  out maximumRefundable: Money!  [DEPRECATED: Use `maximumRefundableSet` instead.]\n  out maximumRefundableSet: MoneyBag!\n  out refundDuties: [RefundDuty!]!\n  out refundLineItems: [RefundLineItem!]!\n  out shipping: ShippingRefund!\n  out subtotal: Money!  [DEPRECATED: Use `subtotalSet` instead.]\n  out subtotalSet: MoneyBag!\n  out suggestedRefundMethods: [SuggestedRefundMethod!]!\n  out suggestedTransactions: [SuggestedOrderTransaction!]!\n  out totalCartDiscountAmountSet: MoneyBag!\n  out totalDutiesSet: MoneyBag!\n  out totalTaxSet: MoneyBag!\n  out totalTaxes: Money!  [DEPRECATED: Use `totalTaxSet` instead.]\n## ShippingRefundInput (INPUT_OBJECT)\n  in  amount: Money\n  in  fullRefund: Boolean\n## RefundShippingInput (INPUT_OBJECT)\n  in  shippingRefundAmount: MoneyInput\n  in  fullRefund: Boolean = false\n## RefundInput (INPUT_OBJECT)\n  in  currency: CurrencyCode\n  in  orderId: ID!\n  in  note: String\n  in  notify: Boolean\n  in  shipping: ShippingRefundInput\n  in  processedAt: DateTime\n  in  refundLineItems: [RefundLineItemInput!]\n  in  refundDuties: [RefundDutyInput!]\n  in  transactions: [OrderTransactionInput!]\n  in  refundMethods: [RefundMethodInput!] = []\n  in  discrepancyReason: OrderAdjustmentInputDiscrepancyReason\n  in  allowOverRefunding: Boolean = false\n## RefundLineItemInput (INPUT_OBJECT)\n  in  lineItemId: ID!\n  in  quantity: Int!\n  in  restockType: RefundLineItemRestockType\n  in  locationId: ID\n## OrderTransactionInput (INPUT_OBJECT)\n  in  amount: Money!\n  in  gateway: String!\n  in  kind: OrderTransactionKind!\n  in  orderId: ID!\n  in  parentId: ID\n## RefundCreatePayload (OBJECT)\n  out order: Order\n  out refund: Refund\n  out userErrors: [UserError!]!\n## RefundMethodInput (INPUT_OBJECT)\n  in  storeCreditRefund: StoreCreditRefundInput\n## SuggestedOrderTransaction (OBJECT)\n  out accountNumber: String\n  out amount: Money!  [DEPRECATED: Use `amountSet` instead.]\n  out amountSet: MoneyBag!\n  out formattedGateway: String\n  out gateway: String\n  out kind: SuggestedOrderTransactionKind!\n  out maximumRefundable: Money  [DEPRECATED: Use `maximumRefundableSet` instead.]\n  out maximumRefundableSet: MoneyBag\n  out parentTransaction: OrderTransaction\n  out paymentDetails: PaymentDetails\n## ShippingRefund (OBJECT)\n  out amount: Money!  [DEPRECATED: Use `amountSet` instead.]\n  out amountSet: MoneyBag!\n  out maximumRefundable: Money!  [DEPRECATED: Use `maximumRefundableSet` instead.]\n  out maximumRefundableSet: MoneyBag!\n  out tax: Money!  [DEPRECATED: Use `taxSet` instead.]\n  out taxSet: MoneyBag!\n## SuggestedRefundMethod (INTERFACE)\n  out amount: MoneyBag!\n  out maximumRefundable: MoneyBag!\n## OrderTransactionKind (ENUM)\n  enum SALE\n  enum CAPTURE\n  enum AUTHORIZATION\n  enum VOID\n  enum REFUND\n  enum CHANGE\n  enum EMV_AUTHORIZATION\n  enum SUGGESTED_REFUND\n## OrderTransactionStatus (ENUM)\n  enum SUCCESS\n  enum FAILURE\n  enum PENDING\n  enum ERROR\n  enum AWAITING_RESPONSE\n  enum UNKNOWN\n## RefundShippingLine (OBJECT)\n  out id: ID!\n  out shippingLine: ShippingLine!\n  out subtotalAmountSet: MoneyBag!\n  out taxAmountSet: MoneyBag!\n## Order refund-ish fields\n  refundDiscrepancySet: MoneyBag!\n  refundable: Boolean!\n  refunds(first: Int): [Refund!]!\n  suggestedRefund(shippingAmount: Money, refundShipping: Boolean, refundLineItems: [RefundLineItemInput!], refundDuties: [RefundDutyInput!], suggestFullRefund: Boolean = false, refundMethodAllocation: RefundMethodAllocation = ORIGINAL_PAYMENT_METHODS): SuggestedRefund\n  totalRefunded: Money! [DEPRECATED]\n  totalRefundedSet: MoneyBag!\n  totalRefundedShippingSet: MoneyBag!\n## Mutation refund-ish\n  refundCreate(input: RefundInput!): RefundCreatePayload\n  returnRefund(returnRefundInput: ReturnRefundInput!): ReturnRefundPayload [DEPRECATED: Use `returnProcess` instead.]\n## directives\n  @accessRestricted FIELD_DEFINITION|OBJECT (reason: String)\n  @deprecated FIELD_DEFINITION|ENUM_VALUE|ARGUMENT_DEFINITION|INPUT_FIELD_DEFINITION (reason: String)\n  @idempotent FIELD (key: String!)\n  @include FIELD|FRAGMENT_SPREAD|INLINE_FRAGMENT (if: Boolean!)\n  @oneOf INPUT_OBJECT ()\n  @skip FIELD|FRAGMENT_SPREAD|INLINE_FRAGMENT (if: Boolean!)\n  @specifiedBy SCALAR (url: String!)\n\n\nExit code: 0\n",
+   "additionalSummary": {
+    "output": {
+     "source": "T1",
+     "message": 130,
+     "shellSession": "1a6a1e",
+     "excerptSha256": "9f77f73670871dedd62bc3662d0b941320a40f3ecd7ac47c56e30a7598a7bb6f",
+     "redactions": []
+    },
+    "text": "Output from command in shell 1a6a1e:\n## Refund\n  createdAt: DateTime\n  duties: [RefundDuty!]\n  id: ID!\n  legacyResourceId: UnsignedInt64!\n  note: String\n  order: Order!\n  orderAdjustments(first: Int, after: String, last: Int, before: String, reverse: Boolean): OrderAdjustmentConnection!\n  processedAt: DateTime!\n  refundLineItems(first: Int, after: String, last: Int, before: String, reverse: Boolean): RefundLineItemConnection!\n  refundShippingLines(first: Int, after: String, last: Int, before: String, reverse: Boolean): RefundShippingLineConnection!\n  return: Return\n  staffMember: StaffMember\n  totalRefunded: MoneyV2! [DEPR]\n  totalRefundedSet: MoneyBag!\n  transactions(first: Int, after: String, last: Int, before: String, reverse: Boolean): OrderTransactionConnection!\n  updatedAt: DateTime!\n## OrderTransaction\n  accountNumber: String\n  amount: Money! [DEPR]\n  amountRoundingSet: MoneyBag\n  amountSet: MoneyBag!\n  amountV2: MoneyV2! [DEPR]\n  authorizationCode: String [DEPR]\n  authorizationExpiresAt: DateTime\n  createdAt: DateTime!\n  currencyExchangeAdjustment: CurrencyExchangeAdjustment\n  device: PointOfSaleDevice\n  errorCode: OrderTransactionErrorCode\n  fees: [TransactionFee!]!\n  formattedGateway: String\n  gateway: String\n  id: ID!\n  kind: OrderTransactionKind!\n  location: Location\n  manualPaymentGateway: Boolean!\n  manuallyCapturable: Boolean!\n  maximumRefundable: Money [DEPR]\n  maximumRefundableV2: MoneyV2\n  multiCapturable: Boolean!\n  order: Order\n  parentTransaction: OrderTransaction\n  paymentDetails: PaymentDetails\n  paymentIcon: Image\n  paymentId: String\n  paymentMethod: PaymentMethods [DEPR]\n  processedAt: DateTime\n  receiptJson: JSON\n  settlementCurrency: CurrencyCode\n  settlementCurrencyRate: Decimal\n  shopifyPaymentsSet: ShopifyPaymentsTransactionSet\n  status: OrderTransactionStatus!\n  test: Boolean!\n  totalUnsettled: Money [DEPR]\n  totalUnsettledSet: MoneyBag\n  totalUnsettledV2: MoneyV2 [DEPR]\n  user: StaffMember\n## Order\n  cancelReason: OrderCancelReason\n  cancelledAt: DateTime\n  closed: Boolean!\n  closedAt: DateTime\n  currentTotalPriceSet: MoneyBag!\n  displayFinancialStatus: OrderDisplayFinancialStatus\n  netPaymentSet: MoneyBag!\n  paymentGatewayNames: [String!]!\n  refundable: Boolean!\n  refunds(first: Int): [Refund!]!\n  shippingLines(includeRemovals: Boolean, first: Int, after: String, last: Int, before: String, reverse: Boolean): ShippingLineConnection!\n  taxesIncluded: Boolean!\n  test: Boolean!\n  totalOutstandingSet: MoneyBag!\n  totalPriceSet: MoneyBag!\n  totalShippingPriceSet: MoneyBag!\n  transactions(first: Int, capturable: Boolean, manuallyResolvable: Boolean): [OrderTransaction!]!\n\n\nExit code: 0\n"
+   }
+  },
+  {
+   "step": "E0-3 offline validation of the proposed documents against the full 2026-04 schema",
+   "classification": "original-execution (local graphql 16.14.2 validation against full-schema.json fetched from ordermergetest2; full-schema.json is lost)",
+   "command": {
+    "source": "L1",
+    "shellSession": "bb6a46",
+    "loggedStartUtc": "2026-10-14T13:51:05.688585Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && cat > \"$D/validate.mjs\" <<'EOF'\nimport { createRequire } from 'module';\nconst require = createRequire('<home>/Desktop/shopifymerger/order-merge-app/package.json');\nconst { buildClientSchema, parse, validate } = require('graphql');\nimport fs from 'fs';\nconst D = process.argv[2];\nconst intro = JSON.parse(fs.readFileSync(D + '/full-schema.json', 'utf8'));\nconst schema = buildClientSchema(intro);\nconst tn = (n) => schema.getType(n);\nconsole.log('UserError kind:', tn('UserError')?.constructor.name, 'fields:', Object.keys(tn('UserError').getFields()));\nconst rcp = tn('RefundCreatePayload').getFields();\nconsole.log('RefundCreatePayload.userErrors type:', String(rcp.userErrors.type));\nconsole.log('UserError implementers:', schema.getPossibleTypes(tn('UserError')).map(t=>t.name).filter(n=>/Refund|Idempot/i.test(n)));\nconsole.log('SuggestedRefundMethod implementers:', schema.getPossibleTypes(tn('SuggestedRefundMethod')).map(t=>t.name));\nconsole.log('MoneyBag fields:', Object.keys(tn('MoneyBag').getFields()));\nconsole.log('Money scalar:', tn('Money').description?.slice(0,120) ?? '(no descr)');\nconsole.log('RefundMethodAllocation:', tn('RefundMethodAllocation').getValues().map(v=>v.name));\nconsole.log('OrderTransactionErrorCode:', tn('OrderTransactionErrorCode').getValues().map(v=>v.name).join(','));\nconsole.log('SuggestedOrderTransactionKind:', tn('SuggestedOrderTransactionKind').getValues().map(v=>v.name));\nconst docs = {\n suggested: `query S($id: ID!, $amt: Money) { order(id: $id) { id name taxesIncluded currencyCode presentmentCurrencyCode cancelledAt closedAt test displayFinancialStatus refundable\n   totalRefundedShippingSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }\n   shippingLines(first: 10) { pageInfo { hasNextPage } nodes { id title originalPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } discountedPriceSet { shopMoney { amount currencyCode } } taxLines { rate priceSet { shopMoney { amount currencyCode } } } } }\n   transactions(first: 50) { id kind status gateway test processedAt amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } maximumRefundableV2 { amount currencyCode } parentTransaction { id } }\n   refunds(first: 50) { id note processedAt totalRefundedSet { shopMoney { amount currencyCode } } }\n   suggestedRefund(shippingAmount: $amt) { amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } maximumRefundableSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } totalTaxSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } refundLineItems { quantity } shipping { amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } taxSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } maximumRefundableSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } } suggestedTransactions { kind gateway amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } maximumRefundableSet { shopMoney { amount currencyCode } } parentTransaction { id } } } } }`,\n refundCreate: `mutation R($input: RefundInput!) { refundCreate(input: $input) @idempotent(key: \"k\") { refund { id note createdAt processedAt totalRefundedSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } } refundShippingLines(first: 5) { nodes { id subtotalAmountSet { shopMoney { amount } } taxAmountSet { shopMoney { amount } } shippingLine { id } } } transactions(first: 5) { nodes { id kind status gateway test amountSet { shopMoney { amount currencyCode } } parentTransaction { id } } } } order { id totalRefundedShippingSet { shopMoney { amount } } } userErrors { field message } } }`,\n refundCreateWithCode: `mutation R($input: RefundInput!) { refundCreate(input: $input) @idempotent(key: \"k\") { userErrors { field message code } } }`,\n refundCreateNoDirective: `mutation R($input: RefundInput!) { refundCreate(input: $input) { userErrors { field message } } }`,\n};\nfor (const [k, src] of Object.entries(docs)) {\n  const errs = validate(schema, parse(src));\n  console.log(`DOC ${k}:`, errs.length ? 'INVALID -> ' + errs.map(e=>e.message).join(' | ') : 'valid');\n}\nEOF\nnode \"$D/validate.mjs\" \"$D\"",
+    "commandSha256": "158f3e6b5b4cd62b36160649901b2daccd1fd9d7c6e39a5b053b1125986af2af"
+   },
+   "output": {
+    "source": "T1",
+    "message": 166,
+    "shellSession": "bb6a46",
+    "excerptSha256": "0588fc01e52f3c929845877f7f9fc839d7e374ba804b33f026aae589772ff294",
+    "redactions": []
+   },
+   "observed": "Output from command in shell bb6a46:\nUserError kind: GraphQLObjectType fields: [ 'field', 'message' ]\nRefundCreatePayload.userErrors type: [UserError!]!\nUserError implementers: []\nSuggestedRefundMethod implementers: [ 'SuggestedStoreCreditRefund' ]\nMoneyBag fields: [ 'presentmentMoney', 'shopMoney' ]\nMoney scalar: (no descr)\nRefundMethodAllocation: [ 'ORIGINAL_PAYMENT_METHODS', 'STORE_CREDIT' ]\nOrderTransactionErrorCode: INCORRECT_NUMBER,INVALID_NUMBER,INVALID_EXPIRY_DATE,INVALID_CVC,EXPIRED_CARD,INCORRECT_CVC,INCORRECT_ZIP,INCORRECT_ADDRESS,INCORRECT_PIN,CARD_DECLINED,PROCESSING_ERROR,CALL_ISSUER,PICK_UP_CARD,CONFIG_ERROR,TEST_MODE_LIVE_CARD,UNSUPPORTED_FEATURE,GENERIC_ERROR,INVALID_COUNTRY,INVALID_AMOUNT,PAYMENT_METHOD_UNAVAILABLE,AMAZON_PAYMENTS_INVALID_PAYMENT_METHOD,AMAZON_PAYMENTS_MAX_AMOUNT_CHARGED,AMAZON_PAYMENTS_MAX_AMOUNT_REFUNDED,AMAZON_PAYMENTS_MAX_AUTHORIZATIONS_CAPTURED,AMAZON_PAYMENTS_MAX_REFUNDS_PROCESSED,AMAZON_PAYMENTS_ORDER_REFERENCE_CANCELED,AMAZON_PAYMENTS_STALE,AMOUNT_TOO_LARGE,AMOUNT_TOO_SMALL,AUTHENTICATION_FAILED,AUTHENTICATION_REQUIRED,CANCELLED_PAYMENT,CARD_TESTING,DO_NOT_HONOR,FRAUD_SUSPECTED,INSUFFICIENT_FUNDS,INVALID_CURRENCY,INVALID_PAYMENT_METHOD,INVALID_PURCHASE_TYPE,MERCHANT_ACCOUNT_ERROR,MERCHANT_RULE,INSTRUMENT_DECLINED,PAYMENT_METHOD_UNSUPPORTED,PAYMENT_PROVIDER_ERROR,RETRY_DECLINED,TRANSACTION_LIMIT_EXCEEDED,AUTHORIZATION_EXPIRED\nSuggestedOrderTransactionKind: [ 'SUGGESTED_REFUND' ]\nDOC suggested: valid\nDOC refundCreate: valid\nDOC refundCreateWithCode: INVALID -> Cannot query field \"code\" on type \"UserError\".\nDOC refundCreateNoDirective: valid\n\n\nExit code: 0\n"
+  },
+  {
+   "step": "E0-4 suggestedRefund argument probes on #1124 (gid://shopify/Order/8052786135287)",
+   "classification": "original-readback",
+   "document": {
+    "text": "query P($id: ID!, $amt: Money) {\n  order(id: $id) {\n    name closed cancelledAt\n    suggestedRefund(shippingAmount: $amt) {\n      amountSet { shopMoney { amount currencyCode } }\n      shipping { amountSet { shopMoney { amount } } taxSet { shopMoney { amount } } maximumRefundableSet { shopMoney { amount } } }\n      suggestedTransactions { kind gateway amountSet { shopMoney { amount } } }\n    }\n  }\n}",
+    "sha256": "967b38120b0d7d4ee40aa810cbca8bf35fe5cf64cb164dbbf9bb947235559845",
+    "recovery": "byte-exact heredoc text from the logged command"
+   },
+   "command": {
+    "source": "L1",
+    "shellSession": "5579a7",
+    "loggedStartUtc": "2026-10-14T13:59:51.184813Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && cat > \"$D/sr-min.graphql\" <<'EOF'\nquery P($id: ID!, $amt: Money) {\n  order(id: $id) {\n    name closed cancelledAt\n    suggestedRefund(shippingAmount: $amt) {\n      amountSet { shopMoney { amount currencyCode } }\n      shipping { amountSet { shopMoney { amount } } taxSet { shopMoney { amount } } maximumRefundableSet { shopMoney { amount } } }\n      suggestedTransactions { kind gateway amountSet { shopMoney { amount } } }\n    }\n  }\n}\nEOF\nfor a in \"5.00\" \"-1.00\" \"abc\" \"0.001\" \"1e1\"; do echo \"{\\\"id\\\":\\\"gid://shopify/Order/8052786135287\\\",\\\"amt\\\":\\\"$a\\\"}\" > \"$D/v-edge.json\"; echo \"##### shippingAmount=$a\"; node \"$D/gq.mjs\" ordermergetest2.myshopify.com \"$D/sr-min.graphql\" \"$D/v-edge.json\" | tr -d '\\n ' | head -c 900; echo; done",
+    "commandSha256": "bb996d18469b9aabfbb8e5b3e232f5f328b422444c9fbb302132c36b5aee905e"
+   },
+   "outputs": [
+    {
+     "output": {
+      "source": "T1",
+      "message": 172,
+      "shellSession": null,
+      "excerptSha256": "cc04d874b9c5e825a1e00a53a5983fe80f3c2d6a31a2d99a718bafd4d46dc4d0",
+      "redactions": []
+     },
+     "text": "##### shippingAmount=5.00\n{\"raw\":\"\\nAuthenticating...\\n\\nExecutingGraphQLoperation...\\n\\n╭─error──────────────────────────────────────────────────────────────────────╮\\n\\nGraphQLoperationfailed.\\n\\n{\\n\\\"errors\\\":[\\n{\\n\\\"message\\\":\\\"shippingmusthaveamountlessthanorequalto\\nremainingshipping\\\",\\n\\\"locations\\\":[\\n{\\n\\\"line\\\":6,\\n\\\"column\\\":5\\n}\\n],\\n\\\"path\\\":[\\n\\\"order\\\",\\n\\\"suggestedRefund\\\"\\n]\\n}\\n]\\n}\\n\\n╰──────────────────────────────────────────────────────────────────────────────╯\\n\\n\"}\n##### shippingAmount=-1.00\n{\"errors\":[{\"message\":\"shippingamountcannotbelessthan0\",\"locations\":[{\"line\":6,\"column\":5}],\"path\":[\"order\",\"suggestedRefund\"]}]}\n##### shippingAmount=abc\n{\"errors\":[{\"message\":\"Variable$amtoftypeMoneywasprovidedinvalidvalue\",\"locations\":[{\"line\":1,\"column\":19}],\"extensions\":{\"code\":\"INVALID_VARIABLE\",\"value\":\"abc\",\"problems\":[{\"path\":[],\"explanation\":\"invalidmoney'abc'\",\"message\":\"invalidmoney'abc'\"}]}}]}\n##### shippingAmount=0.001\n\n===\nStopped waiting for output after 35.9 seconds. Command running in background with ID: 5579a7. Run get_output with timeout if you need to wait.\n"
+    },
+    {
+     "output": {
+      "source": "T1",
+      "message": 174,
+      "shellSession": null,
+      "excerptSha256": "9e95dcaa59b5bf23e2cb6843418b67fd3e0a129ecd54f27dae06e0287ebfb932",
+      "redactions": []
+     },
+     "text": "{\"order\":{\"name\":\"#1124\",\"closed\":true,\"cancelledAt\":\"2026-10-05T10:32:57Z\",\"suggestedRefund\":{\"amountSet\":{\"shopMoney\":{\"amount\":\"0.0\",\"currencyCode\":\"USD\"}},\"shipping\":{\"amountSet\":{\"shopMoney\":{\"amount\":\"0.0\"}},\"taxSet\":{\"shopMoney\":{\"amount\":\"0.0\"}},\"maximumRefundableSet\":{\"shopMoney\":{\"amount\":\"0.0\"}}},\"suggestedTransactions\":[{\"kind\":\"SUGGESTED_REFUND\",\"gateway\":\"manual\",\"amountSet\":{\"shopMoney\":{\"amount\":\"0.0\"}}}]}}}\n##### shippingAmount=1e1\n{\"raw\":\"\\nAuthenticating...\\n\\nExecutingGraphQLoperation...\\n\\n╭─error──────────────────────────────────────────────────────────────────────╮\\n\\nGraphQLoperationfailed.\\n\\n{\\n\\\"errors\\\":[\\n{\\n\\\"message\\\":\\\"shippingmusthaveamountlessthanorequalto\\nremainingshipping\\\",\\n\\\"locations\\\":[\\n{\\n\\\"line\\\":6,\\n\\\"column\\\":5\\n}\\n],\\n\\\"path\\\":[\\n\\\"order\\\",\\n\\\"suggestedRefund\\\"\\n]\\n}\\n]\\n}\\n\\n╰──────────────────────────────────────────────────────────────────────────────╯\\n\\n\"}\n\n\nExit code: 0\n"
+    }
+   ]
+  }
+ ],
+ "verdict": {
+  "reported": "PASS, with discrepancies",
+  "reportedBy": "original session, T1 assistant message 177",
+  "reportText": "I've finished E0 and stopped there. E1, E2, E3 and E6 are paused until you enable the Test gateway. No mutation, refund or repo change has happened, and the branch is untouched at `c04bf2b`. Evidence is in `%TEMP%\\mergeship-shipping-feas\\`, outside the repo.\n\n## E0: PASS, with discrepancies\n\nI checked the pinned 2026-04 schema against the live Admin API and offline with `graphql` 16. The documents I plan to use all validate.\n\n**What matches the plan**\n- `app/shopify.server.ts` pins `ApiVersion.April26`.\n- `refundCreate(input: RefundInput!) @idempotent(key: String!)` exists. The docs say the key is required from 2026-04.\n- `RefundInput.shipping` is `ShippingRefundInput { amount: Money, fullRefund: Boolean }`. The similarly named `RefundShippingInput` is a different type (`shippingRefundAmount: MoneyInput`), so the Phase 0 plan edit was right.\n- `Order.suggestedRefund(shippingAmount, refundShipping, …)` returns `shipping { amountSet, taxSet, maximumRefundableSet }`, `suggestedTransactions` (kind `SUGGESTED_REFUND`, with `parentTransaction`) and `maximumRefundableSet`.\n- Read-back works through `Refund.refundShippingLines`, `Refund.transactions` (kind, status, gateway, test, parent), `Order.totalRefundedShippingSet` and `Order.test`.\n- On a canceled, closed, PAID order (#1113), `refundable` is true. `suggestedRefund(shippingAmount: \"30.00\")` returned shipping 30.0, tax 0.0, max 30.0 and a transaction parented to the original SALE.\n- That order was created through a draft order and paid with the manual gateway, so it only proves the API shape, not a genuine gateway.\n\n**Discrepancies that change the design**\n1. **`userErrors { code }` is not selectable on `refundCreate`.** The payload uses the generic `UserError` (only `field` and `message`). The idempotency docs describe a `code` such as `IDEMPOTENCY_KEY_PARAMETER_MISMATCH`. I'll see at E6 where those errors actually appear, because classification can't rely on `code`.\n2. **`Order.transactions(first)` and `Order.refunds(first)` are plain lists with no `pageInfo`.** The Phase 0 `completeRefundHistory` flag can't come from `hasNextPage`. It needs a different proof, such as fetching more than the expected count and cross-checking the sum against `totalRefundedSet` and `totalRefundedShippingSet`.\n3. **Idempotency keys last 24 hours only.** After that, replaying the same key is a new refund. Resolving an unknown outcome has to be a marker read-back inside that window, never a late resend.\n4. **`suggestedRefund` rejects bad amounts with errors.**\n   - An amount over the remaining shipping returns a top-level GraphQL error, \"shipping must have amount less than or equal to remaining shipping\". It is not clamped.\n   - A negative amount is also an error, and malformed input fails with `INVALID_VARIABLE`.\n   - The `Money` scalar accepts `1e1` as 10, so requests must use canonical decimals only.\n   - `0.001` on USD was accepted with no error. I couldn't tell whether it rounds, because the order's shipping maximum was 0.\n5. The idempotency docs also say a replayed response is rebuilt from current records, so a replay is not proof of settlement."
+ },
+ "excluded": [
+  "Two read-only queries on ordermergetest (#1113, #1096) disclosed in the original report: not archived (store tied to the production deployment; §17 development-store data only is satisfied by ordermergetest2 alone)."
+ ],
+ "gaps": [
+  "Raw introspection files introspect.out / full-schema.json: permanently unrecoverable; only the summaries printed at the time survive.",
+  "Operator initials: never recorded."
+ ]
+}

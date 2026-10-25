@@ -6,8 +6,8 @@
 // helper, then driven through the REAL reconciliation cycle
 // (runShippingRefundReconcileCycle) and the REAL lease-fenced writer
 // (writeReconcileTransition). All Shopify evidence is an injected fake
-// implementing the four pinned documents; it is schema-derived test
-// evidence, never a validated Shopify response (12.8.5, 20.1.1).
+// implementing the four pinned documents, built from archived
+// development-store responses with recorded provenance (12.8.5, 20.1.1).
 //
 // Opt-in (same gate as every real-database suite):
 //
@@ -54,6 +54,21 @@ import {
   createDispatchedFixture,
   type DispatchedFixtureArgs,
 } from "./helpers/shipping-refund-fixture";
+import {
+  agreementVariant,
+  archivedAppIdentity,
+  archivedCompletePageInfo,
+  archivedDetailNode,
+  archivedListRefund,
+  archivedOrderAgreement,
+  archivedReconcileOrder,
+  archivedRefundAgreement,
+  archivedTransaction,
+  auditServedPayload,
+  faultInjection,
+  incompletePageInfo,
+  type LedgerEntry,
+} from "./helpers/shipping-refund-archived-fixtures";
 
 const TEST_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const oid = (n: number) => `gid://shopify/Order/${n}`;
@@ -75,10 +90,6 @@ const EPOCH = "2026-10-10T00:00:00.000Z";
 const TXN_AUTH = txn(900);
 const TXN_CAP = txn(901);
 const TXN_REFUND = txn(902);
-
-const PM = (amount: string, currencyCode = "USD") => ({
-  presentmentMoney: { amount, currencyCode },
-});
 
 describe.skipIf(!TEST_URL)(
   "shipping-refund S1-F reconciliation and recovery (real disposable database)",
@@ -375,7 +386,13 @@ describe.skipIf(!TEST_URL)(
       return fx;
     };
 
-    // ── Injected Shopify evidence (schema-derived fixtures, §20.1.1) ──────
+    // ── Injected Shopify evidence (§20.1.1) ────────────────────────────────
+    // Every node is derived from an archived development-store response
+    // (docs/evidence/shipping-v0/) and rebound to the fixture row, or is an
+    // allowlisted schema-derived shape / fault injection. `served` records
+    // the provenance of every node the fake returns; the last test asserts it.
+
+    const served: LedgerEntry[] = [];
 
     interface Evidence {
       refunds?: any[];
@@ -385,8 +402,6 @@ describe.skipIf(!TEST_URL)(
       details?: Record<string, any>;
       agreements?: any[] | ((vars: any, n: number) => any);
       appId?: string;
-      orderOverrides?: Record<string, unknown>;
-      malformedList?: boolean;
     }
 
     /** A complete, consistent evidence set for refund `rid` of `amount`. */
@@ -397,10 +412,9 @@ describe.skipIf(!TEST_URL)(
       amount?: string;
       dispatchedAt: string;
       txnStatus?: string;
-      agreement?: Record<string, unknown> | null | "omit";
+      agreement?: "omit" | { foreignAppId: string | null };
       details?: Record<string, any>;
       extraListRefunds?: any[];
-      orderOverrides?: Record<string, unknown>;
     }): Evidence => {
       const amount = args.amount ?? "8.00";
       const processed = new Date(
@@ -421,13 +435,7 @@ describe.skipIf(!TEST_URL)(
         });
       return {
         refunds: [
-          {
-            id: args.rid,
-            note,
-            createdAt: created,
-            processedAt: processed,
-            totalRefundedSet: PM(amount),
-          },
+          listRefund(args.rid, note, created, processed, amount),
           ...(args.extraListRefunds ?? []),
         ],
         transactions: [
@@ -440,47 +448,30 @@ describe.skipIf(!TEST_URL)(
         details: { [args.rid]: detail, ...(args.details ?? {}) },
         agreements:
           args.agreement === "omit"
-            ? []
+            ? [archivedOrderAgreement()]
             : [
-                agreementNode(1, {
-                  app: { id: APP_GID },
-                  refund: { id: args.rid },
-                  happenedAt: processed,
-                  ...(args.agreement ?? {}),
-                }),
+                archivedOrderAgreement(),
+                args.agreement === undefined
+                  ? agreementNode(1, { refundId: args.rid, happenedAt: processed })
+                  : agreementVariant("foreign-app", {
+                      id: agreementGid(1),
+                      appId: args.agreement.foreignAppId,
+                      refundId: args.rid,
+                      happenedAt: processed,
+                    }),
               ],
         appId: APP_GID,
-        orderOverrides: args.orderOverrides,
       };
     };
 
-    const authTxn = (id: string) => ({
-      id,
-      kind: "AUTHORIZATION",
-      status: "SUCCESS",
-      gateway: "bogus",
-      test: true,
-      amountSet: PM("18.00"),
-      parentTransaction: null,
-    });
-    const capTxn = (id: string) => ({
-      id,
-      kind: "CAPTURE",
-      status: "SUCCESS",
-      gateway: "bogus",
-      test: true,
-      amountSet: PM("18.00"),
-      parentTransaction: { id: TXN_AUTH },
-    });
-    const refundTxn = (id: string, status: string, amount = "8.00") => ({
-      id,
-      kind: "REFUND",
-      status,
-      gateway: "bogus",
-      test: true,
-      amountSet: PM(amount),
-      parentTransaction: { id: TXN_CAP },
-    });
+    const listRefund = (id: string, note: string, createdAt: string, processedAt: string, amount = "8.00") =>
+      archivedListRefund({ id, note, createdAt, processedAt, amount });
+    const authTxn = (id: string) =>
+      archivedTransaction("AUTHORIZATION", { id, parentId: null, amount: "18.00" });
+    const capTxn = (id: string) =>
+      archivedTransaction("CAPTURE", { id, parentId: TXN_AUTH, amount: "18.00" });
+    const refundTxn = (id: string, status: string, amount = "8.00") =>
+      archivedTransaction("REFUND", { id, parentId: TXN_CAP, amount, status });
 
     const detailNode = (
       id: string,
@@ -488,53 +479,32 @@ describe.skipIf(!TEST_URL)(
       over: {
         note?: string;
         createdAt?: string;
-        processedAt?: string | null;
+        processedAt?: string;
         total?: string;
-        shippingLines?: any[] | null;
-        refundLineItems?: any[];
-        orderAdjustments?: any[];
-        duties?: any[];
-        txns?: any[];
+        shipping?: { subtotal: string; tax: string }[];
         txnStatus?: string;
       } = {},
-    ) => ({
-      id,
-      note: over.note ?? null,
-      createdAt: over.createdAt ?? null,
-      processedAt: over.processedAt === undefined ? over.createdAt ?? null : over.processedAt,
-      order: { id: srcId },
-      totalRefundedSet: PM(over.total ?? "8.00"),
-      duties: over.duties ?? [],
-      refundShippingLines: {
-        nodes:
-          over.shippingLines === undefined
-            ? [{ subtotalAmountSet: PM(over.total ?? "8.00"), taxAmountSet: PM("0.00") }]
-            : (over.shippingLines ?? []),
-        pageInfo: { hasNextPage: false },
-      },
-      refundLineItems: {
-        nodes: over.refundLineItems ?? [],
-        pageInfo: { hasNextPage: false },
-      },
-      orderAdjustments: {
-        nodes: over.orderAdjustments ?? [],
-        pageInfo: { hasNextPage: false },
-      },
-      transactions: {
-        nodes: over.txns ?? [refundTxn(TXN_REFUND, over.txnStatus ?? "SUCCESS")],
-        pageInfo: { hasNextPage: false },
-      },
-    });
+    ) => {
+      const at = over.createdAt ?? new Date().toISOString();
+      return archivedDetailNode({
+        id,
+        orderId: srcId,
+        note: over.note ?? null,
+        createdAt: at,
+        processedAt: over.processedAt ?? at,
+        total: over.total ?? "8.00",
+        shipping: over.shipping,
+        transactions: [refundTxn(TXN_REFUND, over.txnStatus ?? "SUCCESS", over.total ?? "8.00")],
+      });
+    };
 
-    const agreementNode = (n: number, over: Record<string, unknown> = {}) => ({
-      __typename: "RefundAgreement",
-      id: agreementGid(n),
-      happenedAt: new Date().toISOString(),
-      reason: "REFUND",
-      app: { id: APP_GID },
-      refund: { id: refundGid(1) },
-      ...over,
-    });
+    const agreementNode = (n: number, over: { refundId: string; happenedAt?: string }) =>
+      archivedRefundAgreement({
+        id: agreementGid(n),
+        appId: APP_GID,
+        refundId: over.refundId,
+        happenedAt: over.happenedAt ?? new Date().toISOString(),
+      });
 
     /** Admin fake routing the four pinned documents by name; a mutation
      *  throws — the reconciler must never issue one. */
@@ -554,16 +524,15 @@ describe.skipIf(!TEST_URL)(
           let payload: unknown;
           if (query.includes("ShippingRefundAppIdentity")) {
             payload = {
-              currentAppInstallation: { app: { id: e.appId ?? APP_GID } },
+              currentAppInstallation: archivedAppIdentity(e.appId ?? APP_GID),
             };
           } else if (query.includes("ShippingRefundDetail")) {
             const ids = (options?.variables?.ids ?? []) as string[];
             payload = {
               nodes: ids.map(
                 (id) =>
-                  e.details?.[id] ?? {
-                    __missing: id,
-                  },
+                  e.details?.[id] ??
+                  faultInjection("detail-node-missing", { __missing: id }),
               ),
             };
           } else if (query.includes("ShippingRefundAgreements")) {
@@ -576,32 +545,24 @@ describe.skipIf(!TEST_URL)(
                 agreements: {
                   nodes: Array.isArray(nodes) ? nodes : nodes.nodes,
                   pageInfo: Array.isArray(nodes)
-                    ? { hasNextPage: false, endCursor: null }
+                    ? archivedCompletePageInfo()
                     : nodes.pageInfo,
                 },
               },
             };
           } else {
             // ShippingRefundReconcile
-            if (e.malformedList) {
-              payload = { order: null };
-            } else {
-              payload = {
-                order: {
-                  id: options?.variables?.source,
-                  cancelledAt: "2026-10-15T09:30:00Z",
-                  closed: true,
-                  displayFinancialStatus: "PAID",
-                  currencyCode: "USD",
-                  totalRefundedSet: PM(e.totalRefunded ?? "0.00"),
-                  totalRefundedShippingSet: PM(e.totalRefundedShipping ?? "0.00"),
-                  refunds: e.refunds ?? [],
-                  transactions: e.transactions ?? [authTxn(TXN_AUTH), capTxn(TXN_CAP)],
-                  ...(e.orderOverrides ?? {}),
-                },
-              };
-            }
+            payload = {
+              order: archivedReconcileOrder({
+                id: options?.variables?.source,
+                refunds: e.refunds ?? [],
+                transactions: e.transactions ?? [authTxn(TXN_AUTH), capTxn(TXN_CAP)],
+                totalRefunded: e.totalRefunded ?? "0.00",
+                totalRefundedShipping: e.totalRefundedShipping ?? "0.00",
+              }),
+            };
           }
+          served.push(...auditServedPayload(query, payload));
           return { json: async () => ({ data: payload }) } as any;
         },
       };
@@ -802,18 +763,21 @@ describe.skipIf(!TEST_URL)(
       // `source` variable; detail calls carry `ids`, resolved against the
       // union of all three detail maps.
       const bySrc = new Map<string, Evidence>();
-      bySrc.set(fx1.secondaryId, fullEvidence({ rid: refundGid(5101), srcId: fx1.secondaryId, marker: m1, dispatchedAt, agreement: { app: { id: "gid://shopify/App/999" } } }));
+      bySrc.set(fx1.secondaryId, fullEvidence({ rid: refundGid(5101), srcId: fx1.secondaryId, marker: m1, dispatchedAt, agreement: { foreignAppId: "gid://shopify/App/999" } }));
       bySrc.set(fx2.secondaryId, {
         ...fullEvidence({ rid: refundGid(5102), srcId: fx2.secondaryId, marker: m2, dispatchedAt, agreement: "omit" }),
         agreements: [
-          agreementNode(11, { refund: { id: refundGid(5102) } }),
-          agreementNode(12, { refund: { id: refundGid(5102) } }),
+          archivedOrderAgreement(),
+          agreementNode(11, { refundId: refundGid(5102) }),
+          agreementVariant("duplicate-link", { id: agreementGid(12), appId: APP_GID, refundId: refundGid(5102), happenedAt: new Date().toISOString() }),
         ],
       });
       bySrc.set(fx3.secondaryId, {
         ...fullEvidence({ rid: refundGid(5103), srcId: fx3.secondaryId, marker: m3, dispatchedAt, agreement: "omit" }),
         agreements: [
-          agreementNode(13, { refund: { id: refundGid(7777) } }), // links a DIFFERENT refund
+          archivedOrderAgreement(),
+          // links a DIFFERENT refund
+          agreementVariant("other-refund-link", { id: agreementGid(13), appId: APP_GID, refundId: refundGid(7777), happenedAt: new Date().toISOString() }),
         ],
       });
       const mergedDetails = (): Record<string, any> =>
@@ -862,8 +826,8 @@ describe.skipIf(!TEST_URL)(
       const marker = (await rowState(fx.rowId)).marker as string;
       const ev = fullEvidence({ rid, srcId: fx.secondaryId, marker, dispatchedAt });
       ev.agreements = () => ({
-        nodes: [agreementNode(21, { refund: { id: rid } })],
-        pageInfo: { hasNextPage: true, endCursor: "c" },
+        nodes: [agreementNode(21, { refundId: rid })],
+        pageInfo: incompletePageInfo("c"),
       });
       const admin = reconAdmin(ev);
       const reports = await runCycle([shop], admin, {
@@ -893,7 +857,7 @@ describe.skipIf(!TEST_URL)(
       const perSrc = new Map<string, Evidence>();
       perSrc.set(fxPend.secondaryId, fullEvidence({ rid: refundGid(5301), srcId: fxPend.secondaryId, marker: markers.get(fxPend.secondaryId)!, dispatchedAt, txnStatus: "PENDING" }));
       perSrc.set(fxFail.secondaryId, fullEvidence({ rid: refundGid(5302), srcId: fxFail.secondaryId, marker: markers.get(fxFail.secondaryId)!, dispatchedAt, txnStatus: "FAILURE" }));
-      perSrc.set(fxOdd.secondaryId, fullEvidence({ rid: refundGid(5303), srcId: fxOdd.secondaryId, marker: markers.get(fxOdd.secondaryId)!, dispatchedAt, txnStatus: "AUTHORIZING" }));
+      perSrc.set(fxOdd.secondaryId, fullEvidence({ rid: refundGid(5303), srcId: fxOdd.secondaryId, marker: markers.get(fxOdd.secondaryId)!, dispatchedAt, txnStatus: "UNKNOWN" }));
       const admin = reconAdmin((vars) => {
         if (vars?.source) return perSrc.get(vars.source) ?? {};
         const ids = (vars?.ids ?? []) as string[];
@@ -944,13 +908,7 @@ describe.skipIf(!TEST_URL)(
         }),
       };
       perSrc.get(fxWrong.secondaryId)!.refunds = [
-        {
-          id: refundGid(5401),
-          note: buildRefundNote(mWrong, fxWrong.secondaryId),
-          createdAt: dispatchedAt,
-          processedAt: dispatchedAt,
-          totalRefundedSet: PM("9.00"),
-        },
+        listRefund(refundGid(5401), buildRefundNote(mWrong, fxWrong.secondaryId), dispatchedAt, dispatchedAt, "9.00"),
       ];
       perSrc.set(fxTaxed.secondaryId, {
         ...fullEvidence({ rid: refundGid(5402), srcId: fxTaxed.secondaryId, marker: mTaxed, dispatchedAt }),
@@ -958,9 +916,7 @@ describe.skipIf(!TEST_URL)(
       perSrc.get(fxTaxed.secondaryId)!.details = {
         [refundGid(5402)]: detailNode(refundGid(5402), fxTaxed.secondaryId, {
           note: buildRefundNote(mTaxed, fxTaxed.secondaryId),
-          shippingLines: [
-            { subtotalAmountSet: PM("8.00"), taxAmountSet: PM("0.40") },
-          ],
+          shipping: [{ subtotal: "8.00", tax: "0.40" }],
         }),
       };
 
@@ -992,8 +948,8 @@ describe.skipIf(!TEST_URL)(
       const perSrc = new Map<string, Evidence>();
       perSrc.set(fxDup.secondaryId, {
         refunds: [
-          { id: refundGid(5501), note, createdAt: dispatchedAt, processedAt: dispatchedAt, totalRefundedSet: PM("8.00") },
-          { id: refundGid(5502), note, createdAt: dispatchedAt, processedAt: dispatchedAt, totalRefundedSet: PM("8.00") },
+          listRefund(refundGid(5501), note, dispatchedAt, dispatchedAt),
+          listRefund(refundGid(5502), note, dispatchedAt, dispatchedAt),
         ],
         transactions: [authTxn(TXN_AUTH), capTxn(TXN_CAP)],
         totalRefunded: "16.00",
@@ -1003,7 +959,7 @@ describe.skipIf(!TEST_URL)(
       // absent → EXTERNAL_REFUND, never silently ignored.
       perSrc.set(fxExt.secondaryId, {
         refunds: [
-          { id: refundGid(5599), note: "staff refund", createdAt: dispatchedAt, processedAt: dispatchedAt, totalRefundedSet: PM("4.00") },
+          listRefund(refundGid(5599), "staff refund", dispatchedAt, dispatchedAt, "4.00"),
         ],
         transactions: [authTxn(TXN_AUTH), capTxn(TXN_CAP)],
         totalRefunded: "4.00",
@@ -1307,41 +1263,31 @@ describe.skipIf(!TEST_URL)(
           admin.calls.push({ query });
           let payload: unknown;
           if (query.includes("ShippingRefundAppIdentity")) {
-            payload = { currentAppInstallation: { app: { id: APP_GID } } };
+            payload = { currentAppInstallation: archivedAppIdentity(APP_GID) };
           } else if (query.includes("ShippingRefundDetail")) {
             throw new Error("detail transport failure");
           } else if (query.includes("ShippingRefundAgreements")) {
             payload = {
               order: {
                 agreements: {
-                  nodes: [agreementNode(31, { refund: { id: rid } })],
-                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [archivedOrderAgreement(), agreementNode(31, { refundId: rid })],
+                  pageInfo: archivedCompletePageInfo(),
                 },
               },
             };
           } else {
+            const at = new Date().toISOString();
             payload = {
-              order: {
+              order: archivedReconcileOrder({
                 id: options?.variables?.source,
-                cancelledAt: "2026-10-15T09:30:00Z",
-                closed: true,
-                displayFinancialStatus: "PAID",
-                currencyCode: "USD",
-                totalRefundedSet: PM("8.00"),
-                totalRefundedShippingSet: PM("8.00"),
-                refunds: [
-                  {
-                    id: rid,
-                    note,
-                    createdAt: new Date().toISOString(),
-                    processedAt: new Date().toISOString(),
-                    totalRefundedSet: PM("8.00"),
-                  },
-                ],
+                refunds: [listRefund(rid, note, at, at)],
                 transactions: [],
-              },
+                totalRefunded: "8.00",
+                totalRefundedShipping: "8.00",
+              }),
             };
           }
+          served.push(...auditServedPayload(query, payload));
           return { json: async () => ({ data: payload }) } as any;
         },
       } as unknown as AdminClient & { calls: { query: string }[] };
@@ -1383,28 +1329,18 @@ describe.skipIf(!TEST_URL)(
               ],
             };
           } else {
+            const at = new Date().toISOString();
             payload = {
-              order: {
+              order: archivedReconcileOrder({
                 id: seed.secondaryId,
-                cancelledAt: "2026-10-15T09:30:00Z",
-                closed: true,
-                displayFinancialStatus: "PAID",
-                currencyCode: "USD",
-                refunds: [
-                  {
-                    id: rid,
-                    note: "refund",
-                    createdAt: null,
-                    processedAt: null,
-                    totalRefundedSet: PM("8.00"),
-                  },
-                ],
+                refunds: [listRefund(rid, "refund", at, at)],
                 transactions: [],
-                totalRefundedSet: PM("8.00"),
-                totalRefundedShippingSet: PM("8.00"),
-              },
+                totalRefunded: "8.00",
+                totalRefundedShipping: "8.00",
+              }),
             };
           }
+          served.push(...auditServedPayload(query, payload));
           return { json: async () => ({ data: payload }) } as any;
         },
       } as unknown as AdminClient;
@@ -1555,6 +1491,11 @@ describe.skipIf(!TEST_URL)(
       expect(
         report.errors.some((e) => e.includes("unexamined")),
       ).toBe(true);
+    });
+
+    it("served only provenance-tagged Shopify response fixtures (§20.1.1)", () => {
+      expect(served.length).toBeGreaterThan(0);
+      expect(served.filter((e) => e.problem !== null)).toEqual([]);
     });
   },
 );

@@ -1,0 +1,581 @@
+{
+ "experiment": "E6",
+ "archiveKind": "recovered-contemporaneous-session-record",
+ "archivedAtUtc": "2026-10-25T13:20:00Z",
+ "developmentStore": "ordermergetest2.myshopify.com",
+ "apiVersion": {
+  "value": "2026-04",
+  "basis": "--version 2026-04 on every CLI invocation in the logged commands; app/shopify.server.ts pinned ApiVersion.April26 (T1 message 109)"
+ },
+ "applicationCommit": {
+  "value": "c04bf2b",
+  "basis": "reported by the original session (repository untouched at c04bf2b); the experiments ran from out-of-repository scripts, so no application code executed them",
+  "classification": "original-session-statement"
+ },
+ "operatorInitials": {
+  "value": null,
+  "classification": "missing",
+  "note": "never recorded"
+ },
+ "recoveryMethod": "The original evidence directory %TEMP%/mergeship-shipping-feas/evidence/ (33 files, listed in T3 message 121) no longer exists. Every item below is copied from the contemporaneous records in `sources` and keyed by message number / shell session id. Mutation responses were printed with `tee` and are verbatim; most read-backs survive only as the projected summaries the session printed. `excerptSha256` is the sha256 of the unsanitized tool-output text, `commandSha256` of the unsanitized logged command, so an auditor holding the source files can verify each item.",
+ "sources": {
+  "T1": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_a94a6a87ccc54795.md",
+   "kind": "Devin CLI session transcript written by the agent host during the E0-E6 session (tool outputs verbatim)",
+   "sha256": "22e469de96bec58f6286f83c0d2edc7e1a83079746cf42be64d857249a6b9a64",
+   "bytes": 377442
+  },
+  "T2": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_59bda577dfa44c75.md",
+   "kind": "continuation transcript of the same session after context compaction (E6-5 result and final E2/E6 report)",
+   "sha256": "245684114e0b94f54798f06e4e001216ceaae633a74b4d95f9aebde5f075118f",
+   "bytes": 236732
+  },
+  "T3": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_b7482c24a8634c83.md",
+   "kind": "later session transcript that printed original evidence files from %TEMP%/mergeship-shipping-feas/evidence/ before that directory was lost",
+   "sha256": "762dd1c802346438b0d352aa68eab44651cdd5bd844520c6ff3cb63d65aff5ba",
+   "bytes": 268988
+  },
+  "L1": {
+   "path": "%APPDATA%/Windsurf/logs/20261006T115002/window1/exthost/output_logging_20261014T132834/3-Devin ACP devin-cli.log",
+   "kind": "agent host execution log: every shell command with its session id and UTC start time (E0/E1)",
+   "sha256": "142b85fc5ea4489f34d31808c09ab47b061c1fdd29c3a7d67bf44e9c1cb29ff8",
+   "bytes": 4484970
+  },
+  "L2": {
+   "path": "%APPDATA%/Windsurf/logs/20261015T104659/window1/exthost/output_logging_20261015T104707/2-Devin ACP devin-cli.log",
+   "kind": "agent host execution log: every shell command with its session id and UTC start time (E2/E6)",
+   "sha256": "a843213cb7e8d2ed981b2c448f4b4a4edb7be60fe9f0662706d1eed1331087c1",
+   "bytes": 1407372
+  }
+ },
+ "purpose": "Bounded $3.00 shipping-refund idempotency tests: concurrent identical-key requests, same-key replay, changed-payload rejection.",
+ "order": {
+  "id": "gid://shopify/Order/8078037057783",
+  "name": "#1133"
+ },
+ "refundCreationProvenance": {
+  "refundId": "gid://shopify/Refund/1123042787575",
+  "createdWith": "MergeShip app credentials through Shopify CLI `shopify app execute` (see executionTool.mutationPath); not Shopify Admin UI, not staff",
+  "basis": "the logged command for shell session bfa3ee runs two parallel gq.mjs --allow-mutation invocations with the same document and variables; process A's printed response carries this refund id",
+  "classification": "original-execution",
+  "reviewNote": "Whether this record satisfies the §12.8.1 POS provenance requirement is for independent review; it is not asserted here."
+ },
+ "executionTool": {
+  "mutationPath": "node gq.mjs <store> <document> <variables> --allow-mutation → npx shopify app execute --store ordermergetest2.myshopify.com --version 2026-04 --query-file <document> --variable-file <variables>, run with cwd = the MergeShip app repository (app configuration shopify.app.toml, client_id 04b77142ce8ad421f49735b05c7d0a86)",
+  "readPaths": [
+   "node ro.mjs <document> <variables> → npx shopify store execute --store ordermergetest2.myshopify.com --version 2026-04 (read-only wrapper; refuses any document containing 'mutation')",
+   "node gq.mjs (queries such as suggestedRefund previews also used the app-execute path)"
+  ],
+  "gqMjsSource": {
+   "text": "// usage: node gq.mjs <store> <queryfile> [varsfile] [--allow-mutation]\nimport { execFileSync, spawnSync } from 'child_process';\nimport fs from 'fs';\nconst [store, qf, vf, flag] = process.argv.slice(2);\nconst q = fs.readFileSync(qf, 'utf8');\nif (/\\bmutation\\b/.test(q) && flag !== '--allow-mutation') { console.error('REFUSING: mutation without --allow-mutation'); process.exit(3); }\nconst SAFE_STORE = 'ordermergetest2.myshopify.com';\nif (/\\bmutation\\b/.test(q) && store !== SAFE_STORE) { console.error('REFUSING: mutations only on ' + SAFE_STORE); process.exit(3); }\nconst args = ['shopify','app','execute','--store',store,'--version','2026-04','--query-file',qf];\nif (vf) args.push('--variable-file', vf);\nif (/\\bmutation\\b/.test(q)) args.push('--allow-mutations');\nconst r = spawnSync('npx', args, { cwd: '<home>/Desktop/shopifymerger/order-merge-app', encoding: 'utf8', shell: true, maxBuffer: 64*1024*1024 });\nconst text = ((r.stdout||'') + '\\n' + (r.stderr||'')).replace(/\\x1b\\[[0-9;]*[A-Za-z]/g, '');\nconst stripped = text.split('\\n').map(l => { const m = l.match(/^\\s*│\\s?(.*?)\\s*│?\\s*$/); return m ? m[1] : l; }).join('\\n');\nconst s = stripped.indexOf('{'), e = stripped.lastIndexOf('}');\nlet body = null; try { body = JSON.parse(stripped.slice(s, e+1)); } catch { }\nconsole.log(JSON.stringify(body ?? { raw: stripped.slice(0, 3000) }, null, 1));",
+   "sha256": "2c97c9cb253e0e3746fbef7774a9445ede4e0ddbc8ebab6c3fb1de6434aa0e68",
+   "recordedIn": "L1 shell session 12216e (2026-10-14T13:49:43Z); line 'args.push(\"--allow-mutations\")' was deleted at 2026-10-14T15:10:33Z (shell 96764f) because the CLI rejected that flag"
+  },
+  "roMjsSource": {
+   "text": "// READ-ONLY wrapper: ordermergetest2 only, refuses any mutation, uses the CLI connector token.\nimport { spawnSync } from 'child_process';\nimport fs from 'fs';\nconst [qf, vf] = process.argv.slice(2);\nconst q = fs.readFileSync(qf, 'utf8');\nif (/\\bmutation\\b/i.test(q)) { console.error('REFUSING: mutation'); process.exit(3); }\nconst args = ['shopify','store','execute','--store','ordermergetest2.myshopify.com','--version','2026-04','--query-file',qf];\nif (vf) args.push('--variable-file', vf);\nconst r = spawnSync('npx', args, { cwd: '<home>/Desktop/shopifymerger/order-merge-app', encoding: 'utf8', shell: true, maxBuffer: 64*1024*1024 });\nconst text = ((r.stdout||'') + '\\n' + (r.stderr||'')).replace(/\\x1b\\[[0-9;]*[A-Za-z]/g, '');\nconst stripped = text.split('\\n').map(l => { const m = l.match(/^\\s*│\\s?(.*?)\\s*│?\\s*$/); return m ? m[1] : l; }).join('\\n');\nconst s = stripped.indexOf('{\\n'), e = stripped.lastIndexOf('}');\nlet body = null; try { body = JSON.parse(stripped.slice(s, e+1)); } catch {}\nconsole.log(JSON.stringify(body ?? { raw: stripped.slice(0, 3000) }, null, 1));",
+   "sha256": "53bdbbf00528e67d4128067ff45df5c1f19caa7758f067ec78ae03e6aa47732e",
+   "recordedIn": "L1 shell session e82956"
+  },
+  "guardMjsSource": {
+   "text": "// Pre-flight: refuses unless the order is on ordermergetest2, test:true, with only bogus test:true money transactions,\n// and not one of the pre-existing Protocol v2 fixture orders (those use gateway \"manual\").\nimport { spawnSync } from 'child_process';\nimport fs from 'fs';\nconst [orderId] = process.argv.slice(2);\nconst D = process.env.D;\nfs.writeFileSync(D + '/guard.graphql', `query G($id: ID!) { shop { myshopifyDomain plan { partnerDevelopment } } order(id: $id) { id name test sourceName paymentGatewayNames transactions(first: 20) { kind status gateway test } } }`);\nfs.writeFileSync(D + '/guard.vars.json', JSON.stringify({ id: orderId }));\nconst r = spawnSync('npx', ['shopify','store','execute','--store','ordermergetest2.myshopify.com','--version','2026-04','--query-file',D+'/guard.graphql','--variable-file',D+'/guard.vars.json'], { cwd: '<home>/Desktop/shopifymerger/order-merge-app', encoding: 'utf8', shell: true });\nconst t = ((r.stdout||'')+(r.stderr||'')).replace(/\\x1b\\[[0-9;]*[A-Za-z]/g,'');\nconst j = JSON.parse(t.slice(t.indexOf('{\\n'), t.lastIndexOf('}')+1));\nconst fail = (m) => { console.error('GUARD FAIL: ' + m); process.exit(4); };\nif (j.shop.myshopifyDomain !== 'ordermergetest2.myshopify.com') fail('wrong shop');\nif (!j.shop.plan.partnerDevelopment) fail('not a development store');\nconst o = j.order; if (!o) fail('order not found');\nif (o.test !== true) fail('order.test is not true');\nif (!o.paymentGatewayNames.length || o.paymentGatewayNames.some(g => g !== 'bogus')) fail('non-bogus gateway: ' + o.paymentGatewayNames);\nif (o.transactions.some(x => x.test !== true)) fail('a transaction is not test:true');\nconsole.log('GUARD OK', o.name, o.id, 'gateway=bogus test=true shop=ordermergetest2 partnerDevelopment=true');",
+   "sha256": "def5f26c20fc226fbbc535bd0f7dc9933ff7df28f504abbe2adf1b3d75ea78b1",
+   "recordedIn": "L1 shell session a00fd9"
+  },
+  "appIdentityAtE0": {
+   "note": "Q currentAppInstallation on ordermergetest2 through the same CLI app path during E0 returned the MergeShip app",
+   "appId": "gid://shopify/App/426185785345",
+   "output": {
+    "source": "T1",
+    "message": 116,
+    "shellSession": null,
+    "excerptSha256": "ba8a61f5c701c304d0acf23c6f3735718069bbd6cd84eacc89c9507cb896525f",
+    "redactions": []
+   }
+  }
+ },
+ "idempotencyKey": "572abfe8-ecb3-4a41-8847-c7f3f0e3eb25",
+ "document": {
+  "text": "mutation E6Refund($input: RefundInput!) {\n  refundCreate(input: $input) @idempotent(key: \"572abfe8-ecb3-4a41-8847-c7f3f0e3eb25\") {\n    refund {\n      id note createdAt processedAt\n      totalRefundedSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }\n      refundShippingLines(first: 5) { nodes { id subtotalAmountSet { shopMoney { amount } } taxAmountSet { shopMoney { amount } } shippingLine { id title } } }\n      transactions(first: 5) { nodes { id kind status gateway test processedAt errorCode amountSet { shopMoney { amount currencyCode } } parentTransaction { id kind } } }\n    }\n    order { id displayFinancialStatus totalRefundedShippingSet { shopMoney { amount } } totalRefundedSet { shopMoney { amount } } }\n    userErrors { field message }\n  }\n}",
+  "sha256": "d7d0638efcc1023d4868b86e499ab8ed02b5e4a095b36f3d225a8665da81a801",
+  "recovery": "E1 document with the logged sed applied (E1Refund→E6Refund, key→printed KEY); one document for every E6 request"
+ },
+ "steps": [
+  {
+   "step": "E6-1 suggestedRefund preview ($3.00)",
+   "classification": "original-readback (projected summary)",
+   "document": {
+    "text": "fragment SR on SuggestedRefund {\n  amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }\n  subtotalSet { shopMoney { amount } }\n  totalTaxSet { shopMoney { amount } }\n  maximumRefundableSet { shopMoney { amount currencyCode } }\n  shipping {\n    amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }\n    taxSet { shopMoney { amount } }\n    maximumRefundableSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }\n  }\n  refundLineItems { quantity lineItem { id } }\n  suggestedTransactions {\n    kind gateway formattedGateway\n    amountSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }\n    maximumRefundableSet { shopMoney { amount currencyCode } }\n    parentTransaction { id kind status test gateway }\n  }\n  suggestedRefundMethods { __typename amount { shopMoney { amount } } maximumRefundable { shopMoney { amount } } }\n}\nquery Probe($id: ID!, $amt: Money) {\n  order(id: $id) {\n    name cancelledAt closedAt closed refundable taxesIncluded displayFinancialStatus\n    totalRefundedShippingSet { shopMoney { amount } }\n    netPaymentSet { shopMoney { amount } }\n    transactions(first: 10) { id kind status gateway test amountSet { shopMoney { amount currencyCode } } maximumRefundableV2 { amount currencyCode } parentTransaction { id } }\n    byAmount: suggestedRefund(shippingAmount: $amt) { ...SR }\n    byFlag: suggestedRefund(refundShipping: true) { ...SR }\n    zero: suggestedRefund(shippingAmount: \"0.00\") { ...SR }\n  }\n}",
+    "sha256": "008c2ea8bf243abd2fc99337bf2429d42de9def9b0ffbeec7fbed6b013f881bd",
+    "recovery": "sr-probe.graphql (L1 shell session 12216e)"
+   },
+   "variables": {
+    "id": "gid://shopify/Order/8078037057783",
+    "amt": "3.00"
+   },
+   "command": {
+    "source": "L2",
+    "shellSession": "377557",
+    "loggedStartUtc": "2026-10-15T08:09:20.665922Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && E=gid://shopify/Order/8078037057783 && echo \"{\\\"id\\\":\\\"$E\\\",\\\"amt\\\":\\\"3.00\\\"}\" > \"$D/v-sr-1133.json\" && node \"$D/gq.mjs\" ordermergetest2.myshopify.com \"$D/sr-probe.graphql\" \"$D/v-sr-1133.json\" > \"$D/evidence/E6-1-suggestedRefund-preview.json\"; node -e \"\nconst j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));\nif(!j.order){console.log(JSON.stringify(j).slice(0,2000));process.exit()}\nconst o=j.order;const s=o.byAmount;\nconsole.log('order',o.name,'refundable='+o.refundable,'cancelledAt='+o.cancelledAt,'closed='+o.closed);\nconsole.log('transactions',JSON.stringify(o.transactions.map(t=>({id:t.id,kind:t.kind,status:t.status,gw:t.gateway,test:t.test,amt:t.amountSet.shopMoney.amount}))));\nconsole.log('preview amount='+s.amountSet.shopMoney.amount,'shipping='+s.shipping.amountSet.shopMoney.amount,'shipTax='+s.shipping.taxSet.shopMoney.amount,'shipMax='+s.shipping.maximumRefundableSet.shopMoney.amount,'payMax='+s.maximumRefundableSet.shopMoney.amount,'lineItems='+s.refundLineItems.length);\nconsole.log('suggestedTransactions',JSON.stringify(s.suggestedTransactions.map(t=>({kind:t.kind,gw:t.gateway,amt:t.amountSet.shopMoney.amount,parent:t.parentTransaction?.id,parentKind:t.parentTransaction?.kind}))));\n\" \"$D/evidence/E6-1-suggestedRefund-preview.json\"",
+    "commandSha256": "5e4b59d7fe3db5654861e1eb857b20f488effd550a255622fe0ed1a95e1e59a7"
+   },
+   "output": {
+    "source": "T1",
+    "message": 339,
+    "shellSession": "377557",
+    "excerptSha256": "fc447cd85f182eddfed2a621c483f5042df6a1e04d6ff4291483102309fcc0bb",
+    "redactions": []
+   },
+   "summary": "Output from command in shell 377557:\norder #1133 refundable=true cancelledAt=null closed=false\ntransactions [{\"id\":\"gid://shopify/OrderTransaction/10162809503991\",\"kind\":\"AUTHORIZATION\",\"status\":\"SUCCESS\",\"gw\":\"bogus\",\"test\":true,\"amt\":\"18.0\"},{\"id\":\"gid://shopify/OrderTransaction/10162809569527\",\"kind\":\"CAPTURE\",\"status\":\"SUCCESS\",\"gw\":\"bogus\",\"test\":true,\"amt\":\"18.0\"}]\npreview amount=3.0 shipping=3.0 shipTax=0.0 shipMax=8.0 payMax=18.0 lineItems=0\nsuggestedTransactions [{\"kind\":\"SUGGESTED_REFUND\",\"gw\":\"bogus\",\"amt\":\"3.0\",\"parent\":\"gid://shopify/OrderTransaction/10162809569527\",\"parentKind\":\"CAPTURE\"}]\n\n\nExit code: 0\n"
+  },
+  {
+   "step": "E6-2/3 two concurrent identical-key requests (processes A and B)",
+   "classification": "original-execution",
+   "variables": {
+    "input": {
+     "orderId": "gid://shopify/Order/8078037057783",
+     "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+     "notify": false,
+     "shipping": {
+      "amount": "3.00"
+     },
+     "transactions": [
+      {
+       "orderId": "gid://shopify/Order/8078037057783",
+       "parentId": "gid://shopify/OrderTransaction/10162809569527",
+       "gateway": "bogus",
+       "kind": "REFUND",
+       "amount": "3.00"
+      }
+     ]
+    }
+   },
+   "variablesCorroboration": {
+    "source": "T3 message 124 printed the original E6-2-variables-3.00.json",
+    "identical": true
+   },
+   "command": {
+    "source": "L2",
+    "shellSession": "bfa3ee",
+    "loggedStartUtc": "2026-10-15T08:09:40.194547Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && E=gid://shopify/Order/8078037057783 && CAP=gid://shopify/OrderTransaction/10162809569527 && KEY=$(node -e 'console.log(require(\"crypto\").randomUUID())') && sed \"s#E1Refund#E6Refund#; s#idempotent(key: \\\"[^\\\"]*\\\")#idempotent(key: \\\"$KEY\\\")#\" \"$D/m-refund.graphql\" > \"$D/m-refund-e6.graphql\" && cat > \"$D/v-refund-1133-3.json\" <<EOF\n{\"input\":{\"orderId\":\"$E\",\"note\":\"MS-SHIP-E6 idempotency test refund 3.00 (test order)\",\"notify\":false,\"shipping\":{\"amount\":\"3.00\"},\"transactions\":[{\"orderId\":\"$E\",\"parentId\":\"$CAP\",\"gateway\":\"bogus\",\"kind\":\"REFUND\",\"amount\":\"3.00\"}]}}\nEOF\ncp \"$D/m-refund-e6.graphql\" \"$D/evidence/E6-2-request.graphql\"; cp \"$D/v-refund-1133-3.json\" \"$D/evidence/E6-2-variables-3.00.json\"; echo \"$KEY\" > \"$D/evidence/E6-2-idempotency-key.txt\"; echo \"KEY=$KEY\"; D=\"$D\" node \"$D/preflight.mjs\" $E \"#1133\" <email-redacted> || exit 4; date -u +%FT%TZ; ( node \"$D/gq.mjs\" ordermergetest2.myshopify.com \"$D/m-refund-e6.graphql\" \"$D/v-refund-1133-3.json\" --allow-mutation > \"$D/evidence/E6-3-concurrent-A.json\"; date -u +\"A done %FT%TZ\" ) & ( node \"$D/gq.mjs\" ordermergetest2.myshopify.com \"$D/m-refund-e6.graphql\" \"$D/v-refund-1133-3.json\" --allow-mutation > \"$D/evidence/E6-3-concurrent-B.json\"; date -u +\"B done %FT%TZ\" ) & wait; echo \"=== A\"; cat \"$D/evidence/E6-3-concurrent-A.json\"; echo \"=== B\"; cat \"$D/evidence/E6-3-concurrent-B.json\"",
+    "commandSha256": "86c2577fbca2a866f187d236c423fa0abd2a51ae34101720df90087268a71261"
+   },
+   "keyOutput": {
+    "source": "T1",
+    "message": 341,
+    "shellSession": null,
+    "excerptSha256": "dbd52fdc82a941d1c1ed5c552375e49b9e06ecca2c7b8e9d714e12d5a359e47d",
+    "redactions": []
+   },
+   "output": {
+    "source": "T1",
+    "message": 343,
+    "shellSession": null,
+    "excerptSha256": "11e25ce64aba407744139add9e565022c84bfe89cea8d61d236bff68502d299b",
+    "redactions": []
+   },
+   "printedTimestamps": [
+    "2026-10-15T08:10:14Z",
+    "B done 2026-10-15T08:10:23Z",
+    "A done 2026-10-15T08:10:24Z"
+   ],
+   "responseA": {
+    "refundCreate": {
+     "refund": {
+      "id": "gid://shopify/Refund/1123042787575",
+      "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+      "createdAt": "2026-10-15T08:10:21Z",
+      "processedAt": "2026-10-15T08:10:21Z",
+      "totalRefundedSet": {
+       "shopMoney": {
+        "amount": "3.0",
+        "currencyCode": "USD"
+       },
+       "presentmentMoney": {
+        "amount": "3.0",
+        "currencyCode": "USD"
+       }
+      },
+      "refundShippingLines": {
+       "nodes": [
+        {
+         "id": "gid://shopify/RefundShippingLine/57797345527",
+         "subtotalAmountSet": {
+          "shopMoney": {
+           "amount": "3.0"
+          }
+         },
+         "taxAmountSet": {
+          "shopMoney": {
+           "amount": "0.0"
+          }
+         },
+         "shippingLine": {
+          "id": "gid://shopify/ShippingLine/6833440719095",
+          "title": "Standard"
+         }
+        }
+       ]
+      },
+      "transactions": {
+       "nodes": [
+        {
+         "id": "gid://shopify/OrderTransaction/10165563097335",
+         "kind": "REFUND",
+         "status": "SUCCESS",
+         "gateway": "bogus",
+         "test": true,
+         "processedAt": "2026-10-15T08:10:21Z",
+         "errorCode": null,
+         "amountSet": {
+          "shopMoney": {
+           "amount": "3.0",
+           "currencyCode": "USD"
+          }
+         },
+         "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/10162809569527",
+          "kind": "CAPTURE"
+         }
+        }
+       ]
+      }
+     },
+     "order": {
+      "id": "gid://shopify/Order/8078037057783",
+      "displayFinancialStatus": "PARTIALLY_REFUNDED",
+      "totalRefundedShippingSet": {
+       "shopMoney": {
+        "amount": "3.0"
+       }
+      },
+      "totalRefundedSet": {
+       "shopMoney": {
+        "amount": "3.0"
+       }
+      }
+     },
+     "userErrors": []
+    }
+   },
+   "responseB": {
+    "refundCreate": {
+     "refund": null,
+     "order": null,
+     "userErrors": [
+      {
+       "field": [
+        "orderId"
+       ],
+       "message": "Order is temporarily unavailable to be modified."
+      }
+     ]
+    }
+   }
+  },
+  {
+   "step": "E6-3 read-back after concurrency",
+   "classification": "original-readback (projected summary; first attempt 0a5d0d failed in the local script before printing, see T1 message 345)",
+   "command": {
+    "source": "L2",
+    "shellSession": "38d540",
+    "loggedStartUtc": "2026-10-15T08:10:53.056454Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && sed -i 's/process.argv\\[1\\]/process.argv[2]/' \"$D/rb.mjs\" && node \"$D/rb.mjs\" \"$D/evidence/E6-3-readback-after-concurrent.json\"",
+    "commandSha256": "76507ceffa52acf95ca2ae6f1dd5201d2977bbde006df5afcb3f1ea30ef2afe3"
+   },
+   "output": {
+    "source": "T1",
+    "message": 347,
+    "shellSession": "38d540",
+    "excerptSha256": "3b8415a270d581a796dbfa1b7771bb81394efa4bfe8c0f4e182690f29e004122",
+    "redactions": []
+   },
+   "summary": "Output from command in shell 38d540:\n{\n \"name\": \"#1133\",\n \"test\": true,\n \"cancelledAt\": null,\n \"closedAt\": null,\n \"fin\": \"PARTIALLY_REFUNDED\",\n \"refundCount\": 1,\n \"totalRefunded\": \"3.0\",\n \"totalRefundedShipping\": \"3.0\",\n \"netPayment\": \"15.0\",\n \"refunds\": [\n  {\n   \"id\": \"gid://shopify/Refund/1123042787575\",\n   \"note\": \"MS-SHIP-E6 idempotency test refund 3.00 (test order)\",\n   \"total\": \"3.0\",\n   \"shipLines\": [\n    \"3.0\"\n   ],\n   \"tx\": [\n    \"REFUND/SUCCESS/3.0/parent=CAPTURE\"\n   ]\n  }\n ],\n \"transactions\": [\n  \"AUTHORIZATION/SUCCESS/18.0\",\n  \"CAPTURE/SUCCESS/18.0\",\n  \"REFUND/SUCCESS/3.0\"\n ]\n}\n\n\nExit code: 0\n"
+  },
+  {
+   "step": "E6-4 same-key identical replay",
+   "classification": "original-execution",
+   "variables": {
+    "input": {
+     "orderId": "gid://shopify/Order/8078037057783",
+     "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+     "notify": false,
+     "shipping": {
+      "amount": "3.00"
+     },
+     "transactions": [
+      {
+       "orderId": "gid://shopify/Order/8078037057783",
+       "parentId": "gid://shopify/OrderTransaction/10162809569527",
+       "gateway": "bogus",
+       "kind": "REFUND",
+       "amount": "3.00"
+      }
+     ]
+    }
+   },
+   "command": {
+    "source": "L2",
+    "shellSession": "c81321",
+    "loggedStartUtc": "2026-10-15T08:11:06.585929Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && E=gid://shopify/Order/8078037057783 && D=\"$D\" node \"$D/preflight.mjs\" $E \"#1133\" <email-redacted> && date -u +%FT%TZ && node \"$D/gq.mjs\" ordermergetest2.myshopify.com \"$D/m-refund-e6.graphql\" \"$D/v-refund-1133-3.json\" --allow-mutation | tee \"$D/evidence/E6-4-replay-response.json\"; date -u +%FT%TZ; node \"$D/ro.mjs\" \"$D/state-nojob.graphql\" \"$D/v-1133.json\" > \"$D/evidence/E6-4-readback-after-replay.json\"; node \"$D/rb.mjs\" \"$D/evidence/E6-4-readback-after-replay.json\"",
+    "commandSha256": "99251959ff87f62a3244080d20b5149533702db0dbe5b026b55e225cf0a95ee1"
+   },
+   "output": {
+    "source": "T1",
+    "message": 351,
+    "shellSession": null,
+    "excerptSha256": "c0ef653f37d736157ea89d121021d689a118bc07fd8253c6338be9db51b16138",
+    "redactions": []
+   },
+   "printedTimestamps": [
+    "2026-10-15T08:11:39Z",
+    "2026-10-15T08:11:48Z"
+   ],
+   "response": {
+    "refundCreate": {
+     "refund": {
+      "id": "gid://shopify/Refund/1123042787575",
+      "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+      "createdAt": "2026-10-15T08:10:21Z",
+      "processedAt": "2026-10-15T08:10:21Z",
+      "totalRefundedSet": {
+       "shopMoney": {
+        "amount": "3.0",
+        "currencyCode": "USD"
+       },
+       "presentmentMoney": {
+        "amount": "3.0",
+        "currencyCode": "USD"
+       }
+      },
+      "refundShippingLines": {
+       "nodes": [
+        {
+         "id": "gid://shopify/RefundShippingLine/57797345527",
+         "subtotalAmountSet": {
+          "shopMoney": {
+           "amount": "3.0"
+          }
+         },
+         "taxAmountSet": {
+          "shopMoney": {
+           "amount": "0.0"
+          }
+         },
+         "shippingLine": {
+          "id": "gid://shopify/ShippingLine/6833440719095",
+          "title": "Standard"
+         }
+        }
+       ]
+      },
+      "transactions": {
+       "nodes": [
+        {
+         "id": "gid://shopify/OrderTransaction/10165563097335",
+         "kind": "REFUND",
+         "status": "SUCCESS",
+         "gateway": "bogus",
+         "test": true,
+         "processedAt": "2026-10-15T08:10:21Z",
+         "errorCode": null,
+         "amountSet": {
+          "shopMoney": {
+           "amount": "3.0",
+           "currencyCode": "USD"
+          }
+         },
+         "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/10162809569527",
+          "kind": "CAPTURE"
+         }
+        }
+       ]
+      }
+     },
+     "order": {
+      "id": "gid://shopify/Order/8078037057783",
+      "displayFinancialStatus": "PARTIALLY_REFUNDED",
+      "totalRefundedShippingSet": {
+       "shopMoney": {
+        "amount": "3.0"
+       }
+      },
+      "totalRefundedSet": {
+       "shopMoney": {
+        "amount": "3.0"
+       }
+      }
+     },
+     "userErrors": []
+    }
+   },
+   "readbackSummary": {
+    "name": "#1133",
+    "test": true,
+    "cancelledAt": null,
+    "closedAt": null,
+    "fin": "PARTIALLY_REFUNDED",
+    "refundCount": 1,
+    "totalRefunded": "3.0",
+    "totalRefundedShipping": "3.0",
+    "netPayment": "15.0",
+    "refunds": [
+     {
+      "id": "gid://shopify/Refund/1123042787575",
+      "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+      "total": "3.0",
+      "shipLines": [
+       "3.0"
+      ],
+      "tx": [
+       "REFUND/SUCCESS/3.0/parent=CAPTURE"
+      ]
+     }
+    ],
+    "transactions": [
+     "AUTHORIZATION/SUCCESS/18.0",
+     "CAPTURE/SUCCESS/18.0",
+     "REFUND/SUCCESS/3.0"
+    ]
+   }
+  },
+  {
+   "step": "E6-5 same key, changed payload ($2.00)",
+   "classification": "original-execution",
+   "variables": {
+    "input": {
+     "orderId": "gid://shopify/Order/8078037057783",
+     "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+     "notify": false,
+     "shipping": {
+      "amount": "2.00"
+     },
+     "transactions": [
+      {
+       "orderId": "gid://shopify/Order/8078037057783",
+       "parentId": "gid://shopify/OrderTransaction/10162809569527",
+       "gateway": "bogus",
+       "kind": "REFUND",
+       "amount": "2.00"
+      }
+     ]
+    }
+   },
+   "command": {
+    "source": "L2",
+    "shellSession": "db14ce",
+    "loggedStartUtc": "2026-10-15T08:12:04.155784Z",
+    "commandSanitized": "cd \"<home>\\Desktop\\shopifymerger\\order-merge-app\" && TMPD=\"$(node -e 'console.log(require(\"os\").tmpdir())')\" && D=\"$TMPD/mergeship-shipping-feas\" && E=gid://shopify/Order/8078037057783 && CAP=gid://shopify/OrderTransaction/10162809569527 && cat > \"$D/v-refund-1133-2.json\" <<EOF\n{\"input\":{\"orderId\":\"$E\",\"note\":\"MS-SHIP-E6 idempotency test refund 3.00 (test order)\",\"notify\":false,\"shipping\":{\"amount\":\"2.00\"},\"transactions\":[{\"orderId\":\"$E\",\"parentId\":\"$CAP\",\"gateway\":\"bogus\",\"kind\":\"REFUND\",\"amount\":\"2.00\"}]}}\nEOF\ncp \"$D/v-refund-1133-2.json\" \"$D/evidence/E6-5-variables-changed-2.00.json\"; D=\"$D\" node \"$D/preflight.mjs\" $E \"#1133\" <email-redacted> && date -u +%FT%TZ && node \"$D/gq.mjs\" ordermergetest2.myshopify.com \"$D/m-refund-e6.graphql\" \"$D/v-refund-1133-2.json\" --allow-mutation | tee \"$D/evidence/E6-5-changed-payload-response.json\"; date -u +%FT%TZ; node \"$D/ro.mjs\" \"$D/state-nojob.graphql\" \"$D/v-1133.json\" > \"$D/evidence/E6-5-readback-after-changed.json\"; node \"$D/rb.mjs\" \"$D/evidence/E6-5-readback-after-changed.json\"",
+    "commandSha256": "a51e0b90f8b67052ab12d8ba8f7214c012c6a39f9e26869f9bb1c25e271eaa4d"
+   },
+   "output": {
+    "source": "T2",
+    "message": 3,
+    "shellSession": null,
+    "excerptSha256": "fb3dad0d408d47c45d09c6024b5617d4448cb56bc1789b2e450efd8d314b0fed",
+    "redactions": []
+   },
+   "printedTimestamps": [
+    "2026-10-15T08:12:38Z",
+    "2026-10-15T08:12:49Z"
+   ],
+   "response": {
+    "refundCreate": {
+     "refund": null,
+     "order": {
+      "id": "gid://shopify/Order/8078037057783",
+      "displayFinancialStatus": "PARTIALLY_REFUNDED",
+      "totalRefundedShippingSet": {
+       "shopMoney": {
+        "amount": "3.0"
+       }
+      },
+      "totalRefundedSet": {
+       "shopMoney": {
+        "amount": "3.0"
+       }
+      }
+     },
+     "userErrors": [
+      {
+       "field": null,
+       "message": "Idempotency key has been used with a different request payload."
+      }
+     ]
+    }
+   },
+   "readbackSummary": {
+    "name": "#1133",
+    "test": true,
+    "cancelledAt": null,
+    "closedAt": null,
+    "fin": "PARTIALLY_REFUNDED",
+    "refundCount": 1,
+    "totalRefunded": "3.0",
+    "totalRefundedShipping": "3.0",
+    "netPayment": "15.0",
+    "refunds": [
+     {
+      "id": "gid://shopify/Refund/1123042787575",
+      "note": "MS-SHIP-E6 idempotency test refund 3.00 (test order)",
+      "total": "3.0",
+      "shipLines": [
+       "3.0"
+      ],
+      "tx": [
+       "REFUND/SUCCESS/3.0/parent=CAPTURE"
+      ]
+     }
+    ],
+    "transactions": [
+     "AUTHORIZATION/SUCCESS/18.0",
+     "CAPTURE/SUCCESS/18.0",
+     "REFUND/SUCCESS/3.0"
+    ]
+   }
+  }
+ ],
+ "expectedVsObserved": [
+  {
+   "check": "concurrent A",
+   "expected": "one refund created",
+   "observed": "gid://shopify/Refund/1123042787575 total 3.0"
+  },
+  {
+   "check": "concurrent B",
+   "expected": "no second refund",
+   "observed": "refund null userErrors [{\"field\":[\"orderId\"],\"message\":\"Order is temporarily unavailable to be modified.\"}]"
+  },
+  {
+   "check": "replay",
+   "expected": "same refund id, original createdAt, no new refund",
+   "observed": "gid://shopify/Refund/1123042787575 createdAt 2026-10-15T08:10:21Z; refundCount after 1"
+  },
+  {
+   "check": "changed payload",
+   "expected": "rejected, no new refund",
+   "observed": "refund null userErrors [{\"field\":null,\"message\":\"Idempotency key has been used with a different request payload.\"}]; refundCount after 1"
+  }
+ ],
+ "verdict": {
+  "reported": "PASS",
+  "reportedBy": "original session, T2 assistant message 7",
+  "reportText": "## E6: PASS (bounded $3 idempotency tests on #1133, shipping balance $8.00)\n\n**Fixed inputs:** one key (`572abfe8-ecb3-4a41-8847-c7f3f0e3eb25`), $3.00 payload, preview shipping 3.0 and shipping maximum 8.0. The order was left open as created.\n\n| Step | Result | Read-back |\n|---|---|---|\n| **Concurrent identical key**, two parallel processes | A created `Refund/1123042787575` ($3.00, REFUND/SUCCESS). B got `refund: null` and `userErrors: [{field:[\"orderId\"], message:\"Order is temporarily unavailable to be modified.\"}]` | 1 refund, shipping refunded 3.0, net 15.0 |\n| **Same-key identical replay** | Returned the same refund id with the original `createdAt` 08:10:21Z, no `userErrors` | still 1 refund, 3.0 |\n| **Changed payload, same key** ($2.00) | `refund: null`, `userErrors: [{field: null, message:\"Idempotency key has been used with a different request payload.\"}]` | still 1 refund, 3.0 |\n\nFinal state of #1133: one refund of $3.00, $5.00 of shipping left unrefunded. No step created a duplicate, and I never used a new key as a retry.",
+  "limitationsReported": [
+   "The concurrent loser received an order-level 'Order is temporarily unavailable to be modified.' error, not IDEMPOTENCY_CONCURRENT_REQUEST: the key's own concurrency guard was not observed.",
+   "userErrors { code } is not selectable; the mismatch was reported only by message text.",
+   "Behaviour after the 24-hour idempotency window was not tested."
+  ]
+ },
+ "laterReadbacks": "G-READBACK (2026-10-25): q-reconcile-with_refund_e6.json, q-agreements-pos_e6.json, q-refund-detail-strict_single_e6.json — later observations, not E6 evidence.",
+ "gaps": [
+  "Original files E6-1..E6-5: unrecoverable as files; raw read-backs survive only as projected summaries.",
+  "E6 document text: reconstructed from the logged commands, not a byte copy.",
+  "Operator initials: never recorded."
+ ]
+}

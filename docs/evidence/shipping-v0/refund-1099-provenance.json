@@ -1,0 +1,157 @@
+{
+ "subject": {
+  "refundId": "gid://shopify/Refund/1120894320887",
+  "orderId": "gid://shopify/Order/8051306299639",
+  "orderName": "#1099"
+ },
+ "archiveKind": "recovered-contemporaneous-session-record",
+ "archivedAtUtc": "2026-10-25T13:20:00Z",
+ "question": "Was refund 1120894320887 created by a staff member in Shopify Admin (a potential G-AGREEMENT NEG, which with its MergeShip-attributed RefundAgreement would be NEGATIVE under §12.8.2)?",
+ "finding": {
+  "createdBy": "an agent-run Protocol v2 live-verification driver (Scenario 5A, 2026-10-04T19:48:00Z), not a staff member in Shopify Admin",
+  "credentials": "MergeShip's own app credentials: the session's direct GraphQL transport acquired its token through the Shopify client-credentials grant for client id 04b77142ce8ad421f49735b05c7d0a86 (MergeShip) and logged `authentication: client_credentials, outcome: ACQUIRED` for the run that sent the refund",
+  "consequence": "The refund is app-created. It cannot serve as the §12.8.1 NEG control (staff-created in Admin), so the potential NEGATIVE outcome cannot be established from it. Its monetary-only manual-gateway shape (no shipping line) is also not a comparable POS. Part A stays INCONCLUSIVE.",
+  "notUsedAsEvidence": "The RefundAgreement app.id and the manual gateway in q-agreements-neg_1099.json / q-refund-detail-five_ids.json were NOT used to infer the creator; they are merely consistent with this finding."
+ },
+ "sources": {
+  "T4": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_f6aff7d2e45e4bc3.md",
+   "kind": "Devin CLI session transcript of the Protocol v2 live verification (Scenario 5A, 2026-10-04)",
+   "sha256": "6607c2c4ec2d1e54a618cf6b79c5056fd3ceaca35b65269204c9579de6524371",
+   "bytes": 700261
+  },
+  "T5": {
+   "path": "%APPDATA%/Devin/cli/summaries/history_7e7981380b3c48ee.md",
+   "kind": "Devin CLI session transcript in which the live-verification direct transport was specified and written",
+   "sha256": "d8c5ce72fb9afe7a5a262bff824d3c7fc6b3e7be7e49ed383e30b85f2dd7a992",
+   "bytes": 757239
+  }
+ },
+ "items": [
+  {
+   "source": "T4",
+   "message": 124,
+   "role": "Tool",
+   "excerptSha256": "33eb9b4f4c8ece724e5f8b91a9a7c5a3b8a5a8ac973f8b6f2ea72deb2820db8d",
+   "value": "{\"authentication\":\"client_credentials\",\"outcome\":\"ACQUIRED\",\"tokenRequests\":1,\"httpStatus\":200,\"credentialValuesDisplayed\":false}\nSCENARIO_5A_PASS Order #1099 is not fully paid (PARTIALLY_REFUNDED).\n\n\nExit code: 0"
+  },
+  {
+   "source": "T4",
+   "message": 127,
+   "role": "Tool",
+   "excerptSha256": "3438851850c30d54424f9101e00233174ce015238a70c51d36eeaac80880c80e",
+   "value": {
+    "note": "s5a1-A-refund-acknowledgement.json as displayed by the session (file since lost)",
+    "acknowledgement": {
+     "requestStart": {
+      "utc": "2026-10-04T19:48:00.434Z",
+      "monoNs": "1270715833733800"
+     },
+     "responseEnd": {
+      "utc": "2026-10-04T19:48:01.495Z",
+      "monoNs": "1270716895511000"
+     },
+     "payload": {
+      "refund": {
+       "id": "gid://shopify/Refund/1120894320887",
+       "createdAt": "2026-10-04T19:48:00Z",
+       "totalRefundedSet": {
+        "shopMoney": {
+         "amount": "1.0",
+         "currencyCode": "USD"
+        }
+       },
+       "transactions": {
+        "nodes": [
+         {
+          "id": "gid://shopify/OrderTransaction/10119494467831",
+          "kind": "REFUND",
+          "status": "SUCCESS",
+          "gateway": "manual",
+          "amountSet": {
+           "shopMoney": {
+            "amount": "1.0",
+            "currencyCode": "USD"
+           }
+          },
+          "parentTransaction": {
+           "id": "gid://shopify/OrderTransaction/10119492403447"
+          }
+         }
+        ],
+        "pageInfo": {
+         "hasNextPage": false
+        }
+       }
+      },
+      "order": {
+       "id": "gid://shopify/Order/8051306299639",
+       "displayFinancialStatus": "PARTIALLY_REFUNDED",
+       "totalRefundedSet": {
+        "shopMoney": {
+         "amount": "1.0",
+         "currencyCode": "USD"
+        }
+       }
+      },
+      "userErrors": []
+     },
+     "amountUSD": "1.00",
+     "retry": false
+    }
+   }
+  },
+  {
+   "source": "T4",
+   "message": 137,
+   "role": "Assistant",
+   "excerptSha256": "2211b5b560e9bd3d3c40b1193ac17b455a700298fa314e52a36ecc423e5040b8",
+   "value": "Exactly one `refundCreate` invocation was sent against the primary’s recorded manual SALE:\n\n- Amount: **USD 1.00**\n- `refundLineItems: []`\n- Customer notification disabled\n- No shipping refund, line-item refund, or restock\n- Required idempotency key included\n- **No retry or reversal**\n\nShopify acknowledged:\n\n| Result | Value |\n|---|---|\n| Request start | `2026-10-04T19:48:00.434Z` |\n| Successful response end | `2026-10-04T19:48:01.495Z` |\n| Refund | `gid://shopify/Refund/1120894320887` |\n| Transaction | `REFUND / SUCCESS`, gateway `manual` |\n| Refunded amount | **USD 1.00** |\n| Financial status | **PARTIALLY_REFUNDED** |\n| `userErrors` | **Empty** |"
+  },
+  {
+   "source": "T4",
+   "message": 144,
+   "role": "Tool",
+   "excerptSha256": "b3ccf86eda2718fab12420fe5f7dbcf6abe640995fcbf368f6bb18d6d1c2efe4",
+   "value": {
+    "note": "prepare-refund.mjs lines 7-8: the Scenario 5A runner refused to run unless direct-transport.mjs hashed to the accepted value",
+    "lines": [
+     "const transportHash = createHash('sha256').update(readFileSync(join(DIR,'../direct-transport.mjs'))).digest('hex');",
+     "if(transportHash!=='62c1dda2ef138101417acc5ff5c54e88cbfc29e4f50f46a054f1f95f59eb3bc3')throw new Error('Accepted transport changed');"
+    ]
+   }
+  },
+  {
+   "source": "T5",
+   "message": 137,
+   "role": "User",
+   "excerptSha256": "17aa40eb8cd4febfb4782672fc7abdbe80a3174a576e9b6ea77a4e64196e6f42",
+   "value": "Implement/use a dev-only live-verification GraphQL transport that authenticates MergeShip once using Shopify's client-credentials grant and reuses that access token for the session."
+  },
+  {
+   "source": "T5",
+   "message": 208,
+   "role": "Tool",
+   "excerptSha256": "72b37d44f2e2fcb48bacdd728b54673c3c4e8f1f164df8ed80d65c65ef9f50a5",
+   "value": {
+    "note": "direct-transport.mjs as displayed by the session (selected lines; no credential values appear in the file)",
+    "lines": [
+     "const SHOP = 'ordermergetest2.myshopify.com';",
+     "const CLIENT = '04b77142ce8ad421f49735b05c7d0a86';",
+     "const GRAPHQL = 'https://ordermergetest2.myshopify.com/admin/api/2026-04/graphql.json';",
+     "const TOKEN_ENDPOINT = 'https://ordermergetest2.myshopify.com/admin/oauth/access_token';",
+     "  const sdk = shopifyApi({ apiKey: CLIENT, apiSecretKey: secret, apiVersion: ApiVersion.April26, hostName: 'localhost', isEmbeddedApp: true, logger: { level: 0, httpRequests: false, log: () => {} } });",
+     "  try {",
+     "    const { session } = await sdk.auth.clientCredentials({ shop: SHOP });",
+     "    if (session.shop !== SHOP || !session.accessToken) throw new Error('Wrong shop or missing token');",
+     "    console.log(JSON.stringify({ authentication: 'client_credentials', outcome: 'ACQUIRED', tokenRequests: acquisitionCount, httpStatus: metadata.httpStatus, credentialValuesDisplayed: false }));"
+    ]
+   }
+  }
+ ],
+ "limitations": [
+  "The Scenario 5A evidence directory (mergeship-live-37de4ee-phase0-20261003-a716) no longer exists; the items above are the session's contemporaneous displays of those files.",
+  "The displayed direct-transport.mjs is not proven byte-identical to the version whose sha256 (62c1dda2…) the Scenario 5A runner pinned; both use sdk.auth.clientCredentials with the MergeShip client id.",
+  "The exact refundCreate document text sent by the generated runner was not displayed in full (truncated in the transcript) and is unrecoverable."
+ ]
+}

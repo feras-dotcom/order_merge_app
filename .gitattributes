@@ -1,0 +1,3 @@
+# Evidence archives are hashed byte-for-byte by MANIFEST.sha256 (design §17).
+# Never convert their line endings, whatever core.autocrlf is set to.
+docs/evidence/** -text
