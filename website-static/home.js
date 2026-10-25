@@ -88,6 +88,28 @@ const setStageState = (stage, state, { animateFly = false } = {}) => {
 
 window.MergeShipStage = { set: setStageState };
 
+/* Keep connector SVGs uniformly scaled: the viewBox height tracks the
+   box's real aspect ratio so dash patterns and stroke width stay correct. */
+
+if ("ResizeObserver" in window) {
+  const linksObserver = new ResizeObserver((entries) => {
+    entries.forEach((entry) => {
+      const svg = entry.target.querySelector(".stage-links");
+      if (!svg) return;
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) {
+        svg.setAttribute(
+          "viewBox",
+          `0 0 100 ${((100 * height) / width).toFixed(3)}`,
+        );
+      }
+    });
+  });
+  document
+    .querySelectorAll(".stage-box")
+    .forEach((box) => linksObserver.observe(box));
+}
+
 /* ---------- Hero stage autoplay ---------- */
 
 const heroStage = document.querySelector('.stage[data-stage="auto"]');

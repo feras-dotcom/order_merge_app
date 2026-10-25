@@ -508,14 +508,17 @@ html.intro-seen .hero-stage {
   stroke-dasharray: 100;
   stroke-dashoffset: 100;
   vector-effect: non-scaling-stroke;
-  opacity: 0.75;
-  transition: stroke-dashoffset 600ms var(--ease-out) 120ms;
+  opacity: 0;
+  transition:
+    stroke-dashoffset 600ms var(--ease-out) 120ms,
+    opacity 300ms var(--ease-soft);
 }
 
 .stage[data-state="detect"] .stage-links path,
 .stage[data-state="check"] .stage-links path,
 .stage[data-state="combined"] .stage-links path {
   stroke-dashoffset: 0;
+  opacity: 0.75;
 }
 
 .stage-links .link-b {
@@ -647,6 +650,11 @@ html.intro-seen .hero-stage {
 }
 
 .stage[data-state="combined"] .card-a .b1 {
+  display: none;
+}
+
+/* #1104 gains a second badge in combined; dropping "Paid" keeps one line */
+.stage[data-state="combined"] .card-a .badge-paid {
   display: none;
 }
 
@@ -1243,7 +1251,9 @@ html:not(.has-js) .steps > li {
 .wt-band-label {
   position: absolute;
   top: -22px;
-  left: 0;
+  right: 0;
+  left: auto;
+  text-align: right;
   color: var(--blue);
   font-size: 11px;
   font-weight: 800;
@@ -1700,6 +1710,8 @@ html:not(.has-js) .steps > li {
     z-index: 10;
     top: 76px;
     order: -1;
+    padding-bottom: 12px;
+    background: var(--surface-alt);
   }
 
   .stage-col .stage-box {
@@ -1722,11 +1734,11 @@ html:not(.has-js) .steps > li {
   .stage-col .stage-scene {
     --card-w: 36cqw;
     --card-a-x: 7cqw;
-    --card-a-y: 13.5cqw;
+    --card-a-y: 19cqw;
     --card-b-x: 57cqw;
-    --card-b-y: 13.5cqw;
-    --chip-top: 4cqw;
-    --panel-bottom: 2.5cqw;
+    --card-b-y: 19cqw;
+    --chip-top: 7cqw;
+    --panel-bottom: 5cqw;
   }
 
   .stage-col .stage-scene > .order-card,
@@ -1767,11 +1779,11 @@ html:not(.has-js) .steps > li {
   }
 
   .stage-col .stage-links .link-a {
-    d: path("M50 7.4 C 45 9 33 11 25 13.5");
+    d: path("M50 10.6 C 45 12.5 34 16 25 19");
   }
 
   .stage-col .stage-links .link-b {
-    d: path("M50 7.4 C 55 9 67 11 75 13.5");
+    d: path("M50 10.6 C 55 12.5 66 16 75 19");
   }
 }
 
@@ -1817,7 +1829,19 @@ html:not(.has-js) .steps > li {
   }
 
   .hero-facts {
+    display: grid;
+    grid-template-columns: repeat(2, auto);
+    justify-content: center;
+    gap: 6px 18px;
     font-size: 12px;
+  }
+
+  .hero-facts li {
+    text-align: center;
+  }
+
+  .hero-facts li + li::before {
+    content: none;
   }
 
   .pricing-features {
@@ -1935,6 +1959,12 @@ html:not(.has-js) .steps > li {
 
   .has-js .window-timeline.is-visible .wt-band {
     transform: scaleY(1);
+  }
+}
+
+@media (max-width: 360px) {
+  .hero-facts {
+    grid-template-columns: 1fr;
   }
 }
 
