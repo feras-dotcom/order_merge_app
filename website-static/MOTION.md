@@ -162,14 +162,14 @@ cannot skew the sequence.
 | 1000–1150 | lockup | Hold. |
 | 1150–1850 | lockup | **FLIP flight** to the header brand (JS, Web Animations API, `--ease-inout`). The lockup is a ≈3.1× replica of the header brand (112px mark vs 36px), so a single translate+scale lands it exactly on the header logo. Scale factor is measured from the two `img` rects at flight start. |
 | 1200–1700 | `.intro-backdrop` | opacity 1→0. |
-| 1300 + 55·n | H1 words | Each word (`.w > span`) rises translateY 110%→0 inside an overflow-hidden mask, 700ms `--ease-soft`; six words, last finishes at 2275 (`headline-done` = t0 + 975). The headline then **holds alone for ≈300ms** before the supporting reveals begin — `--t1 = headline-done + 300` anchors everything below. |
+| 1300 + 55·n | H1 words | Each word (`.w > span`) rises translateY 110%→0 inside an overflow-hidden mask, 700ms `--ease-soft`; six words, last finishes at 2275 (`headline-done` = t0 + 975). The supporting reveals begin the moment the last word lands — `--t1 = headline-done + --hold` (currently `0ms`) anchors everything below, so the lead never enters while a word is still rising. |
 | 1750 | header nav + header CTA | opacity 0→1, 300ms. The header brand stays `opacity: 0` while `intro-pending` is set; JS adds `html.intro-landed` on flight finish (or on skip), revealing it the same frame the lockup is hidden. |
-| 2575 | `.hero-lead` | opacity + translateY 16→0, 600ms (t1). |
-| 2725 | `.hero-actions` | same, 600ms (t1 + 150). |
-| 2825 | `.hero-facts` | opacity only, 500ms (t1 + 250). |
-| 2925–3725 | `.hero-stage` | opacity + translateY 28→0 + scale 0.98→1, 800ms (t1 + 350). |
-| 3775 | combine stage | Autoplay begins — 50ms after the stage finishes landing (see below). |
-| 3900 | `html` | `intro-pending` → `intro-done` + `intro-landed`; `.intro` gets `hidden`. No visual change: all animations have already reached their `forwards` fill. |
+| 2275 | `.hero-lead` | opacity + translateY 16→0, 600ms (t1). |
+| 2425 | `.hero-actions` | same, 600ms (t1 + 150). |
+| 2525 | `.hero-facts` | opacity only, 500ms (t1 + 250). |
+| 2625–3425 | `.hero-stage` | opacity + translateY 28→0 + scale 0.98→1, 800ms (t1 + 350). |
+| 3475 | combine stage | Autoplay begins — 50ms after the stage finishes landing (see below). |
+| 3600 | `html` | `intro-pending` → `intro-done` + `intro-landed`; `.intro` gets `hidden`. No visual change: all animations have already reached their `forwards` fill. |
 
 Mobile (<680px): the lockup mark is 84px instead of 112px and the same timeline
 runs with `--t0: 1100ms`.
@@ -177,9 +177,9 @@ runs with `--t0: 1100ms`.
 ### Timeline — return visit in the same session (`html.intro-seen`, `--t0: 0`)
 
 No overlay. The same hero keyframes run with `--t0: 0`, so the headline rises
-immediately and finishes at 975ms, holds alone for 300ms, then the lead
-follows at 1275ms, actions at 1425ms, facts at 1525ms, and the stage at
-1625–2425ms. Autoplay starts at ≈2475ms.
+immediately and finishes at 975ms, then the lead follows at 975ms, actions
+at 1125ms, facts at 1225ms, and the stage at 1325–2125ms. Autoplay starts at
+≈2175ms.
 
 ### Skip
 

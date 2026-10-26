@@ -34,10 +34,10 @@ html.intro-seen {
 }
 
 /* Headline completes 975ms after t0 (6 words × 55ms + 700ms each);
-   supporting reveals wait a 300ms headline-only hold. */
+   supporting reveals start the moment it lands (no extra hold). */
 html {
   --headline-done: calc(var(--t0, 0ms) + 975ms);
-  --hold: 300ms;
+  --hold: 0ms;
   --t1: calc(var(--headline-done) + var(--hold));
 }
 

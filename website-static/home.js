@@ -5,10 +5,10 @@ const docEl = document.documentElement;
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const introPending = docEl.classList.contains("intro-pending");
 const t0 = introPending ? (window.innerWidth < 680 ? 1100 : 1300) : 0;
-// Headline: 6 words × 55ms stagger + 700ms rise = 975ms; it holds alone for
-// HOLD ms before the supporting reveals start (mirrors --t1 in home.css).
+// Headline: 6 words × 55ms stagger + 700ms rise = 975ms; the supporting
+// reveals start HOLD ms after it lands (mirrors --t1 in home.css).
 const HEADLINE_DONE = 975;
-const HOLD = 300;
+const HOLD = 0;
 const T1 = t0 + HEADLINE_DONE + HOLD;
 
 /* ---------- Combine stage ---------- */
@@ -379,9 +379,9 @@ if (intro && introPending && !reduceMotion.matches) {
 
   // 3100: stage autoplay; 3200: intro done; 4000: safety skip
   // stage enters at T1+350 and takes 800ms to settle; autoplay +50ms after
-  at(T1 + 350 + 800 + 50, startAutoplay); // = t0 + 2475
-  at(t0 + 2600, () => finishIntro());
-  at(t0 + 3400, () => finishIntro({ skipped: true }));
+  at(T1 + 350 + 800 + 50, startAutoplay); // = t0 + 2175
+  at(t0 + 2300, () => finishIntro());
+  at(t0 + 3100, () => finishIntro({ skipped: true }));
 
   window.__msIntroController = finishIntro;
   skipButton?.addEventListener("click", () => finishIntro({ skipped: true }));
