@@ -5,6 +5,11 @@ const docEl = document.documentElement;
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const introPending = docEl.classList.contains("intro-pending");
 const t0 = introPending ? (window.innerWidth < 680 ? 1100 : 1300) : 0;
+// Headline: 6 words × 55ms stagger + 700ms rise = 975ms; it holds alone for
+// HOLD ms before the supporting reveals start (mirrors --t1 in home.css).
+const HEADLINE_DONE = 975;
+const HOLD = 300;
+const T1 = t0 + HEADLINE_DONE + HOLD;
 
 /* ---------- Combine stage ---------- */
 
@@ -67,6 +72,7 @@ const setStageState = (stage, state, { animateFly = false } = {}) => {
   // measure the source row before the state change
   const fromRect = source.getBoundingClientRect();
   stage.dataset.state = state;
+  syncRail(stage); // data-state is the single source of truth
   const sceneRect = scene.getBoundingClientRect(); // reflow
   const toRect = target.getBoundingClientRect();
 
@@ -372,9 +378,10 @@ if (intro && introPending && !reduceMotion.matches) {
   });
 
   // 3100: stage autoplay; 3200: intro done; 4000: safety skip
-  at(3100, startAutoplay);
-  at(3200, () => finishIntro());
-  at(4000, () => finishIntro({ skipped: true }));
+  // stage enters at T1+350 and takes 800ms to settle; autoplay +50ms after
+  at(T1 + 350 + 800 + 50, startAutoplay); // = t0 + 2475
+  at(t0 + 2600, () => finishIntro());
+  at(t0 + 3400, () => finishIntro({ skipped: true }));
 
   window.__msIntroController = finishIntro;
   skipButton?.addEventListener("click", () => finishIntro({ skipped: true }));
@@ -382,9 +389,9 @@ if (intro && introPending && !reduceMotion.matches) {
   document.addEventListener("pointerdown", onPointerDown);
 } else if (heroStage) {
   // Return visit this session, or reduced motion: hero timings already
-  // compressed by --t0; autoplay follows the same t0 + 1800ms offset.
+  // compressed by --t0; autoplay follows the same T1-anchored offset.
   if (reduceMotion.matches) startAutoplay();
-  else window.setTimeout(startAutoplay, t0 + 1800);
+  else window.setTimeout(startAutoplay, T1 + 350 + 800 + 50);
 }
 
 reduceMotion.addEventListener?.("change", (ev) => {

@@ -100,7 +100,7 @@
         };
         window.__msIntroFallback = window.setTimeout(
           window.__msIntroFinish,
-          4000,
+          5000,
         );
         window.__msIntroDown = function () {
           window.__msIntroFinish();
@@ -120,10 +120,9 @@
     </script>
     <link rel="preload" as="image" href="/brand/logo-180.png" imagesrcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" imagesizes="(max-width: 679px) 72px, 96px" />
     <link rel="preload" as="image" href="/brand/logo-64.png" imagesrcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" imagesizes="36px" />
-    <link rel="preload" as="image" href="/assets/media/product-hoodie.png" />
-    <link rel="preload" as="image" href="/assets/media/product-tote.png" />
-    <link rel="stylesheet" href="/site.css?v=motion-20261027" />
-    <link rel="stylesheet" href="/home.css?v=motion-20261027" />
+    <!-- product thumbs live below the first viewport (stage + safety), no preload -->
+    <link rel="stylesheet" href="/site.css?v=motion-20261028" />
+    <link rel="stylesheet" href="/home.css?v=motion-20261028" />
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -467,15 +466,15 @@
       <section class="trailer section-pad" aria-labelledby="trailer-title">
         <div class="shell trailer-grid">
           <div class="section-heading" data-reveal>
-            <p class="eyebrow">Trailer</p>
-            <h2 id="trailer-title">See a combine happen in 24 seconds.</h2>
+            <p class="eyebrow">Introducing MergeShip</p>
+            <h2 id="trailer-title">Meet MergeShip.</h2>
             <p>
-              The trailer shows two repeat orders becoming one order that is
-              ready to fulfill. The four-minute demo walks through setup, the
-              combine window, and the safety checks.
+              Customers come back for more. Their orders shouldn't create
+              more work. MergeShip automatically brings eligible repeat
+              orders together before fulfillment.
             </p>
             <a class="trailer-link" href="/demo"
-              >Watch the 4 minute demo <span aria-hidden="true">→</span></a
+              >Watch the full product demo <span aria-hidden="true">→</span></a
             >
           </div>
 
@@ -501,7 +500,7 @@
               data-video-src="/assets/media/trailer-final.mp4"
             >
               <span aria-hidden="true">▶</span>
-              <strong>Watch the 24 second trailer</strong>
+              <strong>Watch the trailer</strong>
             </button>
             <span class="video-duration">0:24</span>
             <noscript
@@ -1149,7 +1148,7 @@
       </div>
     </footer>
 
-    <script src="/site.js?v=motion-20261027" defer></script>
-    <script src="/home.js?v=motion-20261027" defer></script>
+    <script src="/site.js?v=motion-20261028" defer></script>
+    <script src="/home.js?v=motion-20261028" defer></script>
   </body>
 </html>

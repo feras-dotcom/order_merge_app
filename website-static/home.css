@@ -10,7 +10,8 @@
   line-height: 1.04;
 }
 
-.section-heading > p:last-child {
+.section-heading > p:last-child,
+.section-heading > h2 + p {
   max-width: 610px;
   margin-top: 16px;
   color: var(--ink-soft);
@@ -32,6 +33,14 @@ html.intro-seen {
   --t0: 0ms;
 }
 
+/* Headline completes 975ms after t0 (6 words × 55ms + 700ms each);
+   supporting reveals wait a 300ms headline-only hold. */
+html {
+  --headline-done: calc(var(--t0, 0ms) + 975ms);
+  --hold: 300ms;
+  --t1: calc(var(--headline-done) + var(--hold));
+}
+
 @media (max-width: 679px) {
   html.intro-pending {
     --t0: 1100ms;
@@ -45,7 +54,7 @@ html.intro-pending .intro {
   display: grid;
   place-items: center;
   pointer-events: none;
-  animation: intro-fallback 1ms linear 4s forwards;
+  animation: intro-fallback 1ms linear 5s forwards;
 }
 
 @keyframes intro-fallback {
@@ -89,13 +98,13 @@ html.intro-pending .intro {
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 28px;
   transform-origin: 0 0;
 }
 
 .intro-mark {
-  width: 96px;
-  height: 96px;
+  width: 112px;
+  height: 112px;
   animation: intro-mark 600ms var(--ease-out) 80ms both;
 }
 
@@ -118,7 +127,7 @@ html.intro-pending .intro {
 .intro-word-inner {
   display: inline-block;
   color: var(--ink);
-  font-size: 48px;
+  font-size: 56px;
   font-weight: 780;
   letter-spacing: -0.035em;
   line-height: 1.2;
@@ -179,16 +188,16 @@ html.intro-pending .intro {
 
 @media (max-width: 679px) {
   .intro-mark {
-    width: 72px;
-    height: 72px;
+    width: 84px;
+    height: 84px;
   }
 
   .intro-word-inner {
-    font-size: 36px;
+    font-size: 42px;
   }
 
   .intro-lockup {
-    gap: 18px;
+    gap: 21px;
   }
 }
 
@@ -341,12 +350,12 @@ html.intro-seen .hero-title .w > span {
 
 html.intro-pending .hero-lead,
 html.intro-seen .hero-lead {
-  animation: hero-rise 600ms var(--ease-out) calc(var(--t0, 0ms) + 600ms) both;
+  animation: hero-rise 600ms var(--ease-out) var(--t1, 0ms) both;
 }
 
 html.intro-pending .hero-actions,
 html.intro-seen .hero-actions {
-  animation: hero-rise 600ms var(--ease-out) calc(var(--t0, 0ms) + 750ms) both;
+  animation: hero-rise 600ms var(--ease-out) calc(var(--t1, 0ms) + 150ms) both;
 }
 
 @keyframes hero-rise {
@@ -362,13 +371,13 @@ html.intro-seen .hero-actions {
 
 html.intro-pending .hero-facts,
 html.intro-seen .hero-facts {
-  animation: intro-fade 500ms ease calc(var(--t0, 0ms) + 850ms) both;
+  animation: intro-fade 500ms ease calc(var(--t1, 0ms) + 250ms) both;
 }
 
 html.intro-pending .hero-stage,
 html.intro-seen .hero-stage {
   animation: hero-stage-in 800ms var(--ease-out)
-    calc(var(--t0, 0ms) + 950ms) both;
+    calc(var(--t1, 0ms) + 350ms) both;
 }
 
 @keyframes hero-stage-in {
@@ -435,7 +444,7 @@ html.intro-seen .hero-stage {
   width: max-content;
   max-width: 60cqw;
   opacity: 0;
-  transition: opacity 300ms var(--ease-soft);
+  transition: opacity 160ms var(--ease-soft);
 }
 
 .stage[data-state="orders"] [data-label="orders"],
@@ -443,7 +452,7 @@ html.intro-seen .hero-stage {
 .stage[data-state="check"] [data-label="check"],
 .stage[data-state="combined"] [data-label="combined"] {
   opacity: 1;
-  transition-duration: 450ms;
+  transition: opacity 240ms var(--ease-soft) 180ms;
 }
 
 /* Customer chip */
@@ -1010,12 +1019,12 @@ html.intro-seen .hero-stage {
 }
 
 html.home-ready .steps > li {
-  min-height: min(62vh, 560px);
+  min-height: min(52vh, 460px);
   padding-block: 0;
 }
 
 html.home-ready .steps > li:first-child {
-  min-height: min(42vh, 380px);
+  min-height: min(34vh, 300px);
 }
 
 .step-inner {
@@ -1719,7 +1728,7 @@ html.home-ready .steps > li:first-child {
   }
 
   html.home-ready .steps > li {
-    min-height: 46vh;
+    min-height: 40vh;
   }
 }
 

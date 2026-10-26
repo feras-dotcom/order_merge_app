@@ -71,9 +71,11 @@ Durations: micro `160ms`, reveal `640ms`, flight `700ms`, word rise `700ms`.
    Unlimited automatic combines · No per-combine fees"). Below the copy sits
    the **combine stage** (section 5 below), which plays once after the hero
    settles.
-3. **Trailer** — "See a combine happen in 24 seconds." with the existing
-   24-second trailer facade (poster + play, video element created on click — without JS the facade keeps its play button and a `<noscript>` link to /demo,
-   `preload="none"`) and a link to the four-minute `/demo`.
+3. **Trailer** — eyebrow "Introducing MergeShip", h2 "Meet MergeShip.", with the
+   existing 24-second trailer facade (poster + play, video element created on
+   click — without JS the facade keeps its play button and a `<noscript>` link
+   to /demo, `preload="none"`) and a "Watch the full product demo" link to
+   `/demo`.
 4. **How it works** (`#how-it-works`) — two columns: four numbered steps on the
    left (places more than one order → detects the repeat → checks eligibility
    → combines before fulfillment), a sticky combine stage on the right whose
@@ -158,32 +160,33 @@ cannot skew the sequence.
 | 420–1000 | `.intro-word` ("MergeShip") | clip-path inset right 100%→0 plus translateX −14px→0, `--ease-inout`. |
 | 300 | `.intro-skip` | Fades in (bottom-right, "Skip intro"). |
 | 1000–1150 | lockup | Hold. |
-| 1150–1850 | lockup | **FLIP flight** to the header brand (JS, Web Animations API, `--ease-inout`). The lockup is a 2.67× replica of the header brand, so a single translate+scale lands it exactly on the header logo. Scale factor is measured from the two `img` rects at flight start. |
+| 1150–1850 | lockup | **FLIP flight** to the header brand (JS, Web Animations API, `--ease-inout`). The lockup is a ≈3.1× replica of the header brand (112px mark vs 36px), so a single translate+scale lands it exactly on the header logo. Scale factor is measured from the two `img` rects at flight start. |
 | 1200–1700 | `.intro-backdrop` | opacity 1→0. |
-| 1300 + 55·n | H1 words | Each word (`.w > span`) rises translateY 110%→0 inside an overflow-hidden mask, 700ms `--ease-soft`; six words, last finishes ≈2275. |
+| 1300 + 55·n | H1 words | Each word (`.w > span`) rises translateY 110%→0 inside an overflow-hidden mask, 700ms `--ease-soft`; six words, last finishes at 2275 (`headline-done` = t0 + 975). The headline then **holds alone for ≈300ms** before the supporting reveals begin — `--t1 = headline-done + 300` anchors everything below. |
 | 1750 | header nav + header CTA | opacity 0→1, 300ms. The header brand stays `opacity: 0` while `intro-pending` is set; JS adds `html.intro-landed` on flight finish (or on skip), revealing it the same frame the lockup is hidden. |
-| 1900 | `.hero-lead` | opacity + translateY 16→0, 600ms. |
-| 2050 | `.hero-actions` | same, 600ms. |
-| 2150 | `.hero-facts` | opacity only, 500ms. |
-| 2250–3050 | `.hero-stage` | opacity + translateY 28→0 + scale 0.98→1, 800ms. |
-| 3100 | combine stage | Autoplay begins (see below). |
-| 3200 | `html` | `intro-pending` → `intro-done` + `intro-landed`; `.intro` gets `hidden`. No visual change: all animations have already reached their `forwards` fill. |
+| 2575 | `.hero-lead` | opacity + translateY 16→0, 600ms (t1). |
+| 2725 | `.hero-actions` | same, 600ms (t1 + 150). |
+| 2825 | `.hero-facts` | opacity only, 500ms (t1 + 250). |
+| 2925–3725 | `.hero-stage` | opacity + translateY 28→0 + scale 0.98→1, 800ms (t1 + 350). |
+| 3775 | combine stage | Autoplay begins — 50ms after the stage finishes landing (see below). |
+| 3900 | `html` | `intro-pending` → `intro-done` + `intro-landed`; `.intro` gets `hidden`. No visual change: all animations have already reached their `forwards` fill. |
 
-Mobile (<680px): the lockup mark is 72px instead of 96px and the same timeline
+Mobile (<680px): the lockup mark is 84px instead of 112px and the same timeline
 runs with `--t0: 1100ms`.
 
 ### Timeline — return visit in the same session (`html.intro-seen`, `--t0: 0`)
 
 No overlay. The same hero keyframes run with `--t0: 0`, so the headline rises
-immediately, the lead follows at 600ms, actions at 750ms, the stage at 950ms.
-Autoplay starts at ≈1800ms.
+immediately and finishes at 975ms, holds alone for 300ms, then the lead
+follows at 1275ms, actions at 1425ms, facts at 1525ms, and the stage at
+1625–2425ms. Autoplay starts at ≈2475ms.
 
 ### Skip
 
 `finishIntro({ skipped: true })` runs on: the "Skip intro" button, any
 `pointerdown` on the document during the intro (the overlay is
 `pointer-events: none`, so clicks pass through), Escape/Enter/Space, or the
-4000ms safety timer. It cancels the flight animation, removes `intro-pending`,
+5000ms safety timer. It cancels the flight animation, removes `intro-pending`,
 adds `intro-done` and `intro-landed` (the header brand appears), hides
 `.intro`, removes the keydown/pointerdown listeners, and starts the stage
 autoplay. Because every hero animation lives under
@@ -214,6 +217,10 @@ in "How it works" (`data-stage="scroll"`). Its appearance is driven entirely by
 | `detect` | A customer chip ("Sarah M. · 2 open orders" — in `combined` it switches to "Sarah M. · 1 combined order" via state-driven spans) appears above the cards and connector lines appear at each card (solid stroke, opacity 0→0.75; the second connector is staggered 140ms). The SVG viewBox and path `d` attributes are set by a ResizeObserver so the same geometry stays correct in desktop, stacked-mobile and compact-scroll variants (resize-event fallback). Label: "Repeat order detected". |
 | `check` | An eligibility panel slides in; rows tick in sequence (350ms apart): Same customer · Shipping address and method · Paid, open, and unfulfilled · "+ additional safety checks". Label: "Eligibility checked before anything changes". |
 | `combined` | The tote line item travels into #1104, whose badge becomes "Unfulfilled (2)" and gains "Ready to fulfill"; #1105's item body collapses to header-only as it shrinks, dims, moves behind and reads "Cancelled · closed". Label: "Combined before fulfillment". |
+
+The state label is sequential, not cross-faded: the outgoing span fades out in
+160ms, then the incoming span fades in over 240ms starting 180ms later — pure
+CSS, so rapid state changes can never overlap two labels.
 
 The stage box is `aspect-ratio: 2/1` (scene coordinates are `cqw` percentages
 of a 100×50 grid). On the autoplay transition into `combined`, home.js runs a
