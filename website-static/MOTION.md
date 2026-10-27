@@ -68,15 +68,15 @@ Durations: micro `160ms`, reveal `640ms`, flight `700ms`, word rise `700ms`.
    twice." (dominant), approved lead, primary CTA "Try free for 30 days"
    (Shopify App Store), secondary CTA "See how it works" (`#how-it-works`),
    one quiet facts line ("Shopify app · $19/month after a 30-day free trial ·
-   Unlimited automatic combines · No per-combine fees"). Below the copy sits
-   the **combine stage** (section 5 below), which plays once after the hero
-   settles.
-3. **Trailer** — eyebrow "Introducing MergeShip", h2 "Meet MergeShip.", with the
-   existing 24-second trailer facade (poster + play, video element created on
+   Unlimited automatic combines · No per-combine fees"). The hero ends with
+   the **hero film**: a small "Introducing MergeShip · 0:24" eyebrow label, a
+   16:9 poster frame (play button + duration badge, video element created on
    click — without JS the facade keeps its play button and a `<noscript>` link
-   to /demo, `preload="none"`) and a "Watch the full product demo" link to
-   `/demo`.
-4. **How it works** (`#how-it-works`) — two columns: four numbered steps on the
+   to /demo, `preload="none"`), and a "Watch the full product demo" link to
+   `/demo`. The poster is the `combined-order` render rather than the
+   `trailer-thumbnail` image because the thumbnail repeats the hero headline
+   text and would duplicate the H1 right beneath it.
+3. **How it works** (`#how-it-works`) — two columns: four numbered steps on the
    left (places more than one order → detects the repeat → checks eligibility
    → combines before fulfillment), a sticky combine stage on the right whose
    state follows the step nearest the viewport centre.
@@ -167,8 +167,7 @@ cannot skew the sequence.
 | 2275 | `.hero-lead` | opacity + translateY 16→0, 600ms (t1). |
 | 2425 | `.hero-actions` | same, 600ms (t1 + 150). |
 | 2525 | `.hero-facts` | opacity only, 500ms (t1 + 250). |
-| 2625–3425 | `.hero-stage` | opacity + translateY 28→0 + scale 0.98→1, 800ms (t1 + 350). |
-| 3475 | combine stage | Autoplay begins — 50ms after the stage finishes landing (see below). |
+| 2625–3425 | `.hero-film` | opacity + translateY 28→0 + scale 0.985→1, 800ms (t1 + 350). |
 | 3600 | `html` | `intro-pending` → `intro-done` + `intro-landed`; `.intro` gets `hidden`. No visual change: all animations have already reached their `forwards` fill. |
 
 Mobile (<680px): the lockup mark is 84px instead of 112px and the same timeline
@@ -178,8 +177,7 @@ runs with `--t0: 1100ms`.
 
 No overlay. The same hero keyframes run with `--t0: 0`, so the headline rises
 immediately and finishes at 975ms, then the lead follows at 975ms, actions
-at 1125ms, facts at 1225ms, and the stage at 1325–2125ms. Autoplay starts at
-≈2175ms.
+at 1125ms, facts at 1225ms, and the film at 1325–2125ms.
 
 ### Skip
 
@@ -188,8 +186,8 @@ at 1125ms, facts at 1225ms, and the stage at 1325–2125ms. Autoplay starts at
 `pointer-events: none`, so clicks pass through), Escape/Enter/Space, or the
 5000ms safety timer. It cancels the flight animation, removes `intro-pending`,
 adds `intro-done` and `intro-landed` (the header brand appears), hides
-`.intro`, removes the keydown/pointerdown listeners, and starts the stage
-autoplay. Because every hero animation lives under
+`.intro`, and removes the keydown/pointerdown listeners. Because every hero
+animation lives under
 `html.intro-pending`/`html.intro-seen`, removing the class snaps every element
 to its final, fully visible state in one frame.
 
@@ -207,9 +205,10 @@ to its final, fully visible state in one frame.
 
 ## Combine stage (product demonstration)
 
-One component, `.stage`, is used twice: in the hero (`data-stage="auto"`) and
-in "How it works" (`data-stage="scroll"`). Its appearance is driven entirely by
-`data-state` on the root; `home.js` only changes that attribute.
+One `.stage` component appears once, in "How it works"
+(`data-stage="scroll"`). Its appearance is driven entirely by `data-state`
+on the root; `home.js` only changes that attribute (instant set + `is-landed`
+toggle, no FLIP).
 
 | `data-state` | What the visitor sees |
 | --- | --- |
@@ -223,26 +222,12 @@ The state label is sequential, not cross-faded: the outgoing span fades out in
 CSS, so rapid state changes can never overlap two labels.
 
 The stage box is `aspect-ratio: 2/1` (scene coordinates are `cqw` percentages
-of a 100×50 grid). On the autoplay transition into `combined`, home.js runs a
-measured FLIP for the tote row: it records `.card-b .order-item`'s rect,
-flips `data-state`, forces reflow, reads `.card-a .order-slot .order-item`'s
-rect, then animates `.tote-fly` from `translate(from−to)` to identity over
-600ms `--ease-inout`. On finish the stage gets `.is-landed` (the real slotted
-row fades in, the fly element hides). Rail jumps, the scroll stage, and
-reduced motion skip the flight entirely and land instantly.
+of a 100×50 grid). The scroll stage lands the combined tote row instantly via
+`.is-landed` (the slotted row fades in as card B collapses) — there is no
+flight element.
 
 Deliberately **not** shown: shipping charges, refunds, packages, undo. The
 copy never implies that identical customer details alone make a pair eligible.
-
-Below the hero stage (`data-stage="auto"`) a step rail (hidden until the stage controls are bound) lists the four states as buttons
-(`aria-pressed`). Clicking one jumps to that state and pauses autoplay; a
-"Replay" button appears once the sequence has finished.
-
-Autoplay (hero only): `orders` 1100ms → `detect` 1400ms → `check` 1900ms →
-`combined` (hold). It runs once per page load, pauses while
-`document.hidden`, and never loops on its own. Under reduced motion the hero
-stage renders `combined` directly, with transitions disabled; the buttons
-still switch states instantly.
 
 Scroll stage ("How it works"): an `IntersectionObserver` with
 `rootMargin: "-45% 0px -45% 0px"` watches the four step items; the one crossing
@@ -272,17 +257,12 @@ the header at a reduced height and the steps scroll beneath it.
 
 - The boot script adds neither `intro-pending` nor `intro-seen`; `.intro` stays
   `display: none`.
-- All hero elements are visible immediately; the hero stage shows `combined`.
+- All hero elements are visible immediately, including the film poster.
 - `[data-reveal]` elements are visible; all transitions and animations are
   shortened to 1ms; `scroll-behavior` is `auto`.
-- Stage state changes still happen but snap instantly — under reduce the hero
-  stage renders `combined` immediately, the rail and Replay stay functional
-  (rail jumps switch states, Replay re-settles `combined`), and a live media
-  switch into reduce cancels pending timers and any tote flight, settles the
-  stage to `combined`, and finishes the intro. Removing reduce restarts
-  nothing.
-- Manual controls still work: rail buttons switch states (instantly), Replay
-  settles `combined`, the mobile nav and FAQ toggles behave normally.
+- A live media switch into reduce finishes the intro (via
+  `__msIntroController`) — removing reduce restarts nothing.
+- The mobile nav and FAQ toggles behave normally.
 
 No JavaScript: no classes are added, so the full page renders statically with
 every section visible (reveal rules never apply), the trailer facade keeps its
@@ -293,7 +273,6 @@ stays a static stacked list, and `<details>` work natively.
 
 - Intro: the flight `Animation` is cancelled on skip; timers are cleared; the
   overlay is `hidden` and the controller releases its references.
-- Stage autoplay timers are cleared on skip/jump and on `visibilitychange`.
 - Reveal observers unobserve after first reveal; the steps observer is created
   once and never re-observes.
 - No `scroll` listeners other than the passive header one.

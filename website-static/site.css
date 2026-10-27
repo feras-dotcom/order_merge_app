@@ -5,6 +5,13 @@
   --ink-faint: #7e8aa1;
   --blue: #086bff;
   --blue-dark: #0559d7;
+  --btn-fill: #3474c8;
+  --btn-fill-hover: #2b66b5;
+  --btn-fill-active: #25599f;
+  --btn-shadow: 0 1px 2px rgb(11 23 54 / 8%),
+    0 4px 10px -4px rgb(11 23 54 / 12%);
+  --btn-shadow-hover: 0 1px 3px rgb(11 23 54 / 8%),
+    0 8px 16px -6px rgb(11 23 54 / 16%);
   --blue-soft: #eaf2ff;
   --green: #158466;
   --green-soft: #e9f8f2;
@@ -268,12 +275,10 @@ section[id] {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  border: 1px solid var(--blue);
+  border: 1px solid var(--btn-fill);
   border-radius: var(--radius-sm);
-  background: var(--blue);
-  box-shadow:
-    inset 0 1px rgb(255 255 255 / 18%),
-    0 8px 18px rgb(8 107 255 / 16%);
+  background: var(--btn-fill);
+  box-shadow: var(--btn-shadow);
   color: #fff;
   font-size: 14px;
   font-weight: 780;
@@ -287,11 +292,17 @@ section[id] {
 }
 
 .button:hover {
-  background: var(--blue-dark);
-  box-shadow:
-    inset 0 1px rgb(255 255 255 / 18%),
-    0 12px 24px rgb(8 107 255 / 22%);
+  border-color: var(--btn-fill-hover);
+  background: var(--btn-fill-hover);
+  box-shadow: var(--btn-shadow-hover);
   transform: translateY(-1px);
+}
+
+.button:active {
+  border-color: var(--btn-fill-active);
+  background: var(--btn-fill-active);
+  box-shadow: var(--btn-shadow);
+  transform: translateY(0);
 }
 
 .button-small {
@@ -325,7 +336,7 @@ section[id] {
   border-color: #fff;
   background: #fff;
   box-shadow: 0 10px 30px rgb(6 23 64 / 20%);
-  color: var(--blue);
+  color: var(--btn-fill);
 }
 
 .button-light:hover {
@@ -405,7 +416,7 @@ section[id] {
   height: 42px;
   place-items: center;
   border-radius: 50%;
-  background: var(--blue);
+  background: var(--btn-fill);
   color: #fff;
   font-size: 13px;
 }

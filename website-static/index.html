@@ -120,9 +120,10 @@
     </script>
     <link rel="preload" as="image" href="/brand/logo-180.png" imagesrcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" imagesizes="(max-width: 679px) 72px, 96px" />
     <link rel="preload" as="image" href="/brand/logo-64.png" imagesrcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" imagesizes="36px" />
+    <link rel="preload" as="image" href="/assets/media/combined-order-960.jpg" imagesrcset="/assets/media/combined-order-960.jpg 960w, /assets/media/combined-order-1440.jpg 1440w" imagesizes="(max-width: 1100px) 94vw, 1040px" />
     <!-- product thumbs live below the first viewport (stage + safety), no preload -->
-    <link rel="stylesheet" href="/site.css?v=motion-20261029" />
-    <link rel="stylesheet" href="/home.css?v=motion-20261029" />
+    <link rel="stylesheet" href="/site.css?v=motion-20261030" />
+    <link rel="stylesheet" href="/home.css?v=motion-20261030" />
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -280,237 +281,50 @@
             <li>No per-combine fees</li>
           </ul>
 
-          <div class="hero-stage">
-            <div
-              class="stage"
-              data-stage="auto"
-              data-state="orders"
-              role="group"
-              aria-label="MergeShip combine demonstration"
-            >
-              <p class="sr-only">
-                MergeShip flags repeat orders from the same customer, checks that the customer, shipping details and currency match and the items can be transferred, then moves eligible items into the oldest order and cancels the extra order.
-              </p>
-              <div class="stage-box">
-                <div class="stage-scene" aria-hidden="true">
-                  <p class="stage-label">
-                    <span data-label="orders">Two separate orders</span>
-                    <span data-label="detect">Repeat order detected</span>
-                    <span data-label="check"
-                      >Eligibility checked before anything changes</span
-                    >
-                    <span data-label="combined"
-                      >Combined before fulfillment</span
-                    >
-                  </p>
-                  <svg
-                    class="stage-links"
-                    viewBox="0 0 100 50"
-
-                    aria-hidden="true"
-                  >
-                    <path
-                      class="link-a"
-
-                      d="M50 8.6 C 45 10 33 11.5 25 13.5"
-                    />
-                    <path
-                      class="link-b"
-
-                      d="M50 8.6 C 55 10 67 11.5 75 13.5"
-                    />
-                  </svg>
-                  <div class="customer-chip">
-                        <span class="chip-open">Sarah M. · 2 open orders</span>
-                        <span class="chip-combined">Sarah M. · 1 combined order</span>
-                      </div>
-
-                  <div class="order-card card-a">
-                    <div class="order-head">
-                      <span class="order-num">#1104</span>
-                      <span class="badge badge-paid">Paid</span>
-                      <span class="badge badge-open b1">Unfulfilled</span>
-                      <span class="badge badge-open b2">Unfulfilled (2)</span>
-                      <span class="badge badge-ready">Ready to fulfill</span>
-                      <span class="order-time">10:02</span>
-                    </div>
-                    <div class="order-items">
-                      <div class="order-item">
-                        <img
-                          class="order-thumb"
-                          src="/assets/media/product-hoodie.png"
-                          alt=""
-                          width="44"
-                          height="44"
-                        />
-                        <span class="item-text">
-                          <span class="item-name">Premium Hoodie</span>
-                          <span class="item-var">Light Blue / M</span>
-                        </span>
-                        <span class="item-price">$84.55</span>
-                      </div>
-                      <div class="order-slot">
-                        <div class="order-item">
-                          <img
-                            class="order-thumb"
-                            src="/assets/media/product-tote.png"
-                            alt=""
-                            width="44"
-                            height="44"
-                          />
-                          <span class="item-text">
-                            <span class="item-name">Canvas Tote</span>
-                            <span class="item-var">Natural / Navy</span>
-                          </span>
-                          <span class="item-price">$46.55</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="order-card card-b">
-                    <div class="order-head">
-                      <span class="order-num">#1105</span>
-                      <span class="badge badge-paid">Paid</span>
-                      <span class="badge badge-open b1">Unfulfilled</span>
-                      <span class="badge badge-cancelled b2"
-                        >Cancelled · closed</span
-                      >
-                      <span class="order-time">10:09</span>
-                    </div>
-                    <div class="order-items">
-                      <div class="order-item">
-                        <img
-                          class="order-thumb"
-                          src="/assets/media/product-tote.png"
-                          alt=""
-                          width="44"
-                          height="44"
-                        />
-                        <span class="item-text">
-                          <span class="item-name">Canvas Tote</span>
-                          <span class="item-var">Natural / Navy</span>
-                        </span>
-                        <span class="item-price">$46.55</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="tote-fly order-item" aria-hidden="true">
-                    <img
-                      class="order-thumb"
-                      src="/assets/media/product-tote.png"
-                      alt=""
-                      width="44"
-                      height="44"
-                    />
-                    <span class="item-text">
-                      <span class="item-name">Canvas Tote</span>
-                      <span class="item-var">Natural / Navy</span>
-                    </span>
-                    <span class="item-price">$46.55</span>
-                  </div>
-
-                  <div class="check-panel">
-                    <span class="check-item">Same customer</span>
-                    <span class="check-item"
-                      >Shipping address and method</span
-                    >
-                    <span class="check-item">Paid, open, and unfulfilled</span>
-                    <span class="check-note">+ additional safety checks</span>
-                  </div>
-                </div>
-              </div>
-              <div class="stage-rail" role="group" aria-label="Combine steps">
-                <button
-                  class="stage-step"
-                  type="button"
-                  data-step-target="orders"
-                  aria-pressed="true"
-                >
-                  <em>01</em> Two orders
-                </button>
-                <button
-                  class="stage-step"
-                  type="button"
-                  data-step-target="detect"
-                  aria-pressed="false"
-                >
-                  <em>02</em> Repeat detected
-                </button>
-                <button
-                  class="stage-step"
-                  type="button"
-                  data-step-target="check"
-                  aria-pressed="false"
-                >
-                  <em>03</em> Eligibility checked
-                </button>
-                <button
-                  class="stage-step"
-                  type="button"
-                  data-step-target="combined"
-                  aria-pressed="false"
-                >
-                  <em>04</em> Combined
-                </button>
-                <button class="stage-replay" type="button" hidden>
-                  Replay
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="trailer section-pad" aria-labelledby="trailer-title">
-        <div class="shell trailer-grid">
-          <div class="section-heading" data-reveal>
-            <p class="eyebrow">Introducing MergeShip</p>
-            <h2 id="trailer-title">Meet MergeShip.</h2>
-            <p>
-              Customers come back for more. Their orders shouldn't create
-              more work. MergeShip automatically brings eligible repeat
-              orders together before fulfillment.
+          <div class="hero-film">
+            <p class="hero-film-label">
+              Introducing MergeShip <span aria-hidden="true">·</span>
+              <span class="hero-film-duration">0:24</span>
             </p>
-            <a class="trailer-link" href="/demo"
+            <div class="video-frame hero-film-frame" data-video-facade>
+              <img
+                src="/assets/media/combined-order-960.jpg"
+                srcset="
+                  /assets/media/combined-order-960.jpg   960w,
+                  /assets/media/combined-order-1440.jpg 1440w
+                "
+                sizes="(max-width: 1100px) 94vw, 1040px"
+                alt="MergeShip combining repeat-order items into one order before fulfillment"
+                width="960"
+                height="540"
+                loading="eager"
+                fetchpriority="high"
+                decoding="async"
+              />
+              <div class="video-shade"></div>
+              <button
+                class="video-play"
+                type="button"
+                aria-label="Watch the 24 second MergeShip product trailer"
+                data-video-src="/assets/media/trailer-final.mp4"
+              >
+                <span aria-hidden="true">▶</span>
+                <strong>Watch the trailer</strong>
+              </button>
+              <span class="video-duration">0:24</span>
+              <noscript
+                ><a class="video-noscript-link" href="/demo"
+                  >Watch the demo instead <span aria-hidden="true">→</span></a
+                ></noscript
+              >
+            </div>
+            <a class="hero-film-link" href="/demo"
               >Watch the full product demo <span aria-hidden="true">→</span></a
             >
           </div>
-
-          <div class="video-frame" data-video-facade data-reveal>
-            <img
-              src="/assets/media/combined-order-960.jpg"
-              srcset="
-                /assets/media/combined-order-960.jpg   960w,
-                /assets/media/combined-order-1440.jpg 1440w
-              "
-              sizes="(max-width: 1040px) calc(100vw - 40px), 620px"
-              alt="MergeShip combining repeat-order items into one order before fulfillment"
-              width="960"
-              height="540"
-              loading="lazy"
-              decoding="async"
-            />
-            <div class="video-shade"></div>
-            <button
-              class="video-play"
-              type="button"
-              aria-label="Watch the 24 second MergeShip product trailer"
-              data-video-src="/assets/media/trailer-final.mp4"
-            >
-              <span aria-hidden="true">▶</span>
-              <strong>Watch the trailer</strong>
-            </button>
-            <span class="video-duration">0:24</span>
-            <noscript
-              ><a class="video-noscript-link" href="/demo"
-                >Watch the demo instead <span aria-hidden="true">→</span></a
-              ></noscript
-            >
-          </div>
         </div>
       </section>
+
 
       <section
         class="how-it-works section-pad"
@@ -686,20 +500,6 @@
                       </div>
                     </div>
 
-                    <div class="tote-fly order-item" aria-hidden="true">
-                      <img
-                        class="order-thumb"
-                        src="/assets/media/product-tote.png"
-                        alt=""
-                        width="44"
-                        height="44"
-                      />
-                      <span class="item-text">
-                        <span class="item-name">Canvas Tote</span>
-                        <span class="item-var">Natural / Navy</span>
-                      </span>
-                      <span class="item-price">$46.55</span>
-                    </div>
 
                     <div class="check-panel">
                       <span class="check-item">Same customer</span>
@@ -1148,7 +948,7 @@
       </div>
     </footer>
 
-    <script src="/site.js?v=motion-20261029" defer></script>
-    <script src="/home.js?v=motion-20261029" defer></script>
+    <script src="/site.js?v=motion-20261030" defer></script>
+    <script src="/home.js?v=motion-20261030" defer></script>
   </body>
 </html>

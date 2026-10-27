@@ -206,7 +206,7 @@ html.intro-pending .intro {
 .hero {
   position: relative;
   overflow: hidden;
-  padding: clamp(72px, 8vw, 110px) 0 clamp(64px, 7vw, 96px);
+  padding: clamp(72px, 8vw, 110px) 0 clamp(36px, 4.5vw, 56px);
   background:
     radial-gradient(
       800px 470px at 85% 2%,
@@ -299,9 +299,86 @@ html.intro-pending .intro {
   color: var(--line-strong);
 }
 
-.hero-stage {
+.hero-film {
+  margin-top: clamp(40px, 5vw, 56px);
+  text-align: center;
+}
+
+.hero-film-label {
+  margin-bottom: 14px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.hero-film-label .hero-film-duration {
+  color: var(--ink);
+}
+
+.hero-film-frame {
   width: 100%;
-  margin-top: clamp(48px, 6vw, 72px);
+  max-width: 1040px;
+  margin-inline: auto;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow:
+    0 1px 2px rgb(11 23 54 / 6%),
+    0 24px 60px -20px rgb(11 23 54 / 28%);
+  overflow: hidden;
+}
+
+.hero-film-frame video {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.hero-film-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 18px;
+  color: var(--blue-dark);
+  font-size: 15px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.hero-film-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+/* Wide screens: lift the hero copy + film so the play affordance is
+   fully inside the first viewport (~-66px total at 1440). */
+@media (min-width: 1040px) {
+  .hero {
+    padding-top: clamp(56px, 6vw, 86px);
+  }
+
+  .hero-lead {
+    margin-top: 22px;
+  }
+
+  .hero-actions {
+    margin-top: 28px;
+  }
+
+  .hero-facts {
+    margin-top: 18px;
+  }
+
+  .hero-film {
+    margin-top: 28px;
+  }
+
+  .hero-film-label {
+    margin-bottom: 10px;
+  }
 }
 
 /* Hero intro sequencing: everything under intro-pending / intro-seen starts
@@ -374,16 +451,16 @@ html.intro-seen .hero-facts {
   animation: intro-fade 500ms ease calc(var(--t1, 0ms) + 250ms) both;
 }
 
-html.intro-pending .hero-stage,
-html.intro-seen .hero-stage {
-  animation: hero-stage-in 800ms var(--ease-out)
+html.intro-pending .hero-film,
+html.intro-seen .hero-film {
+  animation: hero-film-in 800ms var(--ease-out)
     calc(var(--t1, 0ms) + 350ms) both;
 }
 
-@keyframes hero-stage-in {
+@keyframes hero-film-in {
   from {
     opacity: 0;
-    transform: translateY(28px) scale(0.98);
+    transform: translateY(28px) scale(0.985);
   }
   to {
     opacity: 1;
@@ -753,20 +830,6 @@ html.intro-seen .hero-stage {
   opacity: 0;
 }
 
-/* The tote row that travels between cards (JS-measured FLIP) */
-
-.tote-fly {
-  position: absolute;
-  z-index: 4;
-  top: 0;
-  left: 0;
-  display: none;
-}
-
-.tote-fly.is-flying {
-  display: flex;
-}
-
 .stage[data-state="combined"] .card-b {
   z-index: 1;
   opacity: 0.55;
@@ -870,119 +933,6 @@ html.intro-seen .hero-stage {
   white-space: nowrap;
   opacity: 0;
   transition: opacity 350ms var(--ease-out);
-}
-
-/* Step rail (auto stage only) */
-
-.stage:not(.controls-bound) .stage-rail {
-  display: none;
-}
-
-.stage-rail {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 18px;
-}
-
-.stage-step {
-  display: inline-flex;
-  min-height: 34px;
-  align-items: center;
-  gap: 7px;
-  padding: 0 13px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: #fff;
-  color: var(--ink-soft);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 650;
-  transition:
-    border-color 160ms var(--ease-soft),
-    background 160ms var(--ease-soft),
-    color 160ms var(--ease-soft);
-}
-
-.stage-step em {
-  color: var(--blue);
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-}
-
-.stage-step[aria-pressed="true"] {
-  border-color: var(--blue);
-  background: var(--blue-soft);
-  color: var(--ink);
-}
-
-.stage-replay {
-  min-height: 34px;
-  padding: 0 15px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-  transition:
-    border-color 160ms var(--ease-soft),
-    color 160ms var(--ease-soft);
-}
-
-.stage-replay:hover {
-  border-color: var(--blue);
-  color: var(--blue);
-}
-
-/* ---------- Trailer ---------- */
-
-.trailer {
-  background: var(--surface);
-}
-
-.trailer-grid {
-  display: grid;
-  align-items: center;
-  gap: clamp(36px, 5vw, 72px);
-}
-
-@media (min-width: 1040px) {
-  .trailer-grid {
-    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
-  }
-}
-
-.trailer-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 22px;
-  color: var(--blue);
-  font-size: 15px;
-  font-weight: 700;
-  text-decoration: none;
-}
-
-.trailer-link:hover {
-  text-decoration: underline;
-  text-underline-offset: 4px;
-}
-
-.trailer .video-frame {
-  max-width: 640px;
-}
-
-@media (min-width: 1040px) {
-  .trailer .video-frame {
-    justify-self: end;
-    width: 100%;
-  }
 }
 
 /* ---------- How it works ---------- */
@@ -1660,8 +1610,7 @@ html.home-ready .steps > li:first-child {
     --panel-bottom: 2.5cqw;
   }
 
-  .stage-scene > .order-card,
-  .tote-fly {
+  .stage-scene > .order-card {
     font-size: 3.6cqw;
   }
 
@@ -1750,8 +1699,7 @@ html.home-ready .steps > li:first-child {
     --panel-bottom: 5cqw;
   }
 
-  .stage-col .stage-scene > .order-card,
-  .stage-col .tote-fly {
+  .stage-col .stage-scene > .order-card {
     font-size: 1.55cqw;
   }
 
@@ -1836,6 +1784,22 @@ html.home-ready .steps > li:first-child {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px 18px;
     font-size: 12px;
+  }
+
+  .hero-film {
+    margin-top: 32px;
+  }
+
+  .hero-film-label {
+    font-size: 10px;
+  }
+
+  .hero-film-frame {
+    border-radius: 14px;
+  }
+
+  .hero-film-link {
+    font-size: 14px;
   }
 
   .hero-facts li {

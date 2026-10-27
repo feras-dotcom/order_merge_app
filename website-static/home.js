@@ -1,116 +1,19 @@
-// Homepage behaviour: intro controller, hero combine-stage autoplay,
-// scroll-driven steps stage, FAQ height animation.
+// Homepage behaviour: intro controller, scroll-driven combine stage,
+// FAQ height animation.
 
 const docEl = document.documentElement;
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const introPending = docEl.classList.contains("intro-pending");
 const t0 = introPending ? (window.innerWidth < 680 ? 1100 : 1300) : 0;
-// Headline: 6 words × 55ms stagger + 700ms rise = 975ms; the supporting
-// reveals start HOLD ms after it lands (mirrors --t1 in home.css).
-const HEADLINE_DONE = 975;
-const HOLD = 0;
-const T1 = t0 + HEADLINE_DONE + HOLD;
 
 /* ---------- Combine stage ---------- */
 
-const STAGE_SEQUENCE = [
-  ["detect", 1100],
-  ["check", 1400],
-  ["combined", 1900],
-];
-
-const railsOf = (stage) =>
-  Array.from(stage.querySelectorAll(".stage-step[data-step-target]"));
-
-const syncRail = (stage) =>
-  railsOf(stage).forEach((button) =>
-    button.setAttribute(
-      "aria-pressed",
-      String(button.dataset.stepTarget === stage.dataset.state),
-    ),
-  );
-
-// The tote row's flight into #1104 is a measured FLIP, only on the
-// autoplay-driven transition. Instant transitions (rail jumps, scroll
-// stage, reduced motion) reveal the slotted row directly via is-landed.
-const setStageState = (stage, state, { animateFly = false } = {}) => {
-  // Synchronously retire any in-flight tote animation before touching state.
-  const oldFlyAnim = stage._flyAnim;
-  stage._flyAnim = null;
-  if (oldFlyAnim) {
-    oldFlyAnim.onfinish = null;
-    oldFlyAnim.oncancel = null;
-    oldFlyAnim.cancel();
-  }
-  if (stage._flyHideTimer) {
-    window.clearTimeout(stage._flyHideTimer);
-    stage._flyHideTimer = 0;
-  }
-  stage.querySelector(".tote-fly")?.classList.remove("is-flying");
-
-  const scene = stage.querySelector(".stage-scene");
-  const fly = stage.querySelector(".tote-fly");
-  const source = stage.querySelector(".card-b .order-item");
-  const target = stage.querySelector(".card-a .order-slot .order-item");
-  const enteringCombined =
-    state === "combined" && stage.dataset.state !== "combined";
-
-  if (!enteringCombined) {
-    stage.dataset.state = state;
-    stage.classList.toggle("is-landed", state === "combined");
-    syncRail(stage);
-    return;
-  }
-
-  if (!animateFly || reduceMotion.matches || !scene || !fly || !source || !target) {
-    stage.dataset.state = state;
-    stage.classList.add("is-landed");
-    syncRail(stage);
-    return;
-  }
-
-  // measure the source row before the state change
-  const fromRect = source.getBoundingClientRect();
+// The scroll stage transitions are instant state sets; the slotted tote
+// row inside card A is revealed by is-landed in the combined state.
+const setStageState = (stage, state) => {
   stage.dataset.state = state;
-  syncRail(stage); // data-state is the single source of truth
-  const sceneRect = scene.getBoundingClientRect(); // reflow
-  const toRect = target.getBoundingClientRect();
-
-  fly.style.left = `${toRect.left - sceneRect.left}px`;
-  fly.style.top = `${toRect.top - sceneRect.top}px`;
-  fly.style.width = `${toRect.width}px`;
-  fly.style.fontSize = getComputedStyle(target).fontSize;
-  fly.classList.add("is-flying");
-
-  const dx = fromRect.left - toRect.left;
-  const dy = fromRect.top - toRect.top;
-  const anim = fly.animate(
-    [
-      { transform: `translate(${dx}px, ${dy}px)` },
-      { transform: "translate(0px, 0px)" },
-    ],
-    { duration: 600, easing: "cubic-bezier(0.7, 0, 0.2, 1)", fill: "forwards" },
-  );
-  stage._flyAnim = anim;
-
-  anim.onfinish = () => {
-    if (stage._flyAnim !== anim) return; // stale callback, a newer flight owns it
-    stage._flyAnim = null;
-    if (stage.dataset.state === "combined") stage.classList.add("is-landed");
-    stage._flyHideTimer = window.setTimeout(() => {
-      stage._flyHideTimer = 0;
-      fly.classList.remove("is-flying");
-      anim.cancel();
-    }, 120);
-  };
-  anim.oncancel = () => {
-    if (stage._flyAnim !== anim) return;
-    stage._flyAnim = null;
-    fly.classList.remove("is-flying");
-  };
+  stage.classList.toggle("is-landed", state === "combined");
 };
-
-window.MergeShipStage = { set: setStageState };
 
 /* Keep connector coordinates in the same uniform grid as the cards. */
 
@@ -148,122 +51,6 @@ if ("ResizeObserver" in window) {
   window.addEventListener("resize", fitAll);
   fitAll();
 }
-
-/* ---------- Hero stage autoplay ---------- */
-
-const heroStage = document.querySelector('.stage[data-stage="auto"]');
-let autoplayStarted = false;
-let settleAutoplayForReduced = () => {};
-
-const startAutoplay = () => {
-  if (!heroStage || autoplayStarted) return;
-  autoplayStarted = true;
-
-  const replayButton = heroStage.querySelector(".stage-replay");
-  let stepIndex = 0;
-  let finished = false;
-  let timer = 0;
-  let startedAt = 0;
-  let remaining = 0;
-  let pendingStep = null;
-  let suspended = false;
-
-  const clearTimer = () => {
-    if (timer) {
-      window.clearTimeout(timer);
-      timer = 0;
-    }
-  };
-
-  const scheduleStep = () => {
-    if (reduceMotion.matches) return;
-    if (stepIndex >= STAGE_SEQUENCE.length) {
-      finished = true;
-      if (replayButton) replayButton.hidden = false;
-      return;
-    }
-    const [state, delay] = STAGE_SEQUENCE[stepIndex];
-    pendingStep = state;
-    remaining = delay;
-    startedAt = performance.now();
-    timer = window.setTimeout(() => {
-      timer = 0;
-      if (reduceMotion.matches) return;
-      setStageState(heroStage, pendingStep, {
-        animateFly: pendingStep === "combined",
-      });
-      stepIndex += 1;
-      scheduleStep();
-    }, delay);
-  };
-
-  const stop = () => {
-    clearTimer();
-    pendingStep = null;
-    stepIndex = STAGE_SEQUENCE.length;
-  };
-
-  railsOf(heroStage).forEach((button) => {
-    button.addEventListener("click", () => {
-      if (!finished) stop(); // jumping stops autoplay
-      finished = true;
-      if (replayButton) replayButton.hidden = false;
-      setStageState(heroStage, button.dataset.stepTarget);
-    });
-  });
-
-  replayButton?.addEventListener("click", () => {
-    if (reduceMotion.matches) {
-      settleAutoplayForReduced();
-      return;
-    }
-    replayButton.hidden = true;
-    setStageState(heroStage, "orders");
-    stepIndex = 0;
-    finished = false;
-    scheduleStep();
-  });
-
-  document.addEventListener("visibilitychange", () => {
-    if (finished || !pendingStep) return;
-    if (document.hidden) {
-      if (timer) {
-        clearTimer();
-        remaining -= performance.now() - startedAt;
-        suspended = true;
-      }
-    } else if (suspended) {
-      suspended = false;
-      startedAt = performance.now();
-      timer = window.setTimeout(() => {
-        timer = 0;
-        setStageState(heroStage, pendingStep, {
-          animateFly: pendingStep === "combined",
-        });
-        stepIndex += 1;
-        scheduleStep();
-      }, Math.max(0, remaining));
-    }
-  });
-
-  settleAutoplayForReduced = () => {
-    stop();
-    finished = true;
-    if (heroStage._flyAnim) heroStage._flyAnim.cancel();
-    if (replayButton) replayButton.hidden = false;
-    setStageState(heroStage, "combined");
-  };
-
-  // Rail jumps stop autoplay, mark finished and expose Replay.
-  heroStage.classList.add("controls-bound");
-  if (reduceMotion.matches) {
-    setStageState(heroStage, "combined");
-    finished = true;
-    if (replayButton) replayButton.hidden = false;
-    return;
-  }
-  scheduleStep();
-};
 
 /* ---------- Scroll-driven stage ("How it works") ---------- */
 
@@ -345,7 +132,6 @@ if (intro && introPending && !reduceMotion.matches) {
     } catch (error) {
       /* storage unavailable — intro just plays again next page view */
     }
-    startAutoplay();
   };
 
   // 1150–1850: FLIP flight of the lockup onto the header brand
@@ -377,9 +163,8 @@ if (intro && introPending && !reduceMotion.matches) {
     };
   });
 
-  // 3100: stage autoplay; 3200: intro done; 4000: safety skip
-  // stage enters at T1+350 and takes 800ms to settle; autoplay +50ms after
-  at(T1 + 350 + 800 + 50, startAutoplay); // = t0 + 2175
+  // The film lands at t0 + 2125 (t1+350 start + 800ms). intro-done and the
+  // safety skip stay as literals so they can't drift from the CSS clock.
   at(t0 + 2300, () => finishIntro());
   at(t0 + 3100, () => finishIntro({ skipped: true }));
 
@@ -387,17 +172,10 @@ if (intro && introPending && !reduceMotion.matches) {
   skipButton?.addEventListener("click", () => finishIntro({ skipped: true }));
   document.addEventListener("keydown", onKey);
   document.addEventListener("pointerdown", onPointerDown);
-} else if (heroStage) {
-  // Return visit this session, or reduced motion: hero timings already
-  // compressed by --t0; autoplay follows the same T1-anchored offset.
-  if (reduceMotion.matches) startAutoplay();
-  else window.setTimeout(startAutoplay, T1 + 350 + 800 + 50);
 }
 
 reduceMotion.addEventListener?.("change", (ev) => {
   if (!ev.matches) return; // do not restart anything when reduce is removed
-  startAutoplay();
-  settleAutoplayForReduced();
   if (window.__msIntroController) window.__msIntroController({ skipped: true });
   else if (window.__msIntroFinish) window.__msIntroFinish();
 });
