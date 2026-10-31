@@ -112,6 +112,28 @@ document.querySelectorAll("[data-analytics-event]").forEach((link) => {
   });
 });
 
+/* Forward site events to Google Analytics 4. window.gtag is defined inline in
+   <head> on every public page; on non-production hosts (or if the tag fails to
+   load) calls are harmless dataLayer no-ops. */
+window.addEventListener("mergeship:analytics", (event) => {
+  if (typeof window.gtag !== "function") return;
+  const detail = event.detail || {};
+  if (detail.name === "shopify_cta") {
+    window.gtag("event", "shopify_cta", {
+      cta_location: detail.location || "unknown",
+      link_url: "https://apps.shopify.com/mergeship",
+      page_location: window.location.href,
+    });
+    return;
+  }
+  if (detail.name === "video_play") {
+    window.gtag("event", "video_play", {
+      page_location: window.location.href,
+      video_src: detail.videoSrc || detail.videoId || "unknown",
+    });
+  }
+});
+
 /* Video facades */
 
 document

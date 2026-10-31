@@ -122,6 +122,117 @@
     <link rel="preload" as="image" href="/brand/logo-64.png" imagesrcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" imagesizes="36px" />
     <link rel="preload" as="image" href="/assets/media/combined-order-960.jpg" imagesrcset="/assets/media/combined-order-960.jpg 960w, /assets/media/combined-order-1440.jpg 1440w" imagesizes="(max-width: 1100px) 94vw, 1040px" />
     <!-- product thumbs live below the first viewport (stage + safety), no preload -->
+        <script>
+      /* Google Analytics 4 (G-VL98KWP5R4), consent-gated.
+         - window.gtag always exists so site.js can queue calls harmlessly.
+         - On mergeship.app the tag only loads after the visitor accepts the
+           banner below; "declined" is also remembered and loads nothing.
+         - ?ga_debug loads the tag with debug_mode + traffic_type=internal, so
+           developers can watch hits in GA4 DebugView and a GA4 "Developer
+           Traffic" data filter can exclude them from reports.
+         - Non-production hosts without ?ga_debug never load anything. */
+      window.dataLayer = window.dataLayer || [];
+      window.gtag =
+        window.gtag ||
+        function () {
+          window.dataLayer.push(arguments);
+        };
+      (function () {
+        var KEY = "ms-analytics-consent";
+        var id = "G-VL98KWP5R4";
+        var debug = new URLSearchParams(location.search).has("ga_debug");
+        var prod = /(^|\.)mergeship\.app$/.test(location.hostname);
+        var loaded = false;
+        var banner = null;
+
+        function load() {
+          if (loaded) return;
+          loaded = true;
+          var tag = document.createElement("script");
+          tag.async = true;
+          tag.src = "https://www.googletagmanager.com/gtag/js?id=" + id;
+          document.head.appendChild(tag);
+          window.gtag("js", new Date());
+          window.gtag(
+            "config",
+            id,
+            debug ? { debug_mode: true, traffic_type: "internal" } : {},
+          );
+        }
+
+        function read() {
+          try {
+            return localStorage.getItem(KEY);
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function choose(value) {
+          try {
+            localStorage.setItem(KEY, value);
+          } catch (e) {}
+          if (banner) {
+            banner.remove();
+            banner = null;
+          }
+          if (value === "granted") load();
+          else if (loaded)
+            window.gtag("consent", "update", { analytics_storage: "denied" });
+        }
+
+        function show() {
+          if (banner || !document.body) return;
+          banner = document.createElement("div");
+          banner.setAttribute("role", "region");
+          banner.setAttribute("aria-label", "Analytics preferences");
+          banner.innerHTML =
+            "<style>.ms-consent{position:fixed;z-index:9999;bottom:16px;left:50%;transform:translateX(-50%);width:min(560px,calc(100% - 32px));padding:14px 16px;border:1px solid #dfe5ef;border-radius:14px;background:#fff;box-shadow:0 12px 32px rgb(11 23 54 / 12%);color:#0b1736;font:14px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;display:flex;align-items:center;gap:14px;flex-wrap:wrap}.ms-consent p{margin:0;flex:1 1 240px;min-width:180px;font-size:13px}.ms-consent button{min-height:34px;padding:0 16px;border-radius:9px;font:inherit;font-weight:700;cursor:pointer}.ms-consent .ms-yes{border:1px solid #3474c8;background:#3474c8;color:#fff}.ms-consent .ms-no{border:1px solid #c3ccdb;background:#fff;color:#0b1736}</style>" +
+            '<div class="ms-consent"><p>We use privacy-friendly analytics (Google Analytics 4) to measure site visits. No customer or store data is collected.</p>' +
+            '<button type="button" class="ms-yes">Accept</button>' +
+            '<button type="button" class="ms-no">Decline</button></div>';
+          banner
+            .querySelector(".ms-yes")
+            .addEventListener("click", function () {
+              choose("granted");
+            });
+          banner
+            .querySelector(".ms-no")
+            .addEventListener("click", function () {
+              choose("denied");
+            });
+          document.body.appendChild(banner);
+        }
+
+        /* Reopen preferences from the footer "Cookie preferences" link. */
+        window.__msConsentPreferences = function (ev) {
+          if (ev) ev.preventDefault();
+          show();
+        };
+
+        var consent = read();
+        if (debug) load();
+        else if (!prod) return;
+        else if (consent === "granted") load();
+        else if (consent === "denied") return;
+
+        function attach() {
+          if (!consent && !debug) show();
+          var slot = document.querySelector(".footer-nav");
+          if (slot && !slot.querySelector("[data-consent-preferences]")) {
+            var a = document.createElement("a");
+            a.href = "#";
+            a.dataset.consentPreferences = "1";
+            a.textContent = "Cookie preferences";
+            a.addEventListener("click", window.__msConsentPreferences);
+            slot.appendChild(a);
+          }
+        }
+        if (document.readyState === "loading")
+          document.addEventListener("DOMContentLoaded", attach);
+        else attach();
+      })();
+    </script>
     <link rel="stylesheet" href="/site.css?v=motion-20261030" />
     <link rel="stylesheet" href="/home.css?v=motion-20261030" />
     <script type="application/ld+json">
@@ -948,7 +1059,7 @@
       </div>
     </footer>
 
-    <script src="/site.js?v=motion-20261030" defer></script>
+    <script src="/site.js?v=motion-20261031" defer></script>
     <script src="/home.js?v=motion-20261030" defer></script>
   </body>
 </html>
