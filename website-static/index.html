@@ -128,8 +128,8 @@
          - On mergeship.app the tag only loads after the visitor accepts the
            banner below; "declined" is also remembered, and the footer
            "Cookie preferences" link reopens the banner at any time.
-           Withdrawing consent reloads the page into the denied state and
-           clears _ga cookies, so nothing loads or persists.
+           Withdrawing consent stops the tag, clears _ga cookies, and
+           reloads into the denied state so nothing loads or persists.
          - On non-production hosts only, ?ga_debug loads the tag with
            debug_mode so hits appear in GA4 DebugView / the Developer
            Traffic data filter. On mergeship.app it does nothing and
@@ -195,12 +195,15 @@
             load();
             return;
           }
-          /* Declining after consent: persisting "denied" alone cannot unload
-             the tag for this session, so clear cookies and reload into the
-             consent-denied state where nothing loads. */
+          /* Declining after consent: tell the loaded tag to stop (otherwise it
+             rewrites the session cookie during unload), clear _ga cookies,
+             then reload into the denied state where nothing loads. */
           if (loaded) {
+            window.gtag("consent", "update", { analytics_storage: "denied" });
             clearGaCookies();
-            location.reload();
+            setTimeout(function () {
+              location.reload();
+            }, 250);
           }
         }
 
@@ -240,6 +243,7 @@
 
         var consent = read();
         if (consent === "granted") load();
+        else if (consent === "denied") clearGaCookies();
 
         function attach() {
           if (!consent) show();
