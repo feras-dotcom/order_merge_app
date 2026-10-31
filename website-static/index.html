@@ -126,11 +126,14 @@
       /* Google Analytics 4 (G-VL98KWP5R4), consent-gated.
          - window.gtag always exists so site.js can queue calls harmlessly.
          - On mergeship.app the tag only loads after the visitor accepts the
-           banner below; "declined" is also remembered and loads nothing.
-         - ?ga_debug loads the tag with debug_mode + traffic_type=internal, so
-           developers can watch hits in GA4 DebugView and a GA4 "Developer
-           Traffic" data filter can exclude them from reports.
-         - Non-production hosts without ?ga_debug never load anything. */
+           banner below; "declined" is also remembered, and the footer
+           "Cookie preferences" link reopens the banner at any time.
+           Withdrawing consent reloads the page into the denied state and
+           clears _ga cookies, so nothing loads or persists.
+         - On non-production hosts only, ?ga_debug loads the tag with
+           debug_mode so hits appear in GA4 DebugView / the Developer
+           Traffic data filter. On mergeship.app it does nothing and
+           normal visitor consent is always required. */
       window.dataLayer = window.dataLayer || [];
       window.gtag =
         window.gtag ||
@@ -140,8 +143,9 @@
       (function () {
         var KEY = "ms-analytics-consent";
         var id = "G-VL98KWP5R4";
-        var debug = new URLSearchParams(location.search).has("ga_debug");
         var prod = /(^|\.)mergeship\.app$/.test(location.hostname);
+        var debug =
+          !prod && new URLSearchParams(location.search).has("ga_debug");
         var loaded = false;
         var banner = null;
 
@@ -153,11 +157,7 @@
           tag.src = "https://www.googletagmanager.com/gtag/js?id=" + id;
           document.head.appendChild(tag);
           window.gtag("js", new Date());
-          window.gtag(
-            "config",
-            id,
-            debug ? { debug_mode: true, traffic_type: "internal" } : {},
-          );
+          window.gtag("config", id, debug ? { debug_mode: true } : {});
         }
 
         function read() {
@@ -168,6 +168,21 @@
           }
         }
 
+        function clearGaCookies() {
+          document.cookie.split(";").forEach(function (c) {
+            var n = c.split("=")[0].trim();
+            if (n.indexOf("_ga") !== 0) return;
+            ["", location.hostname, "." + location.hostname, ".mergeship.app"].forEach(
+              function (d) {
+                document.cookie =
+                  n +
+                  "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/" +
+                  (d ? ";domain=" + d : "");
+              },
+            );
+          });
+        }
+
         function choose(value) {
           try {
             localStorage.setItem(KEY, value);
@@ -176,9 +191,17 @@
             banner.remove();
             banner = null;
           }
-          if (value === "granted") load();
-          else if (loaded)
-            window.gtag("consent", "update", { analytics_storage: "denied" });
+          if (value === "granted") {
+            load();
+            return;
+          }
+          /* Declining after consent: persisting "denied" alone cannot unload
+             the tag for this session, so clear cookies and reload into the
+             consent-denied state where nothing loads. */
+          if (loaded) {
+            clearGaCookies();
+            location.reload();
+          }
         }
 
         function show() {
@@ -188,7 +211,7 @@
           banner.setAttribute("aria-label", "Analytics preferences");
           banner.innerHTML =
             "<style>.ms-consent{position:fixed;z-index:9999;bottom:16px;left:50%;transform:translateX(-50%);width:min(560px,calc(100% - 32px));padding:14px 16px;border:1px solid #dfe5ef;border-radius:14px;background:#fff;box-shadow:0 12px 32px rgb(11 23 54 / 12%);color:#0b1736;font:14px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;display:flex;align-items:center;gap:14px;flex-wrap:wrap}.ms-consent p{margin:0;flex:1 1 240px;min-width:180px;font-size:13px}.ms-consent button{min-height:34px;padding:0 16px;border-radius:9px;font:inherit;font-weight:700;cursor:pointer}.ms-consent .ms-yes{border:1px solid #3474c8;background:#3474c8;color:#fff}.ms-consent .ms-no{border:1px solid #c3ccdb;background:#fff;color:#0b1736}</style>" +
-            '<div class="ms-consent"><p>We use privacy-friendly analytics (Google Analytics 4) to measure site visits. No customer or store data is collected.</p>' +
+            '<div class="ms-consent"><p>We use Google Analytics, with your permission, to understand website visits and interactions. We don&#8217;t send Shopify order or customer records to Analytics.</p>' +
             '<button type="button" class="ms-yes">Accept</button>' +
             '<button type="button" class="ms-no">Decline</button></div>';
           banner
@@ -210,14 +233,16 @@
           show();
         };
 
+        if (!prod) {
+          if (debug) load();
+          return;
+        }
+
         var consent = read();
-        if (debug) load();
-        else if (!prod) return;
-        else if (consent === "granted") load();
-        else if (consent === "denied") return;
+        if (consent === "granted") load();
 
         function attach() {
-          if (!consent && !debug) show();
+          if (!consent) show();
           var slot = document.querySelector(".footer-nav");
           if (slot && !slot.querySelector("[data-consent-preferences]")) {
             var a = document.createElement("a");
