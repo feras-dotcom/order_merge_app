@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Duplicate Shipping Charges on Shopify: What to Do When Customers Place Multiple Orders | MergeShip</title>
+    <meta name="description" content="What to do when customers pay shipping twice on Shopify: how to check whether orders can ship together, refund a shipping charge correctly, and reduce repeat-order problems." />
+    <meta name="theme-color" content="#f5f7fb" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+    <link rel="canonical" href="https://mergeship.app/guides/duplicate-shipping-charges-shopify" />
+    <meta property="og:title" content="Duplicate Shipping Charges on Shopify: What to Do When Customers Place Multiple Orders | MergeShip" />
+    <meta property="og:description" content="What to do when customers pay shipping twice on Shopify: how to check whether orders can ship together, refund a shipping charge correctly, and reduce repeat-order problems." />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="https://mergeship.app/guides/duplicate-shipping-charges-shopify" />
+    <meta property="og:image" content="https://mergeship.app/assets/media/combined-order-1440.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="/favicon.ico?v=5" sizes="16x16 32x32 48x48" />
+    <link rel="icon" href="/brand/app-icon-32.png?v=5" type="image/png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/brand/app-icon-180.png?v=5" />
+    <link rel="preconnect" href="https://cdn.shopify.com" />
+    <link rel="stylesheet" href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css" />
+    <script>
+      document.documentElement.classList.add("has-js", "nav-pending");
+      window.__msNavFallback = window.setTimeout(function () {
+        document.documentElement.classList.remove("nav-pending");
+      }, 4000);
+    </script>
+        <script>
+      /* Google Analytics 4 (G-VL98KWP5R4), consent-gated.
+         - window.gtag always exists so site.js can call it harmlessly; hits
+           only fire after window.__msAnalyticsActive is set by load().
+         - On mergeship.app the consent card appears only once the intro has
+           finished (or been skipped) and the visitor has scrolled ~100px;
+           on pages without the intro, scrolling alone triggers it. It is
+           never shown on a timer or before consent, and declined/granted
+           choices persist. The footer "Cookie preferences" link reopens it
+           at any time. Withdrawing consent stops the tag, clears _ga
+           cookies, and reloads into the denied state.
+         - On non-production hosts only, ?ga_debug loads the tag with
+           debug_mode for GA4 DebugView / the Developer Traffic data filter.
+           On mergeship.app it does nothing and consent is always required. */
+      window.dataLayer = window.dataLayer || [];
+      window.gtag =
+        window.gtag ||
+        function () {
+          window.dataLayer.push(arguments);
+        };
+      (function () {
+        var KEY = "ms-analytics-consent";
+        var id = "G-VL98KWP5R4";
+        var prod = /(^|\.)mergeship\.app$/.test(location.hostname);
+        var debug =
+          !prod && new URLSearchParams(location.search).has("ga_debug");
+        var loaded = false;
+        var banner = null;
+
+        function load() {
+          if (loaded) return;
+          loaded = true;
+          window.__msAnalyticsActive = true;
+          var tag = document.createElement("script");
+          tag.async = true;
+          tag.src = "https://www.googletagmanager.com/gtag/js?id=" + id;
+          document.head.appendChild(tag);
+          window.gtag("js", new Date());
+          window.gtag("config", id, debug ? { debug_mode: true } : {});
+        }
+
+        function read() {
+          try {
+            return localStorage.getItem(KEY);
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function clearGaCookies() {
+          document.cookie.split(";").forEach(function (c) {
+            var n = c.split("=")[0].trim();
+            if (n.indexOf("_ga") !== 0) return;
+            ["", location.hostname, "." + location.hostname, ".mergeship.app"].forEach(
+              function (d) {
+                document.cookie =
+                  n +
+                  "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/" +
+                  (d ? ";domain=" + d : "");
+              },
+            );
+          });
+        }
+
+        function choose(value) {
+          try {
+            localStorage.setItem(KEY, value);
+          } catch (e) {}
+          if (banner) {
+            banner.remove();
+            banner = null;
+          }
+          if (value === "granted") {
+            load();
+            return;
+          }
+          /* Declining after consent: tell the loaded tag to stop (otherwise it
+             rewrites the session cookie during unload), clear _ga cookies,
+             then reload into the denied state where nothing loads. */
+          if (loaded) {
+            window.gtag("consent", "update", { analytics_storage: "denied" });
+            clearGaCookies();
+            setTimeout(function () {
+              location.reload();
+            }, 250);
+          }
+        }
+
+        function show() {
+          if (banner || !document.body) return;
+          banner = document.createElement("div");
+          banner.setAttribute("role", "region");
+          banner.setAttribute("aria-label", "Analytics preferences");
+          banner.innerHTML =
+            "<style>" +
+            ".ms-consent{position:fixed;z-index:9999;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));width:min(340px,calc(100vw - 32px));padding:16px 16px 14px;border:1px solid #dfe5ef;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgb(11 23 54 / 10%);color:#0b1736;font:14px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;animation:ms-consent-in .22s ease-out}" +
+            "@keyframes ms-consent-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}" +
+            "@media (prefers-reduced-motion:reduce){.ms-consent{animation:none}}" +
+            "@media (max-width:540px){.ms-consent{right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));width:calc(100vw - 24px)}}" +
+            ".ms-consent strong{display:block;margin:0 0 4px;font-size:13px;font-weight:800;letter-spacing:.02em;text-transform:uppercase}" +
+            ".ms-consent p{margin:0 0 12px;font-size:13px;line-height:1.5}" +
+            ".ms-consent a{color:#3474c8;font-size:12px;text-decoration:none}.ms-consent a:hover{text-decoration:underline}" +
+            ".ms-consent .ms-actions{display:flex;gap:8px;margin-bottom:10px}" +
+            ".ms-consent button{flex:1;min-height:40px;border-radius:10px;font:inherit;font-weight:700;font-size:13px;cursor:pointer}" +
+            ".ms-consent .ms-yes{border:1px solid #3474c8;background:#3474c8;color:#fff}" +
+            ".ms-consent .ms-yes:hover{background:#2b66b5}" +
+            ".ms-consent .ms-no{border:1px solid #c3ccdb;background:#fff;color:#0b1736}" +
+            ".ms-consent .ms-no:hover{background:#f4f6fb}" +
+            ".ms-consent button:focus-visible{outline:3px solid rgb(8 107 255 / 35%);outline-offset:2px}" +
+            "</style>" +
+            '<div class="ms-consent"><strong>Website analytics</strong>' +
+            "<p>May we use analytics cookies to understand how visitors use MergeShip?</p>" +
+            '<div class="ms-actions">' +
+            '<button type="button" class="ms-no">Decline</button>' +
+            '<button type="button" class="ms-yes">Accept</button>' +
+            "</div>" +
+            '<a href="/privacy">Privacy policy</a>' +
+            "</div>";
+          banner
+            .querySelector(".ms-yes")
+            .addEventListener("click", function () {
+              choose("granted");
+            });
+          banner
+            .querySelector(".ms-no")
+            .addEventListener("click", function () {
+              choose("denied");
+            });
+          document.body.appendChild(banner);
+        }
+
+        /* The card waits for the intro to finish (skipped counts as finished)
+           and for the visitor to scroll ~100px. Pages without .intro treat the
+           intro as already done. */
+        function introDone() {
+          var de = document.documentElement;
+          return (
+            !document.querySelector(".intro") ||
+            de.classList.contains("intro-done") ||
+            !de.classList.contains("intro-pending")
+          );
+        }
+
+        function maybeShow() {
+          if (read() !== null) {
+            detach();
+            return;
+          }
+          if (!introDone()) return;
+          if ((window.scrollY || 0) < 100) return;
+          show();
+          detach();
+        }
+
+        var introObserver = null;
+        function detach() {
+          window.removeEventListener("scroll", maybeShow);
+          if (introObserver) {
+            introObserver.disconnect();
+            introObserver = null;
+          }
+        }
+
+        /* Reopen preferences from the footer "Cookie preferences" link —
+           immediate, bypassing the scroll/intro gate. */
+        window.__msConsentPreferences = function (ev) {
+          if (ev) ev.preventDefault();
+          detach();
+          show();
+        };
+
+        if (!prod) {
+          if (debug) load();
+          return;
+        }
+
+        var consent = read();
+        if (consent === "granted") load();
+        else if (consent === "denied") clearGaCookies();
+
+        function attach() {
+          if (!consent) {
+            window.addEventListener("scroll", maybeShow, { passive: true });
+            /* If the visitor already scrolled during the intro, the card can
+               appear the moment the intro finishes. */
+            introObserver = new MutationObserver(maybeShow);
+            introObserver.observe(document.documentElement, {
+              attributes: true,
+              attributeFilter: ["class"],
+            });
+            maybeShow();
+          }
+          var slot = document.querySelector(".footer-nav");
+          if (slot && !slot.querySelector("[data-consent-preferences]")) {
+            var a = document.createElement("a");
+            a.href = "#";
+            a.dataset.consentPreferences = "1";
+            a.textContent = "Cookie preferences";
+            a.addEventListener("click", window.__msConsentPreferences);
+            slot.appendChild(a);
+          }
+        }
+        if (document.readyState === "loading")
+          document.addEventListener("DOMContentLoaded", attach);
+        else attach();
+      })();
+    </script>
+    <link rel="stylesheet" href="/site.css?v=motion-20261030" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": "Duplicate Shipping Charges on Shopify: What to Do When Customers Place Multiple Orders",
+        "description": "What to do when customers pay shipping twice on Shopify: how to check whether orders can ship together, refund a shipping charge correctly, and reduce repeat-order problems.",
+        "mainEntityOfPage": {
+          "@type": "WebPage",
+          "@id": "https://mergeship.app/guides/duplicate-shipping-charges-shopify"
+        },
+        "url": "https://mergeship.app/guides/duplicate-shipping-charges-shopify",
+        "image": "https://mergeship.app/assets/media/combined-order-1440.jpg",
+        "author": {
+          "@type": "Organization",
+          "name": "MergeShip",
+          "url": "https://mergeship.app/"
+        },
+        "publisher": {
+          "@type": "Organization",
+          "name": "MergeShip",
+          "url": "https://mergeship.app/",
+          "logo": {
+            "@type": "ImageObject",
+            "url": "https://mergeship.app/brand/logo-512.png",
+            "width": 512,
+            "height": 512
+          }
+        },
+        "datePublished": "2026-11-02"
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header" data-header>
+      <div class="shell header-row editorial-header-row">
+        <a class="brand" href="/" aria-label="MergeShip home">
+          <img src="/brand/logo-64.png" srcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" sizes="36px" alt="" width="64" height="64" />
+          <span>Merge<span class="brand-accent">Ship</span></span>
+        </a>
+        <nav
+          class="primary-nav"
+          id="primary-nav"
+          aria-label="Primary navigation"
+          hidden
+        >
+          <a href="/#how-it-works">How it works</a>
+          <a href="/#use-cases">Use cases</a>
+          <a href="/#pricing">Pricing</a>
+          <a href="/#faq">FAQ</a>
+          <a href="/demo">Demo</a>
+          <a href="/guides" aria-current="location">Guides</a>
+        </nav>
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="primary-nav"
+          aria-label="Open menu"
+        >
+          <span class="nav-toggle-lines" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+    <main id="main" class="guide-main">
+      <div class="guide-container">
+        <a class="guide-back" href="/guides">Back to Guides</a>
+        <article class="guide-article">
+          <h1>Duplicate Shipping Charges on Shopify: What to Do When Customers Place Multiple Orders</h1>
+
+          <p class="guide-review-date"><em>Last reviewed: November 2, 2026</em></p>
+
+          <p>A customer places an order during a product drop, then returns later in the same buying window and purchases something else.</p>
+
+          <p>Both orders are going to the same address. Neither has shipped. But the customer has paid for shipping twice.</p>
+
+          <p>Should you refund one of those shipping charges? Can you send everything together? And how do you make sure the customer receives the right products without creating fulfillment or payment problems?</p>
+
+          <p>Here's how to handle the situation.</p>
+
+          <h2>First, determine whether the second shipping charge is actually unnecessary</h2>
+
+          <p>Two shipping charges don't automatically mean Shopify made a mistake.</p>
+
+          <p>Each checkout is a separate transaction. The customer may have selected different shipping methods, purchased items with different delivery requirements, or placed an order that your fulfillment team has already started processing.</p>
+
+          <p>Before refunding anything, check:</p>
+
+          <ul>
+            <li><strong>Customer:</strong> Do both orders belong to the same customer?</li>
+            <li><strong>Address:</strong> Are both orders going to the same shipping address?</li>
+            <li><strong>Shipping method:</strong> Did the customer select compatible delivery options?</li>
+            <li><strong>Fulfillment status:</strong> Has either order been picked, packed, labeled, or handed to a fulfillment provider?</li>
+            <li><strong>Products:</strong> Can everything be shipped together without creating inventory or packaging problems?</li>
+            <li><strong>Shipping costs:</strong> Would one combined shipment actually cost less than two separate shipments?</li>
+          </ul>
+
+          <p>If the orders need separate shipments, charging shipping twice may be appropriate.</p>
+
+          <p>If they can safely ship together, you may decide to refund some or all of the extra shipping charge according to your store's policy.</p>
+
+          <p>The key is to establish what will actually happen during fulfillment before changing the customer's payment.</p>
+
+          <h2>You have two separate problems to solve</h2>
+
+          <p>When customers place multiple orders before shipping, merchants often treat order combining and shipping refunds as one task.</p>
+
+          <p>They're actually two different operations.</p>
+
+          <h3>1. Handling the orders</h3>
+
+          <p>You need to decide whether to fulfill the orders separately, ship them together while keeping separate Shopify order records, or combine their contents into a primary order.</p>
+
+          <p>Each approach has implications for inventory, fulfillment tracking, and connected shipping software.</p>
+
+          <h3>2. Handling the money</h3>
+
+          <p>You need to decide whether the customer should receive a shipping refund.</p>
+
+          <p>Putting two purchases in one parcel doesn't automatically reimburse the customer for shipping paid during separate checkouts.</p>
+
+          <p>Likewise, combining orders in Shopify doesn't necessarily change the original shipping transactions.</p>
+
+          <p>If you're deciding how to handle the orders themselves, read our guide: <a href="/guides/how-to-combine-shopify-orders">How to Combine Shopify Orders Without Creating Fulfillment Problems</a>.</p>
+
+          <h2>How to refund an extra shipping charge in Shopify</h2>
+
+          <p>For eligible orders, Shopify lets merchants refund shipping without refunding the products.</p>
+
+          <p>Suppose a customer places two orders:</p>
+
+          <div class="guide-table-scroll" role="region" aria-label="Example orders" tabindex="0">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  <th scope="col">First order</th>
+                  <th scope="col">Second order</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Products</th>
+                  <td>Hoodie</td>
+                  <td>T-shirt</td>
+                </tr>
+                <tr>
+                  <th scope="row">Shipping paid</th>
+                  <td>$7</td>
+                  <td>$7</td>
+                </tr>
+                <tr>
+                  <th scope="row">Fulfillment</th>
+                  <td>Not started</td>
+                  <td>Not started</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>If you confirm that both purchases can be shipped together and your policy is to retain only one $7 shipping charge, you might refund the $7 paid on the second order.</p>
+
+          <p>That is an example, not a universal refund rule. The correct amount depends on your actual shipping costs and the applicable order details.</p>
+
+          <h3>Step-by-step: refund shipping in Shopify</h3>
+
+          <ol>
+            <li>Open your <strong>Shopify admin</strong> and go to <strong>Orders</strong>.</li>
+            <li>Select the order containing the shipping charge you want to refund.</li>
+            <li>Click <strong>Refund</strong>.</li>
+            <li>Find <strong>Refund shipping</strong> and select <strong>Shipping</strong>.</li>
+            <li>Enter the shipping amount you want to refund.</li>
+            <li>Review the refund total, payment details, and customer-notification option.</li>
+            <li>Click <strong>Refund</strong> to confirm.</li>
+          </ol>
+
+          <p>You can optionally enter an internal reason for the refund. Shopify records the refund in the order's financial summary and Timeline.</p>
+
+          <p>According to <a href="https://help.shopify.com/en/manual/fulfillment/managing-orders/refunding-orders">Shopify's official refund instructions</a>, you cannot refund more shipping than the available refundable amount. Shopify also notes that shipping refunds aren't available for orders with an order-level free-shipping discount.</p>
+
+          <p><strong>Before confirming, make sure you're refunding the intended shipping amount and not accidentally refunding the products.</strong></p>
+
+          <p>Shopify states that initiated refunds cannot be canceled or reversed through the normal refund process.</p>
+
+          <h2>Why editing an order isn't the same as refunding shipping</h2>
+
+          <p>You might assume that editing two orders to prepare a single shipment would automatically adjust what the customer paid for delivery.</p>
+
+          <p>That's not how Shopify's order editor works.</p>
+
+          <p>Shopify states that shipping methods and rates aren't automatically recalculated when an existing order is edited.</p>
+
+          <p>Merchants can make certain shipping-fee adjustments through the order editor, but if an edit results in money owed to the customer, the refund still needs to be issued separately.</p>
+
+          <p>This is an important distinction during busy product launches. A staff member might successfully adjust an order's contents while leaving the financial side unfinished.</p>
+
+          <p>See Shopify's documentation on <a href="https://help.shopify.com/en/manual/fulfillment/managing-orders/editing-orders/shipping-fees">editing shipping fees</a>.</p>
+
+          <h2>Be careful when canceling the extra order</h2>
+
+          <p>Canceling an order is not a shortcut for removing its shipping charge.</p>
+
+          <p>For a paid, unfulfilled order, Shopify offers cancellation options that include refunding the full payment or issuing a refund later.</p>
+
+          <p>If you cancel the second order without first establishing how its products will be fulfilled, you risk disrupting the customer's purchase.</p>
+
+          <p>And if your intention is only to refund shipping, accidentally issuing a full refund could create a different problem.</p>
+
+          <p>Before canceling an order, confirm:</p>
+
+          <ul>
+            <li>Where the purchased products will be fulfilled.</li>
+            <li>Whether payment for those products is being preserved or refunded.</li>
+            <li>Whether inventory quantities will remain accurate.</li>
+            <li>Whether a fulfillment service has already received the order.</li>
+            <li>Whether a shipping refund has already been issued.</li>
+          </ul>
+
+          <p>If you're using an order-combining app, follow its documented workflow instead of making independent edits that could conflict with it.</p>
+
+          <p>Refer to <a href="https://help.shopify.com/en/manual/fulfillment/managing-orders/canceling-orders">Shopify's cancellation documentation</a> for the available refund and restocking options.</p>
+
+          <h2>How to reduce repeat-order shipping problems</h2>
+
+          <p>For stores running product drops, preorders, restocks, or live sales, this can be a recurring operational issue rather than an occasional support issue.</p>
+
+          <p>A practical solution starts with a clear policy.</p>
+
+          <h3>Establish a combining window</h3>
+
+          <p>Decide how long after an initial purchase a subsequent order might qualify to be shipped together.</p>
+
+          <p>For example, a store might review repeat purchases made during a launch window before fulfillment begins.</p>
+
+          <p>The window should reflect the store's actual fulfillment process.</p>
+
+          <p>If orders move immediately to an external fulfillment provider, even a short delay can make combining impractical.</p>
+
+          <h3>Decide when extra shipping is refundable</h3>
+
+          <p>Your policy should establish what happens when:</p>
+
+          <ul>
+            <li>Both orders have matching delivery details.</li>
+            <li>Shipping methods or delivery speeds differ.</li>
+            <li>One order has already entered fulfillment.</li>
+            <li>Shipping the items together increases package weight or cost.</li>
+            <li>The customer previously received a shipping discount.</li>
+          </ul>
+
+          <p>Not every second checkout should automatically qualify for free shipping.</p>
+
+          <h3>Give your fulfillment team one clear procedure</h3>
+
+          <p>A reliable workflow should identify repeat orders, verify whether they can be handled together, make the required fulfillment changes, and record any shipping refund.</p>
+
+          <p>The fulfillment and financial steps should be reconciled rather than assumed to happen together.</p>
+
+          <p>This becomes especially important when your store receives a large number of orders within a short buying window.</p>
+
+          <h2>Can Shopify prevent a second shipping charge at checkout?</h2>
+
+          <p>Preventing an extra charge is different from refunding it afterward.</p>
+
+          <p>Shopify supports shipping rates, free-shipping discounts, and shipping profiles that affect what customers pay at checkout.</p>
+
+          <p>However, an ordinary free-shipping discount isn't automatically a rule that recognizes a qualifying previous purchase and decides whether a new order can join an existing shipment.</p>
+
+          <p>Handling repeat orders at checkout requires additional logic and must account for the merchant's shipping policies and technical constraints.</p>
+
+          <p>If you're considering checkout-based automation, verify that it can identify an eligible earlier purchase reliably and respond before checkout completes.</p>
+
+          <p>Also distinguish this problem from <strong>split shipping</strong>. Shopify can display multiple shipments within a single checkout when products have different fulfillment requirements. That's not the same situation as a customer completing two separate checkouts.</p>
+
+          <p>See <a href="https://help.shopify.com/en/manual/checkout-settings/split-shipping">Shopify's split-shipping documentation</a>.</p>
+
+          <h2>Where order combining fits</h2>
+
+          <p>Order combining can reduce the fulfillment work created by repeat purchases, but it does not necessarily solve the extra shipping charge.</p>
+
+          <p>MergeShip focuses on the order handling side. It identifies eligible repeat Shopify orders and combines them before fulfillment, while leaving uncertain orders alone.</p>
+
+          <p>MergeShip does not currently automatically refund duplicate shipping charges or prevent additional shipping charges at checkout. If repeat orders are also creating fulfillment work for your team, you can <a href="/demo">see how MergeShip works</a>.</p>
+
+          <h2>Frequently asked questions</h2>
+
+          <h3>Does combining Shopify orders automatically refund shipping?</h3>
+
+          <p>No. Combining order contents and refunding shipping are separate operations. Don't assume that moving products between orders changes shipping payments already collected.</p>
+
+          <h3>Can I refund shipping without refunding the products?</h3>
+
+          <p>Yes. Shopify lets you refund shipping on eligible orders. Review the available shipping refund amount and payment details before confirming.</p>
+
+          <h3>Is charging shipping twice always a mistake?</h3>
+
+          <p>No. If the orders require different delivery methods, separate shipments, or additional fulfillment costs, retaining both charges may be justified. The answer depends on your store's policy and the actual fulfillment requirements.</p>
+
+          <h3>Can Shopify automatically recognize that a customer already placed an order?</h3>
+
+          <p>Shopify stores order and customer information, but applying a shipping benefit specifically because a customer has an earlier qualifying unfulfilled order is not the same as configuring an ordinary shipping rate. Repeat-order-specific automation requires an appropriate workflow or integration.</p>
+
+          <h3>Is batch fulfillment the same as combining orders?</h3>
+
+          <p>No. Shopify's batch-fulfillment feature helps merchants organize picking, packing, labels, and related operations across multiple orders. It does not, by itself, transform two separately paid orders into one order or refund shipping charged on either checkout.</p>
+
+          <h2>The takeaway</h2>
+
+          <p>When a Shopify customer pays shipping twice across separate purchases, the correct solution isn't always to refund the second charge immediately.</p>
+
+          <p>First establish whether the orders can safely ship together. Then determine the appropriate shipping adjustment, make the necessary changes, and verify that fulfillment and payment records agree.</p>
+
+          <p>For stores where repeat purchases are common, a documented policy and reliable order-combining workflow can significantly reduce the manual work involved.</p>
+
+          <h3>Official Shopify references</h3>
+
+          <ul>
+            <li><a href="https://help.shopify.com/en/manual/fulfillment/managing-orders/refunding-orders">Refunding orders and shipping</a></li>
+            <li><a href="https://help.shopify.com/en/manual/fulfillment/managing-orders/editing-orders/shipping-fees">Editing shipping fees</a></li>
+            <li><a href="https://help.shopify.com/en/manual/fulfillment/managing-orders/editing-orders/considerations">Considerations for editing orders</a></li>
+            <li><a href="https://help.shopify.com/en/manual/fulfillment/managing-orders/canceling-orders">Canceling orders</a></li>
+            <li><a href="https://help.shopify.com/en/manual/fulfillment/fulfilling-orders/batch-fulfillment">Batch fulfillment</a></li>
+          </ul>
+        </article>
+      </div>
+    </main>
+    <footer class="editorial-footer">
+      <div class="guide-container editorial-footer-row">
+        <a class="brand" href="/" aria-label="MergeShip home">
+          <img src="/brand/logo-64.png" srcset="/brand/logo-64.png 64w, /brand/logo-180.png 180w, /brand/logo-512.png 512w" sizes="36px" alt="" width="64" height="64" />
+          <span>MergeShip</span>
+        </a>
+        <nav class="editorial-footer-nav" aria-label="Footer navigation">
+          <a href="/guides">Guides</a>
+          <a href="/demo">Demo</a>
+          <a href="/privacy">Privacy</a>
+          <a href="mailto:support@mergeship.app">Contact</a>
+        </nav>
+      </div>
+    </footer>
+    <script src="/site.js?v=motion-20261031" defer></script>
+  </body>
+</html>
