@@ -1,0 +1,13 @@
+{
+ "experiment": "G-E7/A-NEG-campaign",
+ "kind": "order-baseline",
+ "orderId": "gid://shopify/Order/8078037057783",
+ "runAtUtc": "2026-11-02T14:55:28.187Z",
+ "refundIds": [
+  "gid://shopify/Refund/1123042787575"
+ ],
+ "totalRefundedMinor": "3000",
+ "totalRefundedShippingMinor": "3000",
+ "store": "ordermergetest2.myshopify.com",
+ "apiVersion": "2026-04"
+}

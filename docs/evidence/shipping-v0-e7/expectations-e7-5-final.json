@@ -1,0 +1,120 @@
+{
+ "experiment": "G-E7/A-NEG-campaign",
+ "runAtUtc": "2026-11-02T15:13:37.903Z",
+ "label": "e7-5-final",
+ "store": "ordermergetest2.myshopify.com",
+ "apiVersion": "2026-04",
+ "expectations": {
+  "newRefundId": "gid://shopify/Refund/1126385221879",
+  "orderId": "gid://shopify/Order/8078037057783",
+  "parentTransactionId": "gid://shopify/OrderTransaction/10162809569527",
+  "amount": "1.00",
+  "currency": "USD",
+  "shippingDelta": "1.00",
+  "requireAgreements": true,
+  "visibilityWindowSatisfied": true
+ },
+ "checks": [
+  {
+   "name": "order_8078037057783.guard.test",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "order_8078037057783.guard.refundable",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "order_8078037057783.guard.financialStatus",
+   "verdict": "PASS",
+   "detail": "PARTIALLY_REFUNDED"
+  },
+  {
+   "name": "order_8078037057783.guard.gateways",
+   "verdict": "PASS",
+   "detail": "bogus only"
+  },
+  {
+   "name": "order_8078037057783.guard.transactions",
+   "verdict": "PASS",
+   "detail": "4 transactions, complete"
+  },
+  {
+   "name": "order_8078037057783.guard.txTest",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "order_8078037057783.guard.parent",
+   "verdict": "PASS",
+   "detail": "successful test CAPTURE gid://shopify/OrderTransaction/10162809569527"
+  },
+  {
+   "name": "order_8078037057783.guard.shippingCapacity",
+   "verdict": "PASS",
+   "detail": "remaining 4000 minor units (USD)"
+  },
+  {
+   "name": "expect.delta.refundSet",
+   "verdict": "PASS",
+   "detail": "exactly one new refund (2 total)"
+  },
+  {
+   "name": "expect.delta.shipping",
+   "verdict": "PASS",
+   "detail": "+1000 minor units"
+  },
+  {
+   "name": "expect.delta.total",
+   "verdict": "PASS",
+   "detail": "+1000 minor units"
+  },
+  {
+   "name": "expect.refund.id",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "expect.refund.order",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "expect.refund.amount",
+   "verdict": "PASS",
+   "detail": "1.0 USD"
+  },
+  {
+   "name": "expect.refund.shippingLines",
+   "verdict": "PASS",
+   "detail": "1 line(s), 1000 minor"
+  },
+  {
+   "name": "expect.refund.refundLineItems",
+   "verdict": "PASS",
+   "detail": "empty"
+  },
+  {
+   "name": "expect.refund.orderAdjustments",
+   "verdict": "PASS",
+   "detail": "empty"
+  },
+  {
+   "name": "expect.refund.duties",
+   "verdict": "PASS",
+   "detail": "empty"
+  },
+  {
+   "name": "expect.refund.transactions",
+   "verdict": "PASS",
+   "detail": "REFUND/SUCCESS/bogus/test amount 1000 parent ok"
+  },
+  {
+   "name": "expect.agreements",
+   "verdict": "PASS",
+   "detail": "APP-ATTRIBUTED gid://shopify/App/426185785345"
+  }
+ ],
+ "overall": "PASS"
+}

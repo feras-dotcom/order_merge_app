@@ -1,0 +1,22 @@
+{
+  "refundCreate": {
+    "refund": null,
+    "userErrors": [
+      {
+        "field": null,
+        "message": "Idempotency key has been used with a different request payload."
+      }
+    ]
+  }
+}
+
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+

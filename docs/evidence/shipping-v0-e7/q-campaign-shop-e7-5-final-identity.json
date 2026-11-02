@@ -1,0 +1,23 @@
+{
+ "experiment": "G-E7/A-NEG-campaign",
+ "runAtUtc": "2026-11-02T15:13:37.903Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
+ "document": {
+  "name": "Q-CAMPAIGN-SHOP",
+  "sha256": "4f0663a19c9d71e638a1003861da5f7265301d299f941bdff2742e9db42572e8",
+  "text": "query ShippingRefundCampaignShop {\n  shop { myshopifyDomain plan { partnerDevelopment } }\n}"
+ },
+ "verdict": "PASS",
+ "executionErrors": null,
+ "response": {
+  "shop": {
+   "myshopifyDomain": "ordermergetest2.myshopify.com",
+   "plan": {
+    "partnerDevelopment": true
+   }
+  }
+ },
+ "cost": null
+}

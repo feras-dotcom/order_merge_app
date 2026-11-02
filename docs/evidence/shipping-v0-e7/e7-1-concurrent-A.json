@@ -1,0 +1,10 @@
+
+Authenticating ...
+[2K[1A[2K[G
+╭─ error ──────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  request to https://ordermergetest2.myshopify.com/admin/oauth/access_token   │
+│  failed, reason:                                                             │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+

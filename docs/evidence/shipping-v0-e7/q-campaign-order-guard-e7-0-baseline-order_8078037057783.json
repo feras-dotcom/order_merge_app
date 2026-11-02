@@ -1,0 +1,186 @@
+{
+ "experiment": "G-E7/A-NEG-campaign",
+ "runAtUtc": "2026-11-02T14:55:28.187Z",
+ "apiVersion": "2026-04",
+ "store": "ordermergetest2.myshopify.com",
+ "channel": "shopify-app-execute",
+ "document": {
+  "name": "Q-CAMPAIGN-ORDER-GUARD",
+  "sha256": "6d5c08481d9491ef5be7dbde1841a49887b5ea093fa081de64e4aa5286ca600e",
+  "text": "query ShippingRefundCampaignOrderGuard($id: ID!) {\n  order(id: $id) {\n    id\n    test\n    refundable\n    displayFinancialStatus\n    paymentGatewayNames\n    totalShippingPriceSet { shopMoney { amount currencyCode } }\n    totalRefundedShippingSet { shopMoney { amount currencyCode } }\n    transactions(first: 50) { id kind status gateway test amountSet { shopMoney { amount currencyCode } } }\n  }\n}"
+ },
+ "variables": {
+  "id": "gid://shopify/Order/8078037057783"
+ },
+ "verdict": "PASS",
+ "executionErrors": null,
+ "response": {
+  "order": {
+   "id": "gid://shopify/Order/8078037057783",
+   "test": true,
+   "refundable": true,
+   "displayFinancialStatus": "PARTIALLY_REFUNDED",
+   "paymentGatewayNames": [
+    "bogus"
+   ],
+   "totalShippingPriceSet": {
+    "shopMoney": {
+     "amount": "8.0",
+     "currencyCode": "USD"
+    }
+   },
+   "totalRefundedShippingSet": {
+    "shopMoney": {
+     "amount": "3.0",
+     "currencyCode": "USD"
+    }
+   },
+   "transactions": [
+    {
+     "id": "gid://shopify/OrderTransaction/10162809503991",
+     "kind": "AUTHORIZATION",
+     "status": "SUCCESS",
+     "gateway": "bogus",
+     "test": true,
+     "amountSet": {
+      "shopMoney": {
+       "amount": "18.0",
+       "currencyCode": "USD"
+      }
+     }
+    },
+    {
+     "id": "gid://shopify/OrderTransaction/10162809569527",
+     "kind": "CAPTURE",
+     "status": "SUCCESS",
+     "gateway": "bogus",
+     "test": true,
+     "amountSet": {
+      "shopMoney": {
+       "amount": "18.0",
+       "currencyCode": "USD"
+      }
+     }
+    },
+    {
+     "id": "gid://shopify/OrderTransaction/10165563097335",
+     "kind": "REFUND",
+     "status": "SUCCESS",
+     "gateway": "bogus",
+     "test": true,
+     "amountSet": {
+      "shopMoney": {
+       "amount": "3.0",
+       "currencyCode": "USD"
+      }
+     }
+    }
+   ]
+  }
+ },
+ "cost": null,
+ "checks": [
+  {
+   "name": "guard.test",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "guard.refundable",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "guard.financialStatus",
+   "verdict": "PASS",
+   "detail": "PARTIALLY_REFUNDED"
+  },
+  {
+   "name": "guard.gateways",
+   "verdict": "PASS",
+   "detail": "bogus only"
+  },
+  {
+   "name": "guard.transactions",
+   "verdict": "PASS",
+   "detail": "3 transactions, complete"
+  },
+  {
+   "name": "guard.txTest",
+   "verdict": "PASS",
+   "detail": "ok"
+  },
+  {
+   "name": "guard.parent",
+   "verdict": "PASS",
+   "detail": "successful test CAPTURE gid://shopify/OrderTransaction/10162809569527"
+  },
+  {
+   "name": "guard.shippingCapacity",
+   "verdict": "PASS",
+   "detail": "remaining 5000 minor units (USD)"
+  }
+ ],
+ "observed": {
+  "id": "gid://shopify/Order/8078037057783",
+  "test": true,
+  "refundable": true,
+  "displayFinancialStatus": "PARTIALLY_REFUNDED",
+  "paymentGatewayNames": [
+   "bogus"
+  ],
+  "totalShippingPriceSet": {
+   "shopMoney": {
+    "amount": "8.0",
+    "currencyCode": "USD"
+   }
+  },
+  "totalRefundedShippingSet": {
+   "shopMoney": {
+    "amount": "3.0",
+    "currencyCode": "USD"
+   }
+  },
+  "transactions": [
+   {
+    "id": "gid://shopify/OrderTransaction/10162809503991",
+    "kind": "AUTHORIZATION",
+    "status": "SUCCESS",
+    "gateway": "bogus",
+    "test": true,
+    "amountSet": {
+     "shopMoney": {
+      "amount": "18.0",
+      "currencyCode": "USD"
+     }
+    }
+   },
+   {
+    "id": "gid://shopify/OrderTransaction/10162809569527",
+    "kind": "CAPTURE",
+    "status": "SUCCESS",
+    "gateway": "bogus",
+    "test": true,
+    "amountSet": {
+     "shopMoney": {
+      "amount": "18.0",
+      "currencyCode": "USD"
+     }
+    }
+   },
+   {
+    "id": "gid://shopify/OrderTransaction/10165563097335",
+    "kind": "REFUND",
+    "status": "SUCCESS",
+    "gateway": "bogus",
+    "test": true,
+    "amountSet": {
+     "shopMoney": {
+      "amount": "3.0",
+      "currencyCode": "USD"
+     }
+    }
+   }
+  ]
+ }
+}

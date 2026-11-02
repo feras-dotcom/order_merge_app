@@ -1,0 +1,27 @@
+{
+  "refundCreate": {
+    "refund": {
+      "id": "gid://shopify/Refund/1126385221879",
+      "note": "MS-SHIPREFUND-E7-65aece0c-4d66-41d1-aab0-c8a5c481bd0f",
+      "createdAt": "2026-11-02T14:57:07Z",
+      "totalRefundedSet": {
+        "presentmentMoney": {
+          "amount": "1.0",
+          "currencyCode": "USD"
+        }
+      }
+    },
+    "userErrors": []
+  }
+}
+
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+

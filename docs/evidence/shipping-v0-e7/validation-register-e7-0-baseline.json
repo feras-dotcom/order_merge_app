@@ -1,0 +1,57 @@
+{
+ "runAtUtc": "2026-11-02T14:55:28.187Z",
+ "label": "e7-0-baseline",
+ "store": "ordermergetest2.myshopify.com",
+ "apiVersion": "2026-04",
+ "channel": "shopify-app-execute",
+ "verifiedShop": "ordermergetest2.myshopify.com",
+ "verifiedAppId": "gid://shopify/App/426185785345",
+ "orders": [
+  "gid://shopify/Order/8078037057783"
+ ],
+ "refunds": [],
+ "records": [
+  {
+   "name": "Q-CAMPAIGN-SHOP",
+   "purpose": "identity",
+   "file": "q-campaign-shop-e7-0-baseline-identity.json",
+   "sha256": "4f0663a19c9d71e638a1003861da5f7265301d299f941bdff2742e9db42572e8",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-APPID",
+   "purpose": "identity",
+   "file": "q-appid-e7-0-baseline-identity.json",
+   "sha256": "616d5da0b45467c102c60e368a7f339fbbb4b2f7f68a5d145c50c2c8175caf16",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-CAMPAIGN-ORDER-GUARD",
+   "purpose": "order_8078037057783",
+   "file": "q-campaign-order-guard-e7-0-baseline-order_8078037057783.json",
+   "sha256": "6d5c08481d9491ef5be7dbde1841a49887b5ea093fa081de64e4aa5286ca600e",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-RECONCILE",
+   "purpose": "order_8078037057783",
+   "file": "q-reconcile-e7-0-baseline-order_8078037057783.json",
+   "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+   "verdict": "PASS"
+  },
+  {
+   "name": "BASELINE",
+   "purpose": "order_8078037057783",
+   "file": "baseline-8078037057783.json",
+   "sha256": "",
+   "verdict": "PASS"
+  },
+  {
+   "name": "Q-AGREEMENTS",
+   "purpose": "order_8078037057783",
+   "file": "q-agreements-e7-0-baseline-order_8078037057783.json",
+   "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+   "verdict": "PASS"
+  }
+ ]
+}
