@@ -112,11 +112,11 @@ document.querySelectorAll("[data-analytics-event]").forEach((link) => {
   });
 });
 
-/* Forward site events to Google Analytics 4. window.gtag is defined inline in
-   <head> on every public page; on non-production hosts (or if the tag fails to
-   load) calls are harmless dataLayer no-ops. */
+/* Forward site events to Google Analytics 4. __msAnalyticsActive is set by the
+   consent controller only once the tag is actually loading, so pre-consent
+   interactions are dropped instead of queued in dataLayer for later. */
 window.addEventListener("mergeship:analytics", (event) => {
-  if (typeof window.gtag !== "function") return;
+  if (window.__msAnalyticsActive !== true) return;
   const detail = event.detail || {};
   if (detail.name === "shopify_cta") {
     window.gtag("event", "shopify_cta", {

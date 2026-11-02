@@ -22,16 +22,18 @@
     </script>
         <script>
       /* Google Analytics 4 (G-VL98KWP5R4), consent-gated.
-         - window.gtag always exists so site.js can queue calls harmlessly.
-         - On mergeship.app the tag only loads after the visitor accepts the
-           banner below; "declined" is also remembered, and the footer
-           "Cookie preferences" link reopens the banner at any time.
-           Withdrawing consent stops the tag, clears _ga cookies, and
-           reloads into the denied state so nothing loads or persists.
+         - window.gtag always exists so site.js can call it harmlessly; hits
+           only fire after window.__msAnalyticsActive is set by load().
+         - On mergeship.app the consent card appears only once the intro has
+           finished (or been skipped) and the visitor has scrolled ~100px;
+           on pages without the intro, scrolling alone triggers it. It is
+           never shown on a timer or before consent, and declined/granted
+           choices persist. The footer "Cookie preferences" link reopens it
+           at any time. Withdrawing consent stops the tag, clears _ga
+           cookies, and reloads into the denied state.
          - On non-production hosts only, ?ga_debug loads the tag with
-           debug_mode so hits appear in GA4 DebugView / the Developer
-           Traffic data filter. On mergeship.app it does nothing and
-           normal visitor consent is always required. */
+           debug_mode for GA4 DebugView / the Developer Traffic data filter.
+           On mergeship.app it does nothing and consent is always required. */
       window.dataLayer = window.dataLayer || [];
       window.gtag =
         window.gtag ||
@@ -50,6 +52,7 @@
         function load() {
           if (loaded) return;
           loaded = true;
+          window.__msAnalyticsActive = true;
           var tag = document.createElement("script");
           tag.async = true;
           tag.src = "https://www.googletagmanager.com/gtag/js?id=" + id;
@@ -111,10 +114,30 @@
           banner.setAttribute("role", "region");
           banner.setAttribute("aria-label", "Analytics preferences");
           banner.innerHTML =
-            "<style>.ms-consent{position:fixed;z-index:9999;bottom:16px;left:50%;transform:translateX(-50%);width:min(560px,calc(100% - 32px));padding:14px 16px;border:1px solid #dfe5ef;border-radius:14px;background:#fff;box-shadow:0 12px 32px rgb(11 23 54 / 12%);color:#0b1736;font:14px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;display:flex;align-items:center;gap:14px;flex-wrap:wrap}.ms-consent p{margin:0;flex:1 1 240px;min-width:180px;font-size:13px}.ms-consent button{min-height:34px;padding:0 16px;border-radius:9px;font:inherit;font-weight:700;cursor:pointer}.ms-consent .ms-yes{border:1px solid #3474c8;background:#3474c8;color:#fff}.ms-consent .ms-no{border:1px solid #c3ccdb;background:#fff;color:#0b1736}</style>" +
-            '<div class="ms-consent"><p>We use Google Analytics, with your permission, to understand website visits and interactions. We don&#8217;t send Shopify order or customer records to Analytics.</p>' +
+            "<style>" +
+            ".ms-consent{position:fixed;z-index:9999;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));width:min(340px,calc(100vw - 32px));padding:16px 16px 14px;border:1px solid #dfe5ef;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgb(11 23 54 / 10%);color:#0b1736;font:14px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;animation:ms-consent-in .22s ease-out}" +
+            "@keyframes ms-consent-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}" +
+            "@media (prefers-reduced-motion:reduce){.ms-consent{animation:none}}" +
+            "@media (max-width:540px){.ms-consent{right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));width:calc(100vw - 24px)}}" +
+            ".ms-consent strong{display:block;margin:0 0 4px;font-size:13px;font-weight:800;letter-spacing:.02em;text-transform:uppercase}" +
+            ".ms-consent p{margin:0 0 12px;font-size:13px;line-height:1.5}" +
+            ".ms-consent a{color:#3474c8;font-size:12px;text-decoration:none}.ms-consent a:hover{text-decoration:underline}" +
+            ".ms-consent .ms-actions{display:flex;gap:8px;margin-bottom:10px}" +
+            ".ms-consent button{flex:1;min-height:40px;border-radius:10px;font:inherit;font-weight:700;font-size:13px;cursor:pointer}" +
+            ".ms-consent .ms-yes{border:1px solid #3474c8;background:#3474c8;color:#fff}" +
+            ".ms-consent .ms-yes:hover{background:#2b66b5}" +
+            ".ms-consent .ms-no{border:1px solid #c3ccdb;background:#fff;color:#0b1736}" +
+            ".ms-consent .ms-no:hover{background:#f4f6fb}" +
+            ".ms-consent button:focus-visible{outline:3px solid rgb(8 107 255 / 35%);outline-offset:2px}" +
+            "</style>" +
+            '<div class="ms-consent"><strong>Website analytics</strong>' +
+            "<p>May we use analytics cookies to understand how visitors use MergeShip?</p>" +
+            '<div class="ms-actions">' +
+            '<button type="button" class="ms-no">Decline</button>' +
             '<button type="button" class="ms-yes">Accept</button>' +
-            '<button type="button" class="ms-no">Decline</button></div>';
+            "</div>" +
+            '<a href="/privacy">Privacy policy</a>' +
+            "</div>";
           banner
             .querySelector(".ms-yes")
             .addEventListener("click", function () {
@@ -128,9 +151,43 @@
           document.body.appendChild(banner);
         }
 
-        /* Reopen preferences from the footer "Cookie preferences" link. */
+        /* The card waits for the intro to finish (skipped counts as finished)
+           and for the visitor to scroll ~100px. Pages without .intro treat the
+           intro as already done. */
+        function introDone() {
+          var de = document.documentElement;
+          return (
+            !document.querySelector(".intro") ||
+            de.classList.contains("intro-done") ||
+            !de.classList.contains("intro-pending")
+          );
+        }
+
+        function maybeShow() {
+          if (read() !== null) {
+            detach();
+            return;
+          }
+          if (!introDone()) return;
+          if ((window.scrollY || 0) < 100) return;
+          show();
+          detach();
+        }
+
+        var introObserver = null;
+        function detach() {
+          window.removeEventListener("scroll", maybeShow);
+          if (introObserver) {
+            introObserver.disconnect();
+            introObserver = null;
+          }
+        }
+
+        /* Reopen preferences from the footer "Cookie preferences" link —
+           immediate, bypassing the scroll/intro gate. */
         window.__msConsentPreferences = function (ev) {
           if (ev) ev.preventDefault();
+          detach();
           show();
         };
 
@@ -144,7 +201,17 @@
         else if (consent === "denied") clearGaCookies();
 
         function attach() {
-          if (!consent) show();
+          if (!consent) {
+            window.addEventListener("scroll", maybeShow, { passive: true });
+            /* If the visitor already scrolled during the intro, the card can
+               appear the moment the intro finishes. */
+            introObserver = new MutationObserver(maybeShow);
+            introObserver.observe(document.documentElement, {
+              attributes: true,
+              attributeFilter: ["class"],
+            });
+            maybeShow();
+          }
           var slot = document.querySelector(".footer-nav");
           if (slot && !slot.querySelector("[data-consent-preferences]")) {
             var a = document.createElement("a");
