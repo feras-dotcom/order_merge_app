@@ -333,6 +333,27 @@ export function resolveCampaignOutDir(repoRoot: string, out: string): { ok: true
   return { ok: true, dir };
 }
 
+/** Whether a baseline may be persisted for an order: only after the guard,
+ *  the reconcile validator and the completeness checks all PASS — a FAIL or
+ *  INCOMPLETE anywhere means no valid baseline exists, and missing evidence
+ *  is never substituted with zeros or empty lists. */
+export function decideBaseline(opts: {
+  readonly guardVerdict: CheckVerdict;
+  readonly reconcileOk: boolean;
+  readonly refundsComplete: boolean;
+  readonly transactionsComplete: boolean;
+  readonly totalsParseable: boolean;
+}): { persist: true } | { persist: false; reason: string } {
+  if (opts.guardVerdict !== "PASS") {
+    return { persist: false, reason: `order guard is ${opts.guardVerdict}` };
+  }
+  if (!opts.reconcileOk) return { persist: false, reason: "reconcile read is invalid" };
+  if (!opts.refundsComplete) return { persist: false, reason: "refund read is not provably complete" };
+  if (!opts.transactionsComplete) return { persist: false, reason: "transaction read is not provably complete" };
+  if (!opts.totalsParseable) return { persist: false, reason: "refunded totals are unreadable" };
+  return { persist: true };
+}
+
 /** Every artifact currently in the evidence dir (register files, baselines,
  *  mutation responses, prior read-backs) — the manifest must cover the
  *  accumulated campaign archive, not just this run's writes. */

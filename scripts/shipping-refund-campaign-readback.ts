@@ -86,9 +86,9 @@ import {
 import { buildManifestLines, MANIFEST_NAME } from "./lib/evidence-manifest";
 import {
   checkBaselineDelta, checkNewRefundFinancials, checkOrderGuard,
-  collectCampaignArtifacts, observeAttribution, overallVerdict,
+  collectCampaignArtifacts, decideBaseline, observeAttribution, overallVerdict,
   parseMoneyMinor, resolveCampaignOutDir,
-  type CheckItem, type OrderBaseline,
+  type CheckItem, type CheckVerdict, type OrderBaseline,
 } from "./lib/campaign-checks";
 
 const EXPECTED_STORE = "ordermergetest2.myshopify.com";
@@ -301,6 +301,8 @@ async function main() {
 
   // ── Per-order: guard doc + reconcile ──────────────────────────────────────
   const refundOrderByReconcile = new Map<string, string>();
+  const guardVerdictByOrder = new Map<string, CheckVerdict>();
+  const reconcileOkByOrder = new Map<string, boolean>();
   for (const oid of ORDERS) {
     const short = oid.split("/").pop()!;
     let guardOrder: Record<string, unknown> | null = null;
@@ -312,6 +314,7 @@ async function main() {
         minAvailableShippingMinor: EXPECT_AVAILABLE_MINOR ?? undefined,
       });
       const v = overallVerdict(items);
+      guardVerdictByOrder.set(oid, v);
       rec(Q_CAMPAIGN_ORDER_GUARD, `order_${short}`, { id: oid }, r,
         `${v}${v !== "PASS" ? `: ${items.filter((i) => i.verdict !== "PASS").map((i) => `${i.name} ${i.detail}`).join("; ")}` : ""}`,
         { checks: items, observed: guardOrder });
@@ -322,6 +325,7 @@ async function main() {
     try {
       const r = await execQuery(Q_RECONCILE, { source: oid });
       const v = validateRefundList({ data: r.data }, { sourceOrderId: oid });
+      reconcileOkByOrder.set(oid, v.ok && !hasErrors(r));
       const order = (r.data as { order?: Record<string, unknown> } | null)?.order;
       if (order) orderNodes.set(oid, order);
       const refunds = (order?.refunds as Array<{ id?: string }> | undefined) ?? [];
@@ -336,34 +340,45 @@ async function main() {
           displayFinancialStatus: order?.displayFinancialStatus ?? null,
           transactions: order?.transactions ?? null,
         });
-    } catch (e) { rec(Q_RECONCILE, `order_${short}`, { source: oid }, null, fail(e)); }
+    } catch (e) { reconcileOkByOrder.set(oid, false); rec(Q_RECONCILE, `order_${short}`, { source: oid }, null, fail(e)); }
 
     // Baseline persistence: one immutable baseline file per order, in the
-    // evidence dir and manifest-covered. Refuses to overwrite — delete the
-    // file deliberately to re-baseline.
+    // evidence dir and manifest-covered — but ONLY when every gate passed:
+    // shop/app identity (enforced above), the order guard, the reconcile
+    // validator, provable completeness of the refund and transaction reads,
+    // and parseable totals. A FAIL or INCOMPLETE anywhere means no valid
+    // baseline — missing evidence is never substituted with zeros. Refuses
+    // to overwrite — delete the file deliberately to re-baseline.
     if (SAVE_BASELINE) {
       const bf = `baseline-${short}.json`;
       const bpath = join(OUT, bf);
-      if (existsSync(bpath)) {
+      const o = orderNodes.get(oid);
+      const refunds = o?.refunds as Array<{ id?: string }> | undefined;
+      const txns = o?.transactions as unknown[] | undefined;
+      const totMinor = parseMoneyMinor(
+        (o?.totalRefundedSet as { presentmentMoney?: { amount?: string } } | undefined)?.presentmentMoney?.amount);
+      const shipMinor = parseMoneyMinor(
+        (o?.totalRefundedShippingSet as { presentmentMoney?: { amount?: string } } | undefined)?.presentmentMoney?.amount);
+      const decision = existsSync(bpath)
+        ? { persist: false as const, reason: `${bf} already exists — refusing to overwrite a persisted baseline` }
+        : decideBaseline({
+            guardVerdict: guardVerdictByOrder.get(oid) ?? "INCOMPLETE",
+            reconcileOk: reconcileOkByOrder.get(oid) === true,
+            refundsComplete: Array.isArray(refunds) && refunds.length < 50,
+            transactionsComplete: Array.isArray(txns) && txns.length < 50,
+            totalsParseable: totMinor !== null && shipMinor !== null,
+          });
+      if (!decision.persist) {
         rec({ name: "BASELINE", document: "" }, `order_${short}`, undefined, null,
-          `FAIL: ${bf} already exists — refusing to overwrite a persisted baseline`);
+          `FAIL: ${decision.reason}`);
+        process.exitCode = 1;
       } else {
-        const o = orderNodes.get(oid);
-        const refunds = (o?.refunds as Array<{ id?: string }> | undefined) ?? [];
         const baseline: OrderBaseline = {
           orderId: oid,
           runAtUtc: RUN,
-          refundIds: refunds.map((x) => x?.id).filter((x): x is string => typeof x === "string"),
-          totalRefundedMinor: ((): string => {
-            const a = (o?.totalRefundedSet as { presentmentMoney?: { amount?: string } } | undefined)?.presentmentMoney?.amount ?? "0";
-            const m = parseMoneyMinor(a);
-            return m === null ? a : m.toString();
-          })(),
-          totalRefundedShippingMinor: ((): string => {
-            const a = (o?.totalRefundedShippingSet as { presentmentMoney?: { amount?: string } } | undefined)?.presentmentMoney?.amount ?? "0";
-            const m = parseMoneyMinor(a);
-            return m === null ? a : m.toString();
-          })(),
+          refundIds: refunds!.map((x) => x?.id).filter((x): x is string => typeof x === "string"),
+          totalRefundedMinor: totMinor!.toString(),
+          totalRefundedShippingMinor: shipMinor!.toString(),
         };
         writeFileSync(bpath, JSON.stringify({
           experiment: "G-E7/A-NEG-campaign", kind: "order-baseline", ...baseline,
@@ -549,7 +564,11 @@ async function main() {
       overall: overallVerdict(expectationItems),
     }, null, 1));
     written.push(ef);
-    records.push({ name: "EXPECTATIONS", purpose: LABEL, file: ef, sha256: "", verdict: overallVerdict(expectationItems) });
+    const expVerdict = overallVerdict(expectationItems);
+    records.push({ name: "EXPECTATIONS", purpose: LABEL, file: ef, sha256: "", verdict: expVerdict });
+    // An expectation run that is not a clean PASS exits unsuccessfully —
+    // INCOMPLETE is not success either.
+    if (expVerdict !== "PASS") process.exitCode = 1;
   }
 
   // ── Register first, manifest LAST over EVERY artifact in the dir ─────────

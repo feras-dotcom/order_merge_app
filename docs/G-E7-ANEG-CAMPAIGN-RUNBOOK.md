@@ -115,6 +115,20 @@ below, key embedded in `idempotencyKey` and `note`), and
 `e7-refund-literal.graphql` (the template rendered with the same key).
 Existing files are never overwritten; re-running `--init` is a no-op.
 
+**Send gate (enforced by `campaign-send.ts`, refuse-before-spawn):** a send
+requires (a) a manifest-verified `baseline-8078037057783.json` produced by a
+read-back run whose identity, guard, reconcile and completeness checks all
+passed (the runner writes no baseline and exits nonzero on any FAIL or
+INCOMPLETE), (b) the document byte-equal to the checked-in variable
+document or the literal template rendered with the persisted key, (c)
+variables exactly equal to an approved payload (#1133, the CAPTURE parent,
+bogus, USD, `notify:false`, `fullRefund:false`, `1.00` or the `0.50`
+mismatch set), and (d) every `--out` inside the evidence dir and not
+existing (mutation responses are never overwritten). The batch spawns all
+children **before** awaiting any completion — the pair is genuinely
+concurrent — and a timed-out, error or nonzero send is recorded verbatim,
+never retried.
+
 ```text
 e7-vars-1.00.json:
 {"input":{"orderId":"gid://shopify/Order/8078037057783","note":"MS-SHIPREFUND-E7-<KEY>","notify":false,"currency":"USD","shipping":{"fullRefund":false,"amount":"1.00"},"transactions":[{"orderId":"gid://shopify/Order/8078037057783","parentId":"gid://shopify/OrderTransaction/10162809569527","gateway":"bogus","kind":"REFUND","amount":"1.00"}]},"idempotencyKey":"<KEY>"}
