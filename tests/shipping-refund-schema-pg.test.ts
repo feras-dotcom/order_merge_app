@@ -311,11 +311,14 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
 
   // ── Transition graph incl. the S1 non-dispatch proof (19.3 item 4, I27) ──
 
-  it("HEADLINE: a raw UPDATE ... SET status='DISPATCHING' from PREPARED raises", async () => {
+  it("a bare UPDATE ... SET status='DISPATCHING' without dispatch evidence still raises (evidence guard)", async () => {
     const { id } = await insertPrepared();
+    // Post-S2 the graph admits the edge, but the evidence-integrity
+    // trigger requires dispatchToken AND dispatchedAt in the same update —
+    // a bare status flip still fails closed.
     await expect(
       db.$executeRaw`UPDATE "ShippingRefund" SET "status" = 'DISPATCHING' WHERE "id" = ${id}`,
-    ).rejects.toThrow(/illegal transition/i);
+    ).rejects.toThrow(/durable_dispatch_evidence|dispatch evidence/i);
     expect(await getStatus(id)).toBe("PREPARED");
   });
 
@@ -341,18 +344,20 @@ describe.skipIf(!TEST_URL)("shipping-refund schema & triggers (real disposable d
     expect(ev).toEqual([{ fromStatus: "QUEUED", toStatus: "OBSERVED" }]);
   });
 
-  it("PREPARED -> DISPATCHING is refused even with dispatch evidence in the same update", async () => {
+  it("S2 edge: PREPARED -> DISPATCHING is admitted with dispatch evidence on an EXECUTE row", async () => {
     const { id } = await insertPrepared();
-    // The exact update the evidence-integrity guard permits: only the
-    // transition guard may refuse it (the other guards admit this shape).
+    // The S2 migration's single new edge: the exact write-ahead update the
+    // dispatcher performs (evidence-integrity trigger's admitted shape).
+    await db.$executeRaw`UPDATE "ShippingRefund" SET
+      "status" = 'DISPATCHING',
+      "dispatchToken" = ${randomUUID()},
+      "dispatchedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+      WHERE "id" = ${id}`;
+    expect(await getStatus(id)).toBe("DISPATCHING");
+    // Write-once: the evidence can never be restamped.
     await expect(
-      db.$executeRaw`UPDATE "ShippingRefund" SET
-        "status" = 'DISPATCHING',
-        "dispatchToken" = ${randomUUID()},
-        "dispatchedAt" = clock_timestamp() AT TIME ZONE 'UTC'
-        WHERE "id" = ${id}`,
-    ).rejects.toThrow(/illegal transition/i);
-    expect(await getStatus(id)).toBe("PREPARED");
+      db.$executeRaw`UPDATE "ShippingRefund" SET "dispatchToken" = ${randomUUID()} WHERE "id" = ${id}`,
+    ).rejects.toThrow(/write-once/i);
   });
 
   it("accepts the legal S1 edges and rejects arbitrary pairs", async () => {

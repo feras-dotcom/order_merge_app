@@ -837,7 +837,7 @@ describe.skipIf(!TEST_URL)(
           fresh.$executeRaw`
             UPDATE "ShippingRefund" SET "status" = 'DISPATCHING', "updatedAt" = now()
             WHERE "id" = ${row.id}`,
-        ).rejects.toThrow(/illegal transition/);
+        ).rejects.toThrow(/illegal transition|durable_dispatch_evidence/);
       } finally {
         await fresh.$disconnect();
       }
@@ -887,15 +887,15 @@ describe.skipIf(!TEST_URL)(
               if (s !== "disable") return;
               // While the fixture holds its SHARE ROW EXCLUSIVE table
               // lock with the trigger suspended, a second session attempts
-              // the same illegal edge on a DIFFERENT row. It blocks until
-              // the fixture commits — then the RESTORED trigger must raise.
+              // a still-illegal edge on a DIFFERENT row (PREPARED->VERIFIED —
+              // PREPARED->DISPATCHING is the legal S2 edge now). It blocks
+              // until the fixture commits — then the RESTORED trigger must
+              // raise.
               writerDone = (async () => {
                 try {
                   await writer.$executeRaw`
                     UPDATE "ShippingRefund" SET
-                      "status" = 'DISPATCHING',
-                      "dispatchToken" = 'writer-forgery',
-                      "dispatchedAt" = (clock_timestamp() AT TIME ZONE 'UTC'),
+                      "status" = 'VERIFIED',
                       "updatedAt" = (clock_timestamp() AT TIME ZONE 'UTC')
                     WHERE "id" = ${claim.rowId}`;
                 } catch (e) {
@@ -1057,7 +1057,7 @@ describe.skipIf(!TEST_URL)(
                     UPDATE "ShippingRefund" SET "status" = 'DISPATCHING', "updatedAt" = now()
                     WHERE "id" = ${row.id}`,
                   v.name,
-                ).rejects.toThrow(/illegal transition/);
+                ).rejects.toThrow(/illegal transition|durable_dispatch_evidence/);
               } finally {
                 await fresh.$disconnect();
               }

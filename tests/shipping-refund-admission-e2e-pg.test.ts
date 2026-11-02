@@ -352,15 +352,16 @@ describe.skipIf(!TEST_URL)(
       await db.$executeRaw`
         UPDATE "ShippingExecuteControl" SET
           "dispatchEnabled" = ${over.dispatchEnabled ?? false},
-          "dispatchEnabledAt" = ${over.dispatchEnabledAt ? naive(over.dispatchEnabledAt) : Prisma.sql`NULL`}
+          "dispatchEnabledAt" = ${over.dispatchEnabledAt ? naive(over.dispatchEnabledAt) : Prisma.sql`NULL`},
+          "globalDailyCap" = 1000000
         WHERE "id" = 'control'`;
       await db.$executeRaw`
         INSERT INTO "ShippingExecuteApproval"
           ("shop", "approvedAt", "approvedBy", "revokedAt", "merchantOptInEpoch",
-           "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor")
+           "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor", "dailyCap")
         VALUES (${shop}, ${naive(EPOCH)}, 's1e-test',
           ${over.revokedAt ? naive(over.revokedAt) : Prisma.sql`NULL`},
-          ${naive(EPOCH)}, 'v1', ${naive(EPOCH)}, 'USD', '0')
+          ${naive(EPOCH)}, 'v1', ${naive(EPOCH)}, 'USD', '0', 1000000)
         ON CONFLICT ("shop") DO UPDATE SET
           "approvedAt" = EXCLUDED."approvedAt",
           "revokedAt" = EXCLUDED."revokedAt",
@@ -1238,14 +1239,15 @@ describe.skipIf(!TEST_URL)(
         await scratch.$executeRaw`
           UPDATE "ShippingExecuteControl" SET
             "admissionEnabled" = true, "admissionEnabledAt" = ${naive(EPOCH)},
-            "dispatchEnabled" = true, "dispatchEnabledAt" = ${naive(EPOCH)}
+            "dispatchEnabled" = true, "dispatchEnabledAt" = ${naive(EPOCH)},
+            "globalDailyCap" = 1000000
           WHERE "id" = 'control'`;
         await scratch.$executeRaw`
           INSERT INTO "ShippingExecuteApproval"
             ("shop", "approvedAt", "approvedBy", "revokedAt", "merchantOptInEpoch",
-             "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor")
+             "ackVersion", "ackRecordedAt", "currencyCode", "maxRefundMinor", "dailyCap")
           VALUES (${shop}, ${naive(EPOCH)}, 's1e-test', NULL,
-            ${naive(EPOCH)}, 'v1', ${naive(EPOCH)}, 'USD', '0')`;
+            ${naive(EPOCH)}, 'v1', ${naive(EPOCH)}, 'USD', '0', 1000000)`;
       }
 
       const opId = nextOpId();

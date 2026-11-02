@@ -1072,21 +1072,26 @@ describe("forbidden trigger bypass (spec 3.2 rules 7-11, 19.2)", () => {
   });
 });
 
-describe("no dispatch path in S1-A", () => {
-  it("no app/ or scripts/ source assigns a ShippingRefund status of 'DISPATCHING'", () => {
+describe("dispatch path confined to the S2 modules", () => {
+  it("only the S2 dispatch module assigns a ShippingRefund status of 'DISPATCHING'", () => {
     // The existing merge protocol legitimately uses a 'DISPATCHING' literal
     // for MergeMutationAttempt.state — a different table and column. What the
-    // architecture test must forbid is a STATUS assignment into DISPATCHING.
+    // architecture test must forbid is a STATUS assignment into DISPATCHING —
+    // which under S2 is the dispatcher's single write-ahead update and may
+    // appear ONLY in the dispatch module.
+    const DISPATCH_MODULE = "app/lib/shipping-refund-dispatch.server.ts";
     const offenders: string[] = [];
     for (const root of ["app", "scripts"]) {
       for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
+        const rel = relative(REPO_ROOT, f).replace(/\\/g, "/");
+        if (rel === DISPATCH_MODULE) continue;
         const text = significantText(readFileSync(f, "utf8"), "ts");
         if (
           /\bstatus\s*[:=]\s*['"]?DISPATCHING\b/.test(text) ||
           /SET\s+"?status"?\s*=\s*'?DISPATCHING\b/i.test(text) ||
           /ShippingRefund[\s\S]{0,200}DISPATCHING\b/.test(text)
         ) {
-          offenders.push(relative(REPO_ROOT, f));
+          offenders.push(rel);
         }
       }
     }
@@ -1097,13 +1102,22 @@ describe("no dispatch path in S1-A", () => {
     expect(MIGRATION_SQL).not.toMatch(/SET\s+"?status"?\s*=\s*'DISPATCHING'/i);
   });
 
-  it("no dispatcher, worker, DispatchPermit, sendRefund or Shopify mutation path exists", () => {
+  it("no dispatcher, worker, DispatchPermit, sendRefund or Shopify mutation path exists outside the S2 modules", () => {
     // The mutation DOCUMENT text is data (section 10): the contract module is
     // the one file allowed to carry `refundCreate`, exposed through a single
-    // accessor (3.2 rule 5). Everything that could EXECUTE a dispatch —
+    // accessor (3.2 rule 5, I15). Everything that could EXECUTE a dispatch —
     // DispatchPermit, sendRefund, a dispatch/worker module, the worker env
-    // flag — stays banned everywhere in S1.
+    // flag — exists ONLY in the S2 dispatch/worker modules and their
+    // operator CLI; everywhere else it stays banned.
     const CONTRACT_PATH = "app/lib/shipping-refund-contract.ts";
+    const S2_PATHS = new Set([
+      "app/lib/shipping-refund-dispatch.server.ts",
+      "app/lib/shipping-refund-worker.server.ts",
+      // The admission scan legitimately names the dispatch module's path
+      // in its import for the pre-freeze capacity precheck (8.4).
+      "app/lib/shipping-refund-admission.server.ts",
+      "scripts/shipping-refund-admin.ts",
+    ]);
     const banned = /\b(DispatchPermit|sendRefund|shipping[-_]?refund[-_]?(dispatch|worker)|MERGESHIP_SHIPPING_REFUNDS)\b/i;
     const offenders: string[] = [];
     const mutationText: string[] = [];
@@ -1111,7 +1125,7 @@ describe("no dispatch path in S1-A", () => {
       for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
         const text = significantText(readFileSync(f, "utf8"), "ts");
         const rel = relative(REPO_ROOT, f).replace(/\\/g, "/");
-        if (banned.test(text)) {
+        if (banned.test(text) && !S2_PATHS.has(rel)) {
           offenders.push(rel);
         }
         if (/\brefundCreate\b/.test(text) && rel !== CONTRACT_PATH) {
@@ -1123,13 +1137,16 @@ describe("no dispatch path in S1-A", () => {
     expect(mutationText).toEqual([]);
   });
 
-  it("the mutation document text accessor is referenced only inside the contract module (3.2 rule 5)", () => {
-    const CONTRACT_PATH = "app/lib/shipping-refund-contract.ts";
+  it("the mutation document text accessor is referenced only inside the contract and the dispatcher (3.2 rule 5, I15)", () => {
+    const ALLOWED = new Set([
+      "app/lib/shipping-refund-contract.ts",
+      "app/lib/shipping-refund-dispatch.server.ts",
+    ]);
     const offenders: string[] = [];
     for (const root of ["app", "scripts"]) {
       for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
         const rel = relative(REPO_ROOT, f).replace(/\\/g, "/");
-        if (rel === CONTRACT_PATH) continue;
+        if (ALLOWED.has(rel)) continue;
         const text = significantText(readFileSync(f, "utf8"), "ts");
         if (/shippingRefundMutationDocument/.test(text)) {
           offenders.push(rel);

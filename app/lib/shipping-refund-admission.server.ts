@@ -84,6 +84,10 @@ import {
   type DueQueuedRow,
   type ScanOperationRow,
 } from "./shipping-refund-store.server";
+import {
+  prefreezeCapacityPrecheck,
+  releaseLeaseWithBackoff,
+} from "./shipping-refund-dispatch.server";
 
 // ── Bounds (7.2, 7.2.2, 7.3, 8.2) ──────────────────────────────────────────
 
@@ -258,6 +262,24 @@ async function evaluateAndSettleQueuedRow(
   db: PrismaClient,
   dbWall: Date,
 ): Promise<RowOutcome> {
+  // ── Pre-freeze capacity precheck (8.4, N5): an EXECUTE-lane QUEUED row
+  // may wait on ONLY the breaker and the daily caps — a database-only
+  // check that avoids spending reads on a row that cannot dispatch soon.
+  // It never requires the hash approval (the wireHash does not exist) and
+  // never evaluates the per-refund cap (the amount is not known), never
+  // aborts and never consumes attempts. OBSERVE rows never wait: nothing
+  // they do can dispatch.
+  if (row.lane === "EXECUTE") {
+    const precheck = await prefreezeCapacityPrecheck(row.shop, db);
+    if ("wait" in precheck && precheck.wait) {
+      await releaseLeaseWithBackoff(row.id, leaseToken, undefined, db);
+      return `WAIT:${precheck.reason}`;
+    }
+    if ("abort" in precheck && precheck.abort) {
+      await releaseLeaseWithBackoff(row.id, leaseToken, undefined, db);
+      return "WAIT:CAPACITY_DEFERRED";
+    }
+  }
   // ── Merge evidence re-assessment (7.4: at claim and at R1) ──
   const op = await loadScanOperation(row.shop, row.mergeOperationId, db);
   const secondary =
