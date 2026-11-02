@@ -8,10 +8,19 @@ import {
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
 import { startBackgroundWorker } from "./lib/background-worker.server";
+import { startShippingRefundWorker } from "./lib/shipping-refund-worker.server";
 
 // Starts the sweep loop once per process (self-guarded: no-op in tests and
 // when DISABLE_BACKGROUND_WORKER=true).
 startBackgroundWorker();
+
+// The shipping-refund loop's own timer (spec 3.1/3.4, never inside
+// runSweepOnce). Disabled by default: with MERGESHIP_SHIPPING_REFUNDS
+// unset it performs no admission and no dispatch — only the read-only
+// reconciliation phase runs, and only on rows that already carry dispatch
+// evidence. Self-guarded: no-op in tests and under
+// DISABLE_BACKGROUND_WORKER=true.
+startShippingRefundWorker();
 
 export const streamTimeout = 5000;
 

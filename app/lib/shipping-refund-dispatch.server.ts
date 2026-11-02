@@ -8,6 +8,7 @@
 // from the database never causes a send; an unknown T3 result means no
 // send. I7: nothing here or anywhere resends — one wire request per row,
 // ever (10.5, I1).
+import { performance } from "node:perf_hooks";
 import type { PrismaClient, Prisma } from "@prisma/client";
 import defaultDb from "../db.server";
 import {
@@ -393,9 +394,24 @@ interface LockedGateState extends ShippingGateLiveState {
   readonly dispatchCutoff: Date | null;
 }
 
+/** The mint authority (9.3, I19): a module-private capability that never
+ *  leaves this file. Construction requires presenting it, so no other
+ *  module and no test can produce a permit — not by calling issue with the
+ *  old signature, not by invoking the constructor directly. The only call
+ *  site that possesses the authority is openDispatchGate, and it reaches it
+ *  only after the T3 transaction promise has resolved. */
+const T3_COMMIT_AUTHORITY: unique symbol = Symbol("shipping-refund-t3-commit");
+
+const assertT3Authority = (authority: unknown): asserts authority is typeof T3_COMMIT_AUTHORITY => {
+  if (authority !== T3_COMMIT_AUTHORITY) {
+    throw new Error(
+      "DispatchPermit can only be minted from a resolved T3 commit inside the dispatch module",
+    );
+  }
+};
+
 /** Minted only inside this module, only after an observed T3 commit (9.3,
- *  I19, I23). Module-private shape: no exported constructor — tests and the
- *  worker can never forge one. Single-use and max-10-seconds old at send. */
+ *  I19, I23). Single-use and max-10-seconds old at send. */
 export class DispatchPermit {
   private consumed = false;
   readonly rowId: string;
@@ -404,24 +420,28 @@ export class DispatchPermit {
   private readonly issuedAtMono: number;
   private readonly monotonicNow: () => number;
   private constructor(
+    authority: typeof T3_COMMIT_AUTHORITY,
     rowId: string, dispatchToken: string, wireVariables: unknown,
     issuedAtMono: number, monotonicNow: () => number,
   ) {
+    assertT3Authority(authority);
     this.rowId = rowId;
     this.dispatchToken = dispatchToken;
     this.wireVariables = wireVariables;
     this.issuedAtMono = issuedAtMono;
     this.monotonicNow = monotonicNow;
   }
-  /** The single construction site (9.3): called only after openDispatchGate's
-   *  transaction resolves successfully. */
+  /** The single construction site (9.3): called only by openDispatchGate
+   *  with the module-private authority, after its transaction resolves. */
   static issue(
+    authority: typeof T3_COMMIT_AUTHORITY,
     rowId: string,
     dispatchToken: string,
     wireVariables: unknown,
     monotonicNow: () => number,
   ): DispatchPermit {
-    return new DispatchPermit(rowId, dispatchToken, wireVariables, monotonicNow(), monotonicNow);
+    assertT3Authority(authority);
+    return new DispatchPermit(authority, rowId, dispatchToken, wireVariables, monotonicNow(), monotonicNow);
   }
   consume(): void {
     if (this.consumed) throw new Error("DispatchPermit is single-use: already consumed");
@@ -561,19 +581,34 @@ const abortInTx = async (
       AND "leasedUntil" > ${DB_WALL}`;
 };
 
+/** The gate's in-transaction verdict: the ready-to-mint payload stays data
+ *  only — the DispatchPermit object exists solely after the T3 transaction
+ *  promise resolves (9.3). */
+type T3GateVerdict =
+  | {
+      readonly kind: "PERMIT_READY";
+      readonly dispatchToken: string;
+      readonly wireVariables: unknown;
+    }
+  | { readonly kind: "WAIT"; readonly reason: CapacityWait }
+  | { readonly kind: "ABORTED"; readonly reasonCode: string };
+
 /** T3 (9.2): the write-ahead gate in ONE transaction (lock_timeout 2 s via
  *  withOwnershipTx). Any thrown error — lock timeout, serialization, an
  *  unknown commit outcome — is a NO-DECISION: the caller MUST NOT send.
  *  The DispatchPermit is minted only after the transaction promise
- *  resolves. */
+ *  resolves: an unacknowledged commit can never produce one. */
 export async function openDispatchGate(
   rowId: string,
   leaseToken: string,
   opts: { monotonicNow?: () => number } = {},
   db: PrismaClient = defaultDb,
 ): Promise<T3Outcome> {
-  const mono = opts.monotonicNow ?? (() => Date.now());
-  const outcome = await withOwnershipTx(db, async (tx): Promise<T3Outcome> => {
+  // The permit's 10-second validity is measured on a monotonic clock, never
+  // the wall clock: an NTP step or a manual clock change cannot stretch or
+  // forge it. The injected seam keeps tests deterministic.
+  const mono = opts.monotonicNow ?? (() => performance.now());
+  const verdict = await withOwnershipTx(db, async (tx): Promise<T3GateVerdict> => {
     await setActor(tx);
     const [h] = await tx.$queryRawUnsafe<PreparedHead[]>(
       `${PREPARED_HEAD_SQL} WHERE "id" = $1 FOR UPDATE`, rowId);
@@ -705,11 +740,27 @@ export async function openDispatchGate(
       throw new OwnershipLostError(`shipping-refund T3 row lost for ${rowId}`);
     }
     return {
-      kind: "PERMIT",
-      permit: DispatchPermit.issue(rowId, dispatchToken, h.wireVariables, mono),
+      kind: "PERMIT_READY",
+      dispatchToken,
+      wireVariables: h.wireVariables,
     };
   });
-  return outcome;
+  // 9.3: the single mint site — reached only when the T3 transaction
+  // promise resolved. Any thrown outcome (unknown commit acknowledgement,
+  // lock loss, any error) skips this line, so no permit can exist for an
+  // unacknowledged T3 or for a DISPATCHING row merely read from the
+  // database.
+  if (verdict.kind !== "PERMIT_READY") return verdict;
+  return {
+    kind: "PERMIT",
+    permit: DispatchPermit.issue(
+      T3_COMMIT_AUTHORITY,
+      rowId,
+      verdict.dispatchToken,
+      verdict.wireVariables,
+      mono,
+    ),
+  };
 }
 
 // ── The single send (9.3, 10.5) ──────────────────────────────────────────

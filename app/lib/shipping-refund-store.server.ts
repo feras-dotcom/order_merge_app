@@ -1252,6 +1252,9 @@ export interface PreparedSweepResult {
    *  (someone else owns the row, or it settled first). */
   readonly skippedIds: readonly string[];
   readonly errors: readonly { readonly id: string; readonly error: string }[];
+  /** Present only on a dry run: the ids the selection query WOULD sweep.
+   *  Nothing is leased, aborted or written. */
+  readonly candidateIds?: readonly string[];
 }
 
 /**
@@ -1269,7 +1272,7 @@ export interface PreparedSweepResult {
  * the fenced abort update.
  */
 export async function sweepPreparedHorizon(
-  opts: { readonly shop?: string | null; readonly limit?: number } = {},
+  opts: { readonly shop?: string | null; readonly limit?: number; readonly dryRun?: boolean } = {},
   db: PrismaClient = defaultDb,
   log: ShippingRefundClaimLogger = defaultLog,
 ): Promise<PreparedSweepResult> {
@@ -1299,6 +1302,10 @@ export async function sweepPreparedHorizon(
       AND (${shop}::text IS NULL OR sr."shop" = ${shop})
     ORDER BY sr."sourceCancelledAt" ASC, sr."id" ASC
     LIMIT ${limit}`;
+
+  if (opts.dryRun === true) {
+    return { intact: true, abortedIds: [], skippedIds: [], errors: [], candidateIds: due.map((r) => r.id) };
+  }
 
   const abortedIds: string[] = [];
   const skippedIds: string[] = [];

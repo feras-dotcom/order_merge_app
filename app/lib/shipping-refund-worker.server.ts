@@ -12,6 +12,9 @@ import defaultDb from "../db.server";
 import { OwnershipLostError } from "./ownership.server";
 import type { AdminClient } from "./graphql.server";
 import { dryRunSessionUsable, readOnlyAdmin } from "./shipping-shadow.server";
+import { runShippingRefundAdmissionScan } from "./shipping-refund-admission.server";
+import { runShippingRefundReconcileCycle } from "./shipping-refund-reconcile.server";
+import { POST_DISPATCH_ENTRY_STATUS } from "./shipping-refund-gate";
 import {
   Q_RECHECK, Q_REFUND_DETAIL, DETAIL_IDS_PER_REQUEST, DETAIL_REQUESTS_PER_EVALUATION,
   validateRefundDetailResponse,
@@ -34,7 +37,8 @@ export interface ShippingRefundDispatchCycleDeps {
    *  N12) — never a findFirst({isOnline:false}). */
   sessionLoader?: (shop: string) => Promise<{ expires: Date | null } | null>;
   log?: (line: string) => void;
-  /** Permit clock seam (tests only — production uses Date.now()). */
+  /** Permit clock seam (tests only — production uses the monotonic
+   *  performance clock inside the dispatch module). */
   monotonicNow?: () => number;
   rowLimit?: number;
   db?: PrismaClient;
@@ -267,4 +271,131 @@ export async function runShippingRefundDispatchCycle(
     }
   }
   return { enabled: true, rows: due.length, outcomes };
+}
+
+// ── The in-process scheduling lifecycle (3.1, 3.4, 4.8) ─────────────────
+
+/** One loop iteration interval; ±25% jitter like the merge sweeper. */
+export const SHIPPING_REFUND_LOOP_INTERVAL_MS = 60_000;
+
+export interface ShippingRefundLoopDeps {
+  adminFactory?: (shop: string) => Promise<AdminClient | null>;
+  log?: (line: string) => void;
+  db?: PrismaClient;
+}
+
+/** Offline admin client for the scheduled loop — the same lazy
+ *  unauthenticated.admin the operator CLI uses. Imported lazily so this
+ *  module stays loadable in tests without the full Shopify app setup. */
+const loopAdminFactory = async (shop: string): Promise<AdminClient | null> => {
+  const { unauthenticated } = await import("../shopify.server");
+  const { admin } = await unauthenticated.admin(shop);
+  return admin;
+};
+
+/** One iteration of the refund loop (3.4): reconciliation FIRST — it is
+ *  read-only toward Shopify, runs regardless of every switch (4.8, 12),
+ *  and clears in-flight rows before capacity is considered — then, only
+ *  when MERGESHIP_SHIPPING_REFUNDS=enabled, the admission scan (its own
+ *  per-shop gate rechecks every DB control) and the dispatch cycle. Each
+ *  phase is inside its own error boundary (3.3): a failure in one cannot
+ *  stop the others and nothing propagates to the loop. The PREPARED
+ *  horizon sweep is deliberately NOT called (7.6.1: explicit invocation
+ *  only). */
+export async function runShippingRefundLoopOnce(
+  deps: ShippingRefundLoopDeps = {},
+): Promise<void> {
+  const db = deps.db ?? defaultDb;
+  const log = deps.log ?? console.error;
+  const adminFactory = deps.adminFactory ?? loopAdminFactory;
+
+  try {
+    const shops = await db.$queryRaw<{ shop: string }[]>`
+      SELECT DISTINCT "shop" FROM "ShippingRefund"
+      WHERE "status" IN (${POST_DISPATCH_ENTRY_STATUS},'IN_DOUBT','REFUND_RECORDED')`;
+    if (shops.length > 0) {
+      await runShippingRefundReconcileCycle(
+        shops.map((r) => r.shop),
+        { adminFactory, log },
+        db,
+      );
+    }
+  } catch (e) {
+    log(`[shipping-refund] reconcile cycle failed: ${String(e).slice(0, 200)}`);
+  }
+
+  if (!shippingRefundsDispatchEnabled()) return;
+
+  try {
+    const optedIn = await db.$queryRaw<{ shop: string }[]>`
+      SELECT "shop" FROM "Settings" WHERE "shippingAdjustmentEnabled" = true`;
+    if (optedIn.length > 0) {
+      await runShippingRefundAdmissionScan(
+        optedIn.map((r) => r.shop),
+        { adminFactory, log },
+        db,
+      );
+    }
+  } catch (e) {
+    log(`[shipping-refund] admission cycle failed: ${String(e).slice(0, 200)}`);
+  }
+
+  try {
+    await runShippingRefundDispatchCycle({ adminFactory, log, db });
+  } catch (e) {
+    log(`[shipping-refund] dispatch cycle failed: ${String(e).slice(0, 200)}`);
+  }
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __mergeshipShippingRefundWorkerStarted: boolean | undefined;
+}
+
+/** Starts the refund loop once per process (3.1: own module and timer,
+ *  never inside runSweepOnce). Disabled by default: with
+ *  MERGESHIP_SHIPPING_REFUNDS unset the loop performs no admission and no
+ *  dispatch — only the read-only reconciliation phase runs, and only for
+ *  rows that already carry dispatch evidence. No-op under tests and when
+ *  DISABLE_BACKGROUND_WORKER=true (e.g. one-off deploy/debug shells). */
+export function startShippingRefundWorker(): void {
+  if (globalThis.__mergeshipShippingRefundWorkerStarted) return;
+  globalThis.__mergeshipShippingRefundWorkerStarted = true;
+  if (
+    process.env.DISABLE_BACKGROUND_WORKER === "true" ||
+    process.env.VITEST ||
+    process.env.NODE_ENV === "test"
+  ) {
+    return;
+  }
+
+  let stopping = false;
+  let running = false;
+
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await runShippingRefundLoopOnce();
+    } catch (err) {
+      console.error(
+        `[shipping-refund] loop failed: ${err instanceof Error ? err.message : err}`,
+      );
+    } finally {
+      running = false;
+      schedule();
+    }
+  };
+
+  const schedule = () => {
+    if (stopping) return;
+    const delay = SHIPPING_REFUND_LOOP_INTERVAL_MS * (0.75 + Math.random() * 0.5);
+    // Unref'd: the loop must never keep the process alive on its own.
+    setTimeout(() => void tick(), delay).unref();
+  };
+
+  // Stop scheduling on shutdown; in-flight work is left to its leases.
+  process.once("SIGTERM", () => (stopping = true));
+  process.once("SIGINT", () => (stopping = true));
+  schedule();
 }

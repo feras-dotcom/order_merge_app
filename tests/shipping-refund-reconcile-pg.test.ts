@@ -1034,7 +1034,7 @@ describe.skipIf(!TEST_URL)(
       expect(logs.some((l) => l.includes("triggers-not-intact"))).toBe(true);
     });
 
-    it("the transition writer re-checks the catalog inside its own transaction", async () => {
+    it("the transition writer re-checks the catalog inside its own transaction", async () => { // scratch-database DDL needs more than the 5 s default on a slow host
       // The catalog mutation runs on an authorized scratch database —
       // the shared suite database's trigger catalog is never touched.
       await withMarkedScratchDatabase(
@@ -1091,7 +1091,7 @@ describe.skipIf(!TEST_URL)(
           }
         },
       );
-    });
+    }, 30_000);
 
     it("repeated reconciliation is idempotent — no double-adopt, no extra events", async () => {
       const shop = uniqueShop();

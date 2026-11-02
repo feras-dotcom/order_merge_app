@@ -1116,6 +1116,8 @@ describe("dispatch path confined to the S2 modules", () => {
       // The admission scan legitimately names the dispatch module's path
       // in its import for the pre-freeze capacity precheck (8.4).
       "app/lib/shipping-refund-admission.server.ts",
+      // entry.server starts the worker's own timer (3.1, 3.4).
+      "app/entry.server.tsx",
       "scripts/shipping-refund-admin.ts",
     ]);
     const banned = /\b(DispatchPermit|sendRefund|shipping[-_]?refund[-_]?(dispatch|worker)|MERGESHIP_SHIPPING_REFUNDS)\b/i;
@@ -1135,6 +1137,39 @@ describe("dispatch path confined to the S2 modules", () => {
     }
     expect(offenders).toEqual([]);
     expect(mutationText).toEqual([]);
+  });
+
+  it("new DispatchPermit appears exactly once, inside the dispatch module (9.3)", () => {
+    // The permit is a module-private mint: one construction site in the
+    // dispatcher, reached only through the module-private authority after
+    // the T3 promise resolves. No other source may construct one.
+    const sites: string[] = [];
+    for (const root of ["app", "scripts"]) {
+      for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
+        const text = significantText(readFileSync(f, "utf8"), "ts");
+        const n = (text.match(/\bnew\s+DispatchPermit\b/g) ?? []).length;
+        if (n > 0) sites.push(`${relative(REPO_ROOT, f).replace(/\\/g, "/")} x${n}`);
+      }
+    }
+    expect(sites).toEqual(["app/lib/shipping-refund-dispatch.server.ts x1"]);
+  });
+
+  it("DispatchPermit.issue is referenced only inside the dispatch module and its tests (9.3)", () => {
+    const ALLOWED = new Set([
+      "app/lib/shipping-refund-dispatch.server.ts",
+      "tests/shipping-refund-dispatch.test.ts",
+      "tests/shipping-refund-trigger-manifest.test.ts",
+    ]);
+    const offenders: string[] = [];
+    for (const root of ["app", "scripts", "tests"]) {
+      for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
+        const rel = relative(REPO_ROOT, f).replace(/\\/g, "/");
+        if (ALLOWED.has(rel)) continue;
+        const text = significantText(readFileSync(f, "utf8"), "ts");
+        if (/DispatchPermit\s*\.\s*issue\b/.test(text)) offenders.push(rel);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
   it("the mutation document text accessor is referenced only inside the contract and the dispatcher (3.2 rule 5, I15)", () => {

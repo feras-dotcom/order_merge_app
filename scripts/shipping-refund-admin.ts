@@ -11,7 +11,7 @@
 //   npx vite-node --script scripts/shipping-refund-admin.ts approve-hash --row ID --hash SHA --by WHO --apply
 //   npx vite-node --script scripts/shipping-refund-admin.ts sweep-prepared-horizon [--shop S] [--limit N] --apply
 //   npx vite-node --script scripts/shipping-refund-admin.ts resolve --row ID --by WHO --resolution X --note TEXT --apply
-//   npx vite-node --script scripts/shipping-refund-admin.ts worker   (one dispatch cycle; inert unless the worker env flag is enabled)
+//   npx vite-node --script scripts/shipping-refund-admin.ts worker --apply   (one dispatch cycle; inert unless the worker env flag is enabled)
 import defaultDb from "../app/db.server";
 import { DB_WALL } from "../app/lib/ownership.server";
 import {
@@ -20,7 +20,10 @@ import {
   sweepPreparedHorizon,
 } from "../app/lib/shipping-refund-store.server";
 import { REQUIRED_ACK_VERSION } from "../app/lib/shipping-refund-gate";
-import { runShippingRefundDispatchCycle } from "../app/lib/shipping-refund-worker.server";
+import {
+  runShippingRefundDispatchCycle,
+} from "../app/lib/shipping-refund-worker.server";
+import { shippingRefundsDispatchEnabled } from "../app/lib/shipping-refund-dispatch.server";
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -162,11 +165,16 @@ async function main() {
       return;
     }
     case "sweep-prepared-horizon": {
+      // Mutating (PREPARED -> ABORTED): dry-run by default, --apply required (4.9).
       const r = await sweepPreparedHorizon(
-        { shop: get("--shop") ?? null, limit: get("--limit") ? Number(get("--limit")) : undefined },
+        {
+          shop: get("--shop") ?? null,
+          limit: get("--limit") ? Number(get("--limit")) : undefined,
+          dryRun: !APPLY,
+        },
         db,
       );
-      console.log(JSON.stringify(r));
+      console.log(JSON.stringify({ dryRun: !APPLY, ...r }));
       return;
     }
     case "resolve": {
@@ -178,6 +186,24 @@ async function main() {
       return;
     }
     case "worker": {
+      // Mutating: a dispatch cycle can lease, T3, send and T4 — so manual
+      // invocation is opt-in like every other mutating command (4.9).
+      // Without --apply this reports the same read-only facts `status`
+      // would show for the pending work and exits; no cycle runs, no T3,
+      // no send, no write. The scheduled in-process loop (entry.server)
+      // does not pass through this CLI and is unaffected.
+      if (!APPLY) {
+        const [due] = await db.$queryRaw<{ n: bigint }[]>`
+          SELECT count(*) AS "n" FROM "ShippingRefund"
+          WHERE "status" = 'PREPARED'
+            AND ("nextCheckAt" IS NULL OR "nextCheckAt" <= ${DB_WALL})`;
+        console.log(JSON.stringify({
+          dryRun: true,
+          enabled: shippingRefundsDispatchEnabled(),
+          duePrepared: Number(due?.n ?? 0),
+        }));
+        return;
+      }
       const { unauthenticated } = await import("../app/shopify.server");
       const r = await runShippingRefundDispatchCycle({
         adminFactory: async (shop) => (await unauthenticated.admin(shop)).admin,

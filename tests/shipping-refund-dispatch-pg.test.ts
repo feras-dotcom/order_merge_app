@@ -13,6 +13,7 @@ import {
 } from "./helpers/disposable-db";
 import {
   classifyDispatchResponse,
+  DISPATCH_PERMIT_TTL_MS,
   leasePreparedShippingRefund,
   listDuePreparedShippingRefunds,
   openDispatchGate,
@@ -121,8 +122,10 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
   }
 
   /** A constraint-valid PREPARED row: frozen contract matching this build,
-   *  snapshot epochs mirroring seedGate, a lease granted via the store. */
-  async function seedPrepared(s: string, o: { sourceCancelledAt?: string; amount?: string; approvedHash?: boolean } = {}) {
+   *  snapshot epochs mirroring seedGate, a lease granted via the store.
+   *  `noLease` skips the lease step (for rows whose horizon state would
+   *  make the normal lease refuse); the caller stamps a lease itself. */
+  async function seedPrepared(s: string, o: { sourceCancelledAt?: string; amount?: string; approvedHash?: boolean; noLease?: boolean } = {}) {
     const id = `sr_${randomUUID().replace(/-/g, "")}`;
     const key = generateIdempotencyKey();
     const m = "MS-SHIPREFUND-" + key;
@@ -175,6 +178,9 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
     if (o.approvedHash) {
       const ok = await recordApprovedWireHash(id, wireHash, "op", db);
       if (!ok) throw new Error("seed approval failed");
+    }
+    if (o.noLease) {
+      return { id, shop: s, key, wireHash, wireVariables, leaseToken: "", sourceOrderId, primaryOrderId, parentId };
     }
     const lease = await leasePreparedShippingRefund(id, {}, db);
     if (!lease.leased) throw new Error(`seed lease failed: ${lease.reason}`);
@@ -360,6 +366,270 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
     const names = await db.$queryRaw<{ tgname: string }[]>`
       SELECT t.tgname FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgname LIKE 'shippingrefund%' ORDER BY 1`;
     expect(names.map((n) => n.tgname).sort()).toEqual([...SHIPPING_REFUND_TRIGGER_MANIFEST.map((e) => e.name)].sort());
+    cleanupEnv();
+  });
+
+  // ── 20.2 fault injection: exactly-once, unknown outcomes, recovery ──
+
+  /** A fake admin that fails the wire call in one of the fault modes of
+   *  10.5 — the first two resolve with error bodies (what the wire client
+   *  surfaces for throttled/server errors), the rest throw like a broken
+   *  connection or an aborted/timed-out request. */
+  const failureAdmin = (mode: "429" | "503" | "reset" | "abort" | "timeout") => {
+    let calls = 0;
+    const admin = {
+      graphql: async () => {
+        calls += 1;
+        if (mode === "429") return { json: async () => ({ errors: [{ message: "Throttled" }], data: null }) };
+        if (mode === "503") return { json: async () => ({ errors: [{ message: "Service Unavailable" }], data: null }) };
+        if (mode === "reset") throw new Error("read ECONNRESET");
+        if (mode === "abort") { const e = new Error("The operation was aborted"); e.name = "AbortError"; throw e; }
+        const e = new Error("The request timed out"); e.name = "TimeoutError"; throw e;
+      },
+    } as never;
+    return { admin, calls: () => calls };
+  };
+
+  /** Counts only calls to the pinned mutation document — reads for R2 or
+   *  reconciliation are not the wire request being bounded. */
+  const mutationCountingAdmin = (body: unknown = {}) => {
+    let mutationCalls = 0;
+    let allCalls = 0;
+    const admin = {
+      graphql: async (doc: string) => {
+        allCalls += 1;
+        if (doc === shippingRefundMutationDocument()) {
+          mutationCalls += 1;
+          return { json: async () => body };
+        }
+        return { json: async () => ({}) };
+      },
+    } as never;
+    return { admin, mutationCalls: () => mutationCalls, allCalls: () => allCalls };
+  };
+
+  /** A db whose interactive $transaction runs `inner` on the REAL client —
+   *  used to make the commit actually happen while the promise the caller
+   *  awaited rejects (the lost-acknowledgement case), or to fail the call
+   *  outright (the dead-database case). */
+  const sabotageTransactions = (
+    inner: (run: () => Promise<unknown>) => Promise<unknown>,
+  ): PrismaClient =>
+    new Proxy(db, {
+      get(t, p) {
+        if (p === "$transaction") {
+          return (fn: never, opts: never) =>
+            inner(() => (db.$transaction as unknown as (f: never, o: never) => Promise<unknown>)(fn, opts));
+        }
+        const v = (t as unknown as Record<PropertyKey, unknown>)[p];
+        return typeof v === "function" ? (v as CallableFunction).bind(t) : v;
+      },
+    }) as PrismaClient;
+
+  it("exactly one wire call per dispatch under 429, 503, connection reset, abort and timeout (10.5)", async () => {
+    const s = shop(); await seedGate(s);
+    for (const mode of ["429", "503", "reset", "abort", "timeout"] as const) {
+      const r = await seedPrepared(s, { approvedHash: true });
+      const t3 = await openDispatchGate(r.id, r.leaseToken, {}, db);
+      if (t3.kind !== "PERMIT") throw new Error(`expected permit for mode ${mode}`);
+      const { admin, calls } = failureAdmin(mode);
+      await sendRefund(t3.permit, admin).catch(() => {});
+      expect(calls(), `mode ${mode}`).toBe(1);
+      // The consumed permit can never issue a second request.
+      await sendRefund(t3.permit, admin).catch(() => {});
+      expect(calls(), `mode ${mode} re-use`).toBe(1);
+      // Resolve this row's breaker so the next mode's T3 is not a capacity wait.
+      await resolveInflightDispatches();
+    }
+    cleanupEnv();
+  });
+
+  it("a real permit is single-use and expires on the monotonic clock (9.3)", async () => {
+    const s = shop(); await seedGate(s);
+    const r = await seedPrepared(s, { approvedHash: true });
+    const t3 = await openDispatchGate(r.id, r.leaseToken, {}, db);
+    if (t3.kind !== "PERMIT") throw new Error("expected permit");
+    const { admin, calls } = fakeAdmin(accept(refundGid(++seq)));
+    await sendRefund(t3.permit, admin);
+    expect(calls()).toBe(1);
+    await expect(sendRefund(t3.permit, admin)).rejects.toThrow(/single-use/);
+    expect(calls()).toBe(1);
+    // Clear this row's unresolved dispatch so the next T3 is not a capacity wait.
+    await resolveInflightDispatches();
+
+    const r2 = await seedPrepared(s, { approvedHash: true });
+    const now = { t: 10_000 };
+    const t3b = await openDispatchGate(r2.id, r2.leaseToken, { monotonicNow: () => now.t }, db);
+    if (t3b.kind !== "PERMIT") throw new Error("expected second permit");
+    now.t += DISPATCH_PERMIT_TTL_MS + 1;
+    const dead = failureAdmin("reset");
+    await expect(sendRefund(t3b.permit, dead.admin)).rejects.toThrow(/expired/);
+    expect(dead.calls()).toBe(0);
+    expect((await rowStatus(r2.id)).status).toBe("DISPATCHING");
+    cleanupEnv();
+  });
+
+  it("an unknown T3 commit acknowledgement produces no permit and zero sends (9.3, 13)", async () => {
+    const s = shop(); await seedGate(s);
+    const r = await seedPrepared(s, { approvedHash: true });
+    // The transaction REALLY commits — the row is left DISPATCHING, the
+    // ambiguous durable state of section 13 — but the promise the caller
+    // awaited rejects, exactly like a connection lost at COMMIT.
+    const flaky = sabotageTransactions(async (run) => {
+      await run();
+      throw new Error("commit acknowledgement lost");
+    });
+    const { calls } = fakeAdmin(accept(refundGid(++seq)));
+    await expect(openDispatchGate(r.id, r.leaseToken, {}, flaky)).rejects.toThrow(/acknowledgement/);
+    expect(calls()).toBe(0);
+    expect((await rowStatus(r.id)).status).toBe("DISPATCHING");
+    // The recovered DISPATCHING row can never produce a permit or a send:
+    // not due, not leaseable, and the gate aborts it.
+    expect((await listDuePreparedShippingRefunds(100, db)).map((d) => d.id)).not.toContain(r.id);
+    expect(await leasePreparedShippingRefund(r.id, {}, db)).toMatchObject({ leased: false, reason: "NOT_PREPARED" });
+    expect(await openDispatchGate(r.id, "any", {}, db)).toMatchObject({ kind: "ABORTED", reasonCode: "NOT_PREPARED" });
+    expect(calls()).toBe(0);
+    cleanupEnv();
+  });
+
+  it("a response lost after Shopify applied the refund never causes a resend (11, 13)", async () => {
+    const s = shop(); await seedGate(s);
+    const r = await seedPrepared(s, { approvedHash: true });
+    const t3 = await openDispatchGate(r.id, r.leaseToken, {}, db);
+    if (t3.kind !== "PERMIT") throw new Error("expected permit");
+    // The wire request applies the refund; the response never comes back.
+    let applied = 0;
+    const admin = {
+      graphql: async () => { applied += 1; throw new Error("response dropped on the wire"); },
+    } as never;
+    await sendRefund(t3.permit, admin).catch(() => {});
+    expect(applied).toBe(1);
+    const outcome = classifyDispatchResponse(null); // TRANSPORT — no body arrived
+    const t4 = await recordDispatchOutcome(r.id, t3.permit.dispatchToken, outcome, {}, db);
+    expect(t4.wrote).toBe(true);
+    expect((await rowStatus(r.id)).status).toBe("IN_DOUBT");
+    // Every avenue to a second send refuses, including a whole worker cycle.
+    expect((await listDuePreparedShippingRefunds(100, db)).map((d) => d.id)).not.toContain(r.id);
+    expect(await leasePreparedShippingRefund(r.id, {}, db)).toMatchObject({ leased: false });
+    expect(await openDispatchGate(r.id, "x", {}, db)).toMatchObject({ kind: "ABORTED" });
+    const counter = mutationCountingAdmin(accept(refundGid(++seq)));
+    await runShippingRefundDispatchCycle({
+      db,
+      adminFactory: async () => counter.admin,
+      sessionLoader: async () => ({ expires: new Date("2030-01-10T00:00:00Z") }),
+    });
+    expect(counter.mutationCalls()).toBe(0);
+    expect(applied).toBe(1);
+    cleanupEnv();
+  });
+
+  it("a crash after T3 never lets another worker dispatch the same row (13)", async () => {
+    const s = shop(); await seedGate(s);
+    const r = await seedPrepared(s, { approvedHash: true });
+    // Worker A commits T3; its permit dies with the simulated crash and is
+    // simply never used.
+    const t3 = await openDispatchGate(r.id, r.leaseToken, {}, db);
+    expect(t3.kind).toBe("PERMIT");
+    // Worker B sees only a DISPATCHING row: no lease, not due, gate aborts.
+    expect(await leasePreparedShippingRefund(r.id, {}, db)).toMatchObject({ leased: false, reason: "NOT_PREPARED" });
+    expect(await openDispatchGate(r.id, "x", {}, db)).toMatchObject({ kind: "ABORTED" });
+    const counter = mutationCountingAdmin(accept(refundGid(++seq)));
+    await runShippingRefundDispatchCycle({
+      db,
+      adminFactory: async () => counter.admin,
+      sessionLoader: async () => ({ expires: new Date("2030-01-10T00:00:00Z") }),
+    });
+    expect(counter.mutationCalls()).toBe(0);
+    expect((await rowStatus(r.id)).status).toBe("DISPATCHING");
+    cleanupEnv();
+  });
+
+  it("T4 write exhaustion leaves DISPATCHING — recoverable by the late write, never resendable (9.4)", async () => {
+    const s = shop(); await seedGate(s);
+    const r = await seedPrepared(s, { approvedHash: true });
+    const t3 = await openDispatchGate(r.id, r.leaseToken, {}, db);
+    if (t3.kind !== "PERMIT") throw new Error("expected permit");
+    const { admin, calls } = fakeAdmin(accept(refundGid(++seq)));
+    const outcome = classifyDispatchResponse(await sendRefund(t3.permit, admin));
+    expect(outcome.kind).toBe("ACCEPTED");
+    // All three in-process T4 attempts hit a dead database.
+    const dead = sabotageTransactions(() => Promise.reject(new Error("db down")));
+    const t4 = await recordDispatchOutcome(
+      r.id, t3.permit.dispatchToken, outcome, { sleep: async () => {} }, dead,
+    );
+    expect(t4).toMatchObject({ wrote: false, reason: "WRITE_FAILED" });
+    expect((await rowStatus(r.id)).status).toBe("DISPATCHING");
+    expect(calls()).toBe(1);
+    // The sender's late T4 still writes (token-fenced) — recovery needs no resend.
+    const t4b = await recordDispatchOutcome(r.id, t3.permit.dispatchToken, outcome, {}, db);
+    expect(t4b.wrote).toBe(true);
+    expect((await rowStatus(r.id)).status).toBe("REFUND_RECORDED");
+    expect(calls()).toBe(1);
+    cleanupEnv();
+  });
+
+  it("the seven-day horizon is enforced inside T3 itself (8.4, 9.2)", async () => {
+    const s = shop(); await seedGate(s);
+    // A row whose source cancelledAt is already past the horizon, holding a
+    // lease stamped directly (the normal lease path would abort it first —
+    // this simulates a lease acquired before the boundary passed).
+    const r = await seedPrepared(s, { sourceCancelledAt: "2020-01-01T00:00:00Z", noLease: true });
+    const held = `held-${r.id}`;
+    await db.$executeRaw`
+      UPDATE "ShippingRefund" SET "leaseToken" = ${held},
+        "leasedUntil" = clock_timestamp() AT TIME ZONE 'UTC' + interval '1 hour',
+        "updatedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+      WHERE "id" = ${r.id}`;
+    const t3 = await openDispatchGate(r.id, held, {}, db);
+    expect(t3).toMatchObject({ kind: "ABORTED", reasonCode: "HORIZON_EXPIRED" });
+    const st = await rowStatus(r.id);
+    expect(st.status).toBe("ABORTED");
+    expect(st.dispatchToken).toBeNull();
+    cleanupEnv();
+  });
+
+  it("the per-shop daily cap admits one dispatch and waits the rest under competition (4.6, 9.2)", async () => {
+    const s = shop(); await seedGate(s, { cap: 1 });
+    const a = await seedPrepared(s, { approvedHash: true });
+    const b = await seedPrepared(s, { approvedHash: true });
+    const t3a = await openDispatchGate(a.id, a.leaseToken, {}, db);
+    if (t3a.kind !== "PERMIT") throw new Error("expected permit");
+    const outcome = classifyDispatchResponse(accept(refundGid(++seq)));
+    await recordDispatchOutcome(a.id, t3a.permit.dispatchToken, outcome, {}, db);
+    // Resolve row a so the breaker clears; its dispatchedAt still counts.
+    await resolveInflightDispatches();
+    const t3b = await openDispatchGate(b.id, b.leaseToken, {}, db);
+    expect(t3b).toMatchObject({ kind: "WAIT", reason: "SHOP_CAP_REACHED" });
+    const st = await rowStatus(b.id);
+    expect(st.status).toBe("PREPARED");
+    expect(st.attempts).toBe(0);
+    cleanupEnv();
+  });
+
+  it("the global daily cap binds across competing shops (4.6, 9.2)", async () => {
+    const s1 = shop(), s2 = shop();
+    // The 24h count is global: seed the cap relative to the dispatches
+    // earlier tests already recorded, so the first dispatch fits and the
+    // second does not.
+    const [cur] = await db.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*) AS "n" FROM "ShippingRefund"
+      WHERE "dispatchedAt" IS NOT NULL
+        AND "dispatchedAt" > (clock_timestamp() AT TIME ZONE 'UTC' - INTERVAL '24 hours')`;
+    await seedGate(s1, { globalCap: Number(cur.n) + 1 });
+    await seedGate(s2, { globalCap: Number(cur.n) + 1 });
+    await db.$executeRaw`
+      UPDATE "AppControl" SET "shippingAllowShops" = ARRAY[${s1},${s2}]::text[]
+      WHERE "id" = 'control'`;
+    const a = await seedPrepared(s1, { approvedHash: true });
+    const b = await seedPrepared(s2, { approvedHash: true });
+    const t3a = await openDispatchGate(a.id, a.leaseToken, {}, db);
+    if (t3a.kind !== "PERMIT") throw new Error("expected permit");
+    const outcome = classifyDispatchResponse(accept(refundGid(++seq)));
+    await recordDispatchOutcome(a.id, t3a.permit.dispatchToken, outcome, {}, db);
+    await resolveInflightDispatches();
+    const t3b = await openDispatchGate(b.id, b.leaseToken, {}, db);
+    expect(t3b).toMatchObject({ kind: "WAIT", reason: "GLOBAL_CAP_REACHED" });
+    expect((await rowStatus(b.id)).status).toBe("PREPARED");
     cleanupEnv();
   });
 });

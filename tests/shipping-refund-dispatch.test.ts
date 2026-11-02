@@ -1,77 +1,46 @@
-// Focused S2 tests: DispatchPermit semantics (9.3), response
-// classification (11) and exactly-one-send transport behavior (10.5) —
-// no database, fake admin clients only.
+// Focused S2 tests: DispatchPermit authorization (9.3), response
+// classification (11) and the environment flag — no database needed.
+// Permit-dependent send semantics (single-use, expiry, pinned document,
+// wire counts) run against real permits in the disposable-database suite
+// tests/shipping-refund-dispatch-pg.test.ts, because a permit can now be
+// obtained only from a resolved T3 commit — there is no test mint.
 import { describe, expect, it } from "vitest";
 import {
   DispatchPermit,
   classifyDispatchResponse,
-  sendRefund,
-  DISPATCH_PERMIT_TTL_MS,
   shippingRefundsDispatchEnabled,
 } from "../app/lib/shipping-refund-dispatch.server";
-import { shippingRefundMutationDocument } from "../app/lib/shipping-refund-contract";
 
 const WIRE_VARS = {
   idempotencyKey: "76657d42-302c-43de-af25-fbc615f39cbf",
   input: { orderId: "gid://shopify/Order/1" },
 };
 
-const permit = (now: { t: number }) =>
-  DispatchPermit.issue("row1", "tok1", WIRE_VARS, () => now.t);
+describe("DispatchPermit authorization boundary (9.3, I19)", () => {
+  it("refuses every caller that cannot present the module-private T3 authority", () => {
+    for (const forged of [undefined, null, Symbol("t3-commit"), "row1", {}, 0]) {
+      expect(() =>
+        (DispatchPermit.issue as any)(forged, "row1", "tok1", WIRE_VARS, () => 0),
+      ).toThrow(/resolved T3 commit/);
+    }
+  });
 
-const fakeAdmin = (body: unknown, throws = false) => {
-  let calls = 0;
-  const admin = {
-    graphql: async (doc: string, opts: { variables: unknown }) => {
-      calls += 1;
-      if (throws) throw new Error("boom");
-      return { json: async () => body };
-    },
-  };
-  return { admin: admin as never, calls: () => calls };
-};
+  it("the pre-correction public-mint signature is itself refused", () => {
+    // The old bypass — DispatchPermit.issue(rowId, dispatchToken, vars,
+    // clock), callable from any module — now presents a row id where the
+    // module-private mint authority belongs.
+    expect(() =>
+      (DispatchPermit.issue as any)("row1", "tok1", WIRE_VARS, () => 0),
+    ).toThrow(/resolved T3 commit/);
+  });
 
-describe("DispatchPermit (9.3)", () => {
-  it("is single-use and marks consumed before the call", async () => {
-    const now = { t: 1000 };
-    const p = permit(now);
-    const { admin, calls } = fakeAdmin({ data: { refundCreate: { refund: { id: "gid://shopify/Refund/1" }, userErrors: [] } } });
-    await sendRefund(p, admin);
-    expect(calls()).toBe(1);
-    await expect(sendRefund(p, admin)).rejects.toThrow(/single-use/);
-    expect(calls()).toBe(1); // consumed before the wire: no second request
-  });
-  it("refuses a permit older than 10 seconds — the row simply stays DISPATCHING", async () => {
-    const now = { t: 1000 };
-    const p = permit(now);
-    now.t += DISPATCH_PERMIT_TTL_MS + 1;
-    const { admin, calls } = fakeAdmin({});
-    await expect(sendRefund(p, admin)).rejects.toThrow(/expired/);
-    expect(calls()).toBe(0);
-    expect(p.rowId).toBe("row1");
-    expect(p.dispatchToken).toBe("tok1");
-  });
-  it("refuses a consumed permit even after it expired", async () => {
-    const now = { t: 0 };
-    const p = permit(now);
-    p.consume();
-    now.t += 100_000;
-    await expect(sendRefund(p, fakeAdmin({}).admin)).rejects.toThrow(/single-use/);
-  });
-  it("sends the pinned document with the frozen variables and a 45s signal", async () => {
-    const now = { t: 0 };
-    const p = permit(now);
-    let seen: { doc?: string; vars?: unknown; signal?: AbortSignal } = {};
-    const admin = {
-      graphql: async (doc: string, opts: { variables: unknown; signal: AbortSignal }) => {
-        seen = { doc, vars: opts.variables, signal: opts.signal };
-        return { json: async () => ({}) };
-      },
-    } as never;
-    await sendRefund(p, admin);
-    expect(seen.doc).toBe(shippingRefundMutationDocument());
-    expect(seen.vars).toEqual(WIRE_VARS);
-    expect(seen.signal).toBeInstanceOf(AbortSignal);
+  it("direct construction is refused at runtime as well", () => {
+    // TypeScript-private is compile-time only: the constructor itself also
+    // demands the authority, so even a cast cannot forge a permit.
+    expect(() =>
+      new (DispatchPermit as any)("row1", "tok1", WIRE_VARS, 0, () => 0),
+    ).toThrow(/resolved T3 commit/);
+    expect(() => new (DispatchPermit as any)(Symbol("forged"), "r", "t", {}, 0, () => 0)).toThrow();
   });
 });
 
