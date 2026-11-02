@@ -18,7 +18,30 @@
 //   --refund <gid>       refund to inspect (Q-REFUND-DETAIL; <=5 per request);
 //                        repeatable; every id is order-bound by the reads
 //   --label <name>       purpose label stamped into artifact names
-//   --out <dir>          evidence dir (default docs/evidence/shipping-v0-e7)
+//   --out <dir>          evidence dir (default docs/evidence/shipping-v0-e7);
+//                        must live under docs/evidence inside the repo, and is
+//                        NEVER allowed to be or contain docs/evidence/shipping-v0
+//
+// Baseline + expectations (runbook §6): before any send, run with
+// --save-baseline to persist per-order baselines (refund ids/count/totals)
+// into the evidence dir; the file refuses to be overwritten. After the
+// send, re-run with the expectation flags below — the runner then writes an
+// expectations-<label>.json artifact whose overall verdict is PASS only
+// when the financial read-backs actually match the expected experiment
+// result, INCOMPLETE when evidence is missing/truncated, FAIL on a
+// definitive mismatch. A response-shape pass is never promoted to a
+// financial pass: expectations are checked against read-backs only.
+//
+//   --save-baseline                     persist baseline-<short>.json per --order
+//   --expect-new-refund <gid>           exactly this one new refund vs baseline
+//   --expect-order <gid>                its expected order
+//   --expect-parent <gid>               its REFUND txn's parent CAPTURE/SALE
+//   --expect-amount <decimal>           expected refund amount (e.g. 1.00)
+//   --expect-currency <code>            default USD
+//   --expect-shipping-delta <decimal>   expected added refunded shipping
+//   --expect-available-shipping <dec>   pre-send: remaining shipping >= this
+//   --require-agreements                agreement evidence must be complete
+//                                       and attribute the new refund for PASS
 //
 // Behavior (§17, §20.1.1, runbook §6):
 //   - refuses to run unless SHIPRB_STORE is exactly the approved
@@ -33,9 +56,13 @@
 //     completeness — incomplete evidence is recorded as INCOMPLETE, never
 //     passed off as complete;
 //   - per order: all agreement pages (bounded), each RefundAgreement linked
-//     to its refund.id with the agreement's app.id recorded verbatim;
+//     to its refund.id with the agreement's app.id recorded verbatim; the
+//     attribution observation preserves the 15-minute visibility rule —
+//     inside the window the observation is INCONCLUSIVE;
 //   - writes sanitized artifacts (the pinned selections carry no customer
-//     PII), a validation register, and MANIFEST.sha256 over every file;
+//     PII), a labelled validation register, and MANIFEST.sha256 over EVERY
+//     artifact already in the evidence dir — baselines, mutation responses
+//     and earlier read-backs accumulate, they are never dropped;
 //   - never touches docs/evidence/shipping-v0/ or its pinned manifest;
 //   - sends no mutations — any document containing the word is refused
 //     before the wire.
@@ -49,7 +76,7 @@
 // Env: SHIPRB_STORE (default ordermergetest2.myshopify.com), SHIPRB_VERSION
 // (default 2026-04), SHIPRB_OUT (overridden by --out).
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   Q_APPID, Q_RECONCILE, Q_REFUND_DETAIL, Q_AGREEMENTS,
@@ -57,11 +84,18 @@ import {
   validateRefundDetailResponse, validateAgreementsPage,
 } from "../app/lib/shipping-refund-queries";
 import { buildManifestLines, MANIFEST_NAME } from "./lib/evidence-manifest";
+import {
+  checkBaselineDelta, checkNewRefundFinancials, checkOrderGuard,
+  collectCampaignArtifacts, observeAttribution, overallVerdict,
+  parseMoneyMinor, resolveCampaignOutDir,
+  type CheckItem, type OrderBaseline,
+} from "./lib/campaign-checks";
 
 const EXPECTED_STORE = "ordermergetest2.myshopify.com";
 const EXPECTED_APP_GID = "gid://shopify/App/426185785345";
 const AGREEMENT_PAGE_BUDGET = 5;
 const DETAIL_IDS_PER_REQUEST = 5;
+const VISIBILITY_WINDOW_MS = 15 * 60 * 1000;
 
 // Campaign guard documents: supplementary read-only docs, each archived
 // under its own sha256 (Q-EVENTS-BASE precedent). Not part of the pinned
@@ -82,7 +116,7 @@ const Q_CAMPAIGN_ORDER_GUARD = {
     paymentGatewayNames
     totalShippingPriceSet { shopMoney { amount currencyCode } }
     totalRefundedShippingSet { shopMoney { amount currencyCode } }
-    transactions(first: 20) { kind status gateway test }
+    transactions(first: 50) { id kind status gateway test amountSet { shopMoney { amount currencyCode } } }
   }
 }`,
 } as const;
@@ -103,15 +137,28 @@ const collect = (flag: string): string[] => {
   return out;
 };
 const single = (flag: string): string | undefined => collect(flag).pop();
+const has = (flag: string): boolean => args.includes(flag);
 const ORDERS = collect("--order");
 const REFUNDS = collect("--refund");
 const LABEL = (single("--label") ?? "campaign").replace(/[^a-z0-9_-]+/gi, "_").toLowerCase();
-const OUT = single("--out") ?? process.env.SHIPRB_OUT ?? "docs/evidence/shipping-v0-e7";
+const OUT_ARG = single("--out") ?? process.env.SHIPRB_OUT ?? "docs/evidence/shipping-v0-e7";
+const SAVE_BASELINE = has("--save-baseline");
+const EXPECT_NEW_REFUND = single("--expect-new-refund");
+const EXPECT_ORDER = single("--expect-order");
+const EXPECT_PARENT = single("--expect-parent");
+const EXPECT_AMOUNT = single("--expect-amount");
+const EXPECT_CURRENCY = single("--expect-currency") ?? "USD";
+const EXPECT_SHIPPING_DELTA = single("--expect-shipping-delta");
+const EXPECT_AVAILABLE = single("--expect-available-shipping");
+const REQUIRE_AGREEMENTS = has("--require-agreements");
+const EXPECT_MODE = EXPECT_NEW_REFUND !== undefined;
 
 if (!ORDERS.length && !REFUNDS.length) {
   console.error(
     "usage: npx vite-node --script scripts/shipping-refund-campaign-readback.ts " +
-    "--label <name> [--order <gid> ...] [--refund <gid> ...] [--out <dir>]",
+    "--label <name> [--order <gid> ...] [--refund <gid> ...] [--out <dir>]\n" +
+    "       [--save-baseline] [--expect-new-refund <gid> --expect-order <gid> " +
+    "--expect-parent <gid> --expect-amount <dec> --expect-shipping-delta <dec>]",
   );
   process.exit(2);
 }
@@ -120,6 +167,25 @@ for (const gid of [...ORDERS, ...REFUNDS]) {
     throw new Error(`malformed gid argument: ${gid}`);
   }
 }
+if (EXPECT_MODE && (!EXPECT_ORDER || !EXPECT_PARENT || !EXPECT_AMOUNT || !EXPECT_SHIPPING_DELTA)) {
+  throw new Error(
+    "--expect-new-refund requires --expect-order, --expect-parent, " +
+    "--expect-amount and --expect-shipping-delta",
+  );
+}
+const EXPECT_AMOUNT_MINOR = EXPECT_AMOUNT !== undefined ? parseMoneyMinor(EXPECT_AMOUNT) : null;
+const EXPECT_SHIP_DELTA_MINOR = EXPECT_SHIPPING_DELTA !== undefined ? parseMoneyMinor(EXPECT_SHIPPING_DELTA) : null;
+const EXPECT_AVAILABLE_MINOR = EXPECT_AVAILABLE !== undefined ? parseMoneyMinor(EXPECT_AVAILABLE) : null;
+if (EXPECT_MODE && (EXPECT_AMOUNT_MINOR === null || EXPECT_SHIP_DELTA_MINOR === null)) {
+  throw new Error("expectation amounts must be decimal strings like 1.00");
+}
+if (EXPECT_AVAILABLE !== undefined && EXPECT_AVAILABLE_MINOR === null) {
+  throw new Error("--expect-available-shipping must be a decimal string like 2.00");
+}
+
+const outRes = resolveCampaignOutDir(REPO_ROOT, OUT_ARG);
+if (!outRes.ok) throw new Error(outRes.reason);
+const OUT = outRes.dir;
 
 interface ExecResult { data: unknown; errors: unknown; extensions: unknown }
 
@@ -199,6 +265,11 @@ const rec = (
   return r;
 };
 
+const orderNodes = new Map<string, Record<string, unknown>>();
+const refundNodes = new Map<string, Record<string, unknown>>();
+const agreementNodesByOrder = new Map<string, { nodes: Array<Record<string, unknown>>; complete: boolean }>();
+const expectationItems: CheckItem[] = [];
+
 async function main() {
   mkdirSync(OUT, { recursive: true });
 
@@ -232,22 +303,27 @@ async function main() {
   const refundOrderByReconcile = new Map<string, string>();
   for (const oid of ORDERS) {
     const short = oid.split("/").pop()!;
+    let guardOrder: Record<string, unknown> | null = null;
     try {
       const r = await execQuery(Q_CAMPAIGN_ORDER_GUARD, { id: oid });
-      const o = (r.data as { order?: Record<string, unknown> } | null)?.order;
-      const txns = (o?.transactions as Array<{ test?: boolean; gateway?: string }> | undefined) ?? [];
-      const guardOk = !!o && o.test === true && o.refundable === true && !hasErrors(r) &&
-        Array.isArray(o.paymentGatewayNames) && (o.paymentGatewayNames as string[]).length > 0 &&
-        (o.paymentGatewayNames as string[]).every((g) => g === "bogus") &&
-        txns.every((t) => t.test === true);
+      guardOrder = (r.data as { order?: Record<string, unknown> } | null)?.order ?? null;
+      const items = checkOrderGuard(guardOrder, {
+        expectedStoreOrderStatuses: ["PAID", "PARTIALLY_REFUNDED"],
+        minAvailableShippingMinor: EXPECT_AVAILABLE_MINOR ?? undefined,
+      });
+      const v = overallVerdict(items);
       rec(Q_CAMPAIGN_ORDER_GUARD, `order_${short}`, { id: oid }, r,
-        guardOk ? "PASS" : `FAIL: ${hasErrors(r) ? "top-level errors" : `test=${o?.test} refundable=${o?.refundable} gateways=${JSON.stringify(o?.paymentGatewayNames)} txTest=${txns.every((t) => t.test === true)}`}`,
-        { observed: o ?? null });
+        `${v}${v !== "PASS" ? `: ${items.filter((i) => i.verdict !== "PASS").map((i) => `${i.name} ${i.detail}`).join("; ")}` : ""}`,
+        { checks: items, observed: guardOrder });
+      if (EXPECT_AVAILABLE_MINOR !== undefined) {
+        expectationItems.push(...items.map((i) => ({ ...i, name: `order_${short}.${i.name}` })));
+      }
     } catch (e) { rec(Q_CAMPAIGN_ORDER_GUARD, `order_${short}`, { id: oid }, null, fail(e)); }
     try {
       const r = await execQuery(Q_RECONCILE, { source: oid });
       const v = validateRefundList({ data: r.data }, { sourceOrderId: oid });
       const order = (r.data as { order?: Record<string, unknown> } | null)?.order;
+      if (order) orderNodes.set(oid, order);
       const refunds = (order?.refunds as Array<{ id?: string }> | undefined) ?? [];
       for (const rf of refunds) if (rf?.id) refundOrderByReconcile.set(rf.id, oid);
       rec(Q_RECONCILE, `order_${short}`, { source: oid }, r,
@@ -261,6 +337,42 @@ async function main() {
           transactions: order?.transactions ?? null,
         });
     } catch (e) { rec(Q_RECONCILE, `order_${short}`, { source: oid }, null, fail(e)); }
+
+    // Baseline persistence: one immutable baseline file per order, in the
+    // evidence dir and manifest-covered. Refuses to overwrite — delete the
+    // file deliberately to re-baseline.
+    if (SAVE_BASELINE) {
+      const bf = `baseline-${short}.json`;
+      const bpath = join(OUT, bf);
+      if (existsSync(bpath)) {
+        rec({ name: "BASELINE", document: "" }, `order_${short}`, undefined, null,
+          `FAIL: ${bf} already exists — refusing to overwrite a persisted baseline`);
+      } else {
+        const o = orderNodes.get(oid);
+        const refunds = (o?.refunds as Array<{ id?: string }> | undefined) ?? [];
+        const baseline: OrderBaseline = {
+          orderId: oid,
+          runAtUtc: RUN,
+          refundIds: refunds.map((x) => x?.id).filter((x): x is string => typeof x === "string"),
+          totalRefundedMinor: ((): string => {
+            const a = (o?.totalRefundedSet as { presentmentMoney?: { amount?: string } } | undefined)?.presentmentMoney?.amount ?? "0";
+            const m = parseMoneyMinor(a);
+            return m === null ? a : m.toString();
+          })(),
+          totalRefundedShippingMinor: ((): string => {
+            const a = (o?.totalRefundedShippingSet as { presentmentMoney?: { amount?: string } } | undefined)?.presentmentMoney?.amount ?? "0";
+            const m = parseMoneyMinor(a);
+            return m === null ? a : m.toString();
+          })(),
+        };
+        writeFileSync(bpath, JSON.stringify({
+          experiment: "G-E7/A-NEG-campaign", kind: "order-baseline", ...baseline,
+          store: STORE, apiVersion: VERSION,
+        }, null, 1));
+        written.push(bf);
+        records.push({ name: "BASELINE", purpose: `order_${short}`, file: bf, sha256: "", verdict: "PASS" });
+      }
+    }
   }
 
   // ── Refund detail: batches of at most DETAIL_IDS_PER_REQUEST ids ─────────
@@ -271,6 +383,7 @@ async function main() {
     try {
       const r = await execQuery(Q_REFUND_DETAIL, { ids });
       const nodes = ((r.data as { nodes?: Array<Record<string, unknown> | null> } | null)?.nodes ?? []) as Array<Record<string, unknown> | null>;
+      for (const n of nodes) if (n?.id) refundNodes.set(String(n.id), n);
       const checks = nodes.map((n, i) => {
         const txns = ((n?.transactions as { nodes?: unknown[] } | undefined)?.nodes ?? []) as Array<Record<string, unknown>>;
         return {
@@ -344,6 +457,7 @@ async function main() {
       }
       const verdict = vFail ? `FAIL: ${vFail}` : completed ? "PASS" : `INCOMPLETE: ${AGREEMENT_PAGE_BUDGET}-page budget exhausted with hasNextPage`;
       const nodes = pages.flatMap((p) => ((p.response as { order?: { agreements?: { nodes?: unknown[] } } } | null | undefined)?.order?.agreements?.nodes ?? []) as Array<Record<string, unknown>>);
+      agreementNodesByOrder.set(oid, { nodes, complete: completed && !vFail });
       const refundLinks = nodes
         .filter((a) => a.__typename === "RefundAgreement")
         .map((a) => ({
@@ -361,7 +475,86 @@ async function main() {
     } catch (e) { rec(Q_AGREEMENTS, `order_${short}`, { source: oid }, null, fail(e)); }
   }
 
-  // ── Register first, manifest LAST over every artifact ────────────────────
+  // ── Expectations (post-send): every check is a PASS / FAIL / INCOMPLETE
+  //    item; the composite verdict is FAIL on any mismatch, INCOMPLETE on
+  //    any gap. Agreement attribution is an observation with the 15-minute
+  //    visibility rule — never silently favourable. ────────────────────────
+  if (EXPECT_MODE) {
+    const bpath = join(OUT, `baseline-${EXPECT_ORDER!.split("/").pop()}.json`);
+    let baseline: OrderBaseline | null = null;
+    if (existsSync(bpath)) {
+      baseline = JSON.parse(readFileSync(bpath, "utf8")) as OrderBaseline;
+    } else {
+      expectationItems.push({ name: "expect.baseline", verdict: "INCOMPLETE", detail: `no persisted baseline at ${bpath} — run --save-baseline before sends` });
+    }
+    const order = orderNodes.get(EXPECT_ORDER!);
+    if (!order) {
+      expectationItems.push({ name: "expect.order", verdict: "INCOMPLETE", detail: `${EXPECT_ORDER} was not among the reconciled orders` });
+    }
+    if (baseline && order) {
+      expectationItems.push(...checkBaselineDelta(baseline, order, {
+        newRefundId: EXPECT_NEW_REFUND!,
+        shippingDeltaMinor: EXPECT_SHIP_DELTA_MINOR!,
+        totalDeltaMinor: EXPECT_AMOUNT_MINOR!,
+      }).map((i) => ({ ...i, name: `expect.${i.name}` })));
+    }
+    const node = refundNodes.get(EXPECT_NEW_REFUND!) ?? null;
+    expectationItems.push(...checkNewRefundFinancials(node, {
+      refundId: EXPECT_NEW_REFUND!,
+      orderId: EXPECT_ORDER!,
+      parentTransactionId: EXPECT_PARENT!,
+      amountMinor: EXPECT_AMOUNT_MINOR!,
+      currency: EXPECT_CURRENCY,
+    }).map((i) => ({ ...i, name: `expect.${i.name}` })));
+
+    // Attribution observation on the new refund (visibility rule preserved).
+    const ag = agreementNodesByOrder.get(EXPECT_ORDER!);
+    const processedAt = String(node?.processedAt ?? "");
+    const processedMs = processedAt ? Date.parse(processedAt) : NaN;
+    const windowSatisfied = Number.isFinite(processedMs)
+      ? Date.parse(RUN) - processedMs >= VISIBILITY_WINDOW_MS
+      : false;
+    if (!ag || !ag.complete) {
+      expectationItems.push({ name: "expect.agreements", verdict: "INCOMPLETE", detail: "agreement read incomplete or missing" });
+    } else {
+      const obs = observeAttribution(ag.nodes, ag.complete, EXPECT_NEW_REFUND!, EXPECTED_APP_GID, windowSatisfied);
+      const item: CheckItem = obs.kind === "APP-ATTRIBUTED"
+        ? { name: "expect.agreements", verdict: "PASS", detail: `APP-ATTRIBUTED ${obs.appId}` }
+        : obs.kind === "FOREIGN-APP"
+          ? { name: "expect.agreements", verdict: "FAIL", detail: `agreement app.id ${obs.appId ?? "null"} != ${EXPECTED_APP_GID}` }
+          : obs.kind === "DUPLICATE-LINKS"
+            ? { name: "expect.agreements", verdict: "FAIL", detail: `${obs.count} RefundAgreements link the new refund` }
+            : { name: "expect.agreements", verdict: "INCOMPLETE", detail: `INCONCLUSIVE: ${obs.kind === "NO-LINKED-AGREEMENT" ? "no linked RefundAgreement" : (obs as { reason?: string }).reason}` };
+      // The NO-LINKED/visibility cases stay INCONCLUSIVE unless the operator
+      // required agreement evidence now (--require-agreements makes them a
+      // FAIL — used only for the post-window re-read).
+      if (item.verdict === "INCOMPLETE" && REQUIRE_AGREEMENTS && windowSatisfied && ag.complete) {
+        expectationItems.push({ ...item, verdict: "FAIL" });
+      } else {
+        expectationItems.push(item);
+      }
+    }
+    const ef = `expectations-${LABEL}.json`;
+    writeFileSync(join(OUT, ef), JSON.stringify({
+      experiment: "G-E7/A-NEG-campaign", runAtUtc: RUN, label: LABEL,
+      store: STORE, apiVersion: VERSION,
+      expectations: {
+        newRefundId: EXPECT_NEW_REFUND, orderId: EXPECT_ORDER,
+        parentTransactionId: EXPECT_PARENT, amount: EXPECT_AMOUNT,
+        currency: EXPECT_CURRENCY, shippingDelta: EXPECT_SHIPPING_DELTA,
+        requireAgreements: REQUIRE_AGREEMENTS,
+        visibilityWindowSatisfied: windowSatisfied,
+      },
+      checks: expectationItems,
+      overall: overallVerdict(expectationItems),
+    }, null, 1));
+    written.push(ef);
+    records.push({ name: "EXPECTATIONS", purpose: LABEL, file: ef, sha256: "", verdict: overallVerdict(expectationItems) });
+  }
+
+  // ── Register first, manifest LAST over EVERY artifact in the dir ─────────
+  // Accumulating: baselines, mutation responses and earlier runs' artifacts
+  // all stay covered — the manifest is never narrowed to this run's writes.
   const regFile = `validation-register-${LABEL}.json`;
   writeFileSync(join(OUT, regFile), JSON.stringify({
     runAtUtc: RUN, label: LABEL, store: STORE, apiVersion: VERSION, channel: CHANNEL,
@@ -371,10 +564,16 @@ async function main() {
   written.push(regFile);
   writeFileSync(
     join(OUT, MANIFEST_NAME),
-    buildManifestLines(OUT, written).join("\n") + "\n",
+    buildManifestLines(OUT, collectCampaignArtifacts(OUT)).join("\n") + "\n",
   );
   console.log(records.map((r) => `${r.verdict.startsWith("PASS") ? "PASS" : "XXXX"}  ${r.name}  ${r.purpose}  ${r.verdict.slice(0, 100)}`).join("\n"));
-  console.log("artifacts:", readdirSync(OUT).length, "manifest entries:", written.length);
+  if (EXPECT_MODE) {
+    console.log(`EXPECTATIONS ${overallVerdict(expectationItems)}:`);
+    for (const i of expectationItems) {
+      if (i.verdict !== "PASS") console.log(`  ${i.verdict} ${i.name}: ${i.detail.slice(0, 140)}`);
+    }
+  }
+  console.log("artifacts:", collectCampaignArtifacts(OUT).length + 1, "manifest entries:", collectCampaignArtifacts(OUT).length);
 }
 
 await main();

@@ -52,24 +52,28 @@ Guard criteria — all must hold, else STOP:
 - No MergeShip merge operation, lock, claim or pending work item involves
   the order.
 
-Read-only channels:
+Read-only channels (all commands are plain `node`/`npx` one-liners — they
+run identically in cmd.exe, PowerShell and Bash; nothing here needs Bash):
 
-```bash
-# ad-hoc read
-npx shopify app execute --store ordermergetest2.myshopify.com --version 2026-04 \
-  --query-file <doc>.graphql [--variable-file <vars>.json]
+```text
+REM ad-hoc read
+npx shopify app execute --store ordermergetest2.myshopify.com --version 2026-04 --query-file <doc>.graphql [--variable-file <vars>.json]
 
-# campaign read-back (identity-gated, manifest-writing, read-only)
-npx vite-node --script scripts/shipping-refund-campaign-readback.ts \
-  --label <name> [--order <gid> ...] [--refund <gid> ...] [--out docs/evidence/shipping-v0-e7]
+REM campaign read-back (identity-gated, expectation-checking, manifest-writing, read-only)
+npx vite-node --script scripts/shipping-refund-campaign-readback.ts --label <name> [--order <gid> ...] [--refund <gid> ...] [--out docs/evidence/shipping-v0-e7]
 ```
 
-The runner refuses to run unless `SHIPRB_STORE` is the approved store,
-proves shop + app identity before any order read, classifies any
-incomplete read as INCOMPLETE, writes sanitized artifacts +
-`MANIFEST.sha256`, and never sends a mutation. Run it from the app
-repository. Mutations use `npx shopify app execute` directly — there is
-**no** `--allow-mutations` flag (E1-1a proved it does not exist).
+The runner refuses to run unless `SHIPRB_STORE` is the approved store and
+`--out` is a safe destination (`docs/evidence/**` inside the repo, never
+the pinned `docs/evidence/shipping-v0/`), proves shop + app identity
+before any order read, classifies any incomplete read as INCOMPLETE,
+writes sanitized artifacts + `MANIFEST.sha256` **over every artifact
+already in the dir** (baselines, mutation responses and earlier
+read-backs accumulate — the manifest is never narrowed), and never sends
+a mutation. Run it from the app repository. Sends go through
+`scripts/campaign-send.ts`, which pins the store and runs each
+`shopify app execute` as its own child process — there is **no**
+`--allow-mutations` flag (E1-1a proved it does not exist).
 
 ---
 
@@ -84,43 +88,36 @@ error locations/shapes.
 
 ### 3.1 Persist BEFORE any send
 
-Create evidence dir `docs/evidence/shipping-v0-e7/` (the pinned S1 archive
-`docs/evidence/shipping-v0/` must not gain or lose files — the fixture
-suite pins its manifest hash; the campaign runner writes here only).
+The evidence dir `docs/evidence/shipping-v0-e7/` already contains the two
+checked-in request documents, byte-pinned to the contract by
+`tests/campaign-checks.test.ts`:
 
-```bash
-D=docs/evidence/shipping-v0-e7; mkdir -p "$D"
-cat > "$D/e7-refund.graphql" <<'EOF'
-mutation MergeShipShippingRefund($input: RefundInput!, $idempotencyKey: String!) {
-  refundCreate(input: $input) @idempotent(key: $idempotencyKey) {
-    refund {
-      id
-      note
-      createdAt
-      totalRefundedSet { presentmentMoney { amount currencyCode } }
-    }
-    userErrors { field message }
-  }
-}
-EOF
+- `e7-refund.graphql` — exactly `REFUND_DOCUMENT` (10.1, variable key —
+  the U1 decision point);
+- `e7-refund-literal-template.graphql` — exactly `REFUND_DOCUMENT_TEMPLATE`
+  (§10.3 fallback, one `__IDEMPOTENCY_KEY__` placeholder).
+
+(the pinned S1 archive `docs/evidence/shipping-v0/` must not gain or lose
+files — the fixture suite pins its manifest hash; the campaign runner
+refuses `--out docs/evidence/shipping-v0`.)
+
+One cross-platform command generates the key and all remaining request
+files (works in cmd.exe, PowerShell and Bash — no shell features needed):
+
+```text
+npx vite-node --script scripts/campaign-send.ts --init
 ```
 
-This is exactly `REFUND_DOCUMENT` (10.1) — the variable form is U1. If it
-is rejected, the documented fallback is the §10.3 template (literal
-`key: "<uuid>"` rendered into the document; the template and renderer live
-in `app/lib/shipping-refund-contract.ts`). Switching is a recorded design
-branch, not a failure — **but only after proving no refund was created**
-(§3.3 step F).
+It writes, under `docs/evidence/shipping-v0-e7/`: `e7-idempotency-key.txt`
+(a fresh UUIDv4, **persisted and never regenerated** — reruns reuse it),
+`e7-vars-1.00.json` and `e7-vars-changed-0.50.json` (the exact payloads
+below, key embedded in `idempotencyKey` and `note`), and
+`e7-refund-literal.graphql` (the template rendered with the same key).
+Existing files are never overwritten; re-running `--init` is a no-op.
 
-```bash
-KEY=$(node -e 'console.log(require("crypto").randomUUID())')
-echo "$KEY" > "$D/e7-idempotency-key.txt"        # persisted, never regenerated
-cat > "$D/e7-vars-1.00.json" <<EOF
-{"input":{"orderId":"gid://shopify/Order/8078037057783","note":"MS-SHIPREFUND-E7-$KEY","notify":false,"currency":"USD","shipping":{"fullRefund":false,"amount":"1.00"},"transactions":[{"orderId":"gid://shopify/Order/8078037057783","parentId":"gid://shopify/OrderTransaction/10162809569527","gateway":"bogus","kind":"REFUND","amount":"1.00"}]},"idempotencyKey":"$KEY"}
-EOF
-cat > "$D/e7-vars-changed-0.50.json" <<EOF
-{"input":{"orderId":"gid://shopify/Order/8078037057783","note":"MS-SHIPREFUND-E7-$KEY","notify":false,"currency":"USD","shipping":{"fullRefund":false,"amount":"0.50"},"transactions":[{"orderId":"gid://shopify/Order/8078037057783","parentId":"gid://shopify/OrderTransaction/10162809569527","gateway":"bogus","kind":"REFUND","amount":"0.50"}]},"idempotencyKey":"$KEY"}
-EOF
+```text
+e7-vars-1.00.json:
+{"input":{"orderId":"gid://shopify/Order/8078037057783","note":"MS-SHIPREFUND-E7-<KEY>","notify":false,"currency":"USD","shipping":{"fullRefund":false,"amount":"1.00"},"transactions":[{"orderId":"gid://shopify/Order/8078037057783","parentId":"gid://shopify/OrderTransaction/10162809569527","gateway":"bogus","kind":"REFUND","amount":"1.00"}]},"idempotencyKey":"<KEY>"}
 ```
 
 Payload conformity (§10.4, contract `buildRefundInput`/`validateRefundInput`):
@@ -136,14 +133,14 @@ and record the verbatim rejection — never silently drop a contract field.**
 
 ### 3.2 Execution sequence
 
-| Step | Action | Expected | If unexpected |
+| Step | Command / action | Expected | If unexpected |
 |---|---|---|---|
-| 0 Preflight | §2 checks; persist baseline (refund ids/count, agreement ids, totals) → `e7-0-baseline.json` | all pass | STOP |
-| **1 Concurrent create** | two **simultaneous** `shopify app execute` sends of `e7-refund.graphql` + `e7-vars-1.00.json` with the same fresh `KEY` (background `&`-pair, as in E6) → `e7-1-concurrent-A.json`, `e7-1-concurrent-B.json` | **exactly one new refund.** Either (a) both return the same `refund.id`, or (b) one returns the refund and the other `refund: null` + a concurrency/order-availability userError. **Classify the actual observed response — do not assume which process succeeded** | two different refund ids → STOP, reconcile §6; transport ambiguity → read back before any further send |
-| 2 Read-back | `--label e7-2-after-create --order 8078037057783 --refund <new refund gid>` (runner) | refund count +1 vs baseline only; `1.00` REFUND/SUCCESS/bogus/test, parent CAPTURE; exactly one `RefundAgreement/REFUND` linked to it, `app.id = 426185785345` | STOP |
-| 3 Identical replay | same doc + vars as step 1 → `e7-3-replay.json` | same `refund.id`, original `createdAt`, `userErrors: []`; refund count unchanged | new id → STOP |
-| 4 Altered-payload mismatch | same key + `e7-vars-changed-0.50.json` → `e7-4-mismatch.json` | `refund: null` + idempotency-mismatch userError (E6 observed `field: null`, message "Idempotency key has been used with a different request payload."); record the actual shape/location verbatim | record verbatim; no retry |
-| 5 Final | `--label e7-5-final` re-read: refund ids = baseline ∪ {step-1 refund}; count +1; `totalRefundedShippingSet` `3.00→4.00` | pass | STOP, reconcile §6 |
+| 0 Baseline + guard | `npx vite-node --script scripts/shipping-refund-campaign-readback.ts --label e7-0-baseline --order gid://shopify/Order/8078037057783 --save-baseline --expect-available-shipping 1.00` → persists `baseline-8078037057783.json` | every check PASS; guard shows ≥ 1.00 remaining shipping | STOP |
+| **1 Concurrent create** | `npx vite-node --script scripts/campaign-send.ts --send --doc docs/evidence/shipping-v0-e7/e7-refund.graphql --vars docs/evidence/shipping-v0-e7/e7-vars-1.00.json --out docs/evidence/shipping-v0-e7/e7-1-concurrent-A.json --out docs/evidence/shipping-v0-e7/e7-1-concurrent-B.json` — two truly simultaneous sends, one fresh `KEY` | **exactly one new refund.** Either (a) both return the same `refund.id`, or (b) one returns the refund and the other `refund: null` + a concurrency/order-availability userError. **Classify the actual observed response — do not assume which process succeeded** | two different refund ids → STOP, reconcile §6; transport ambiguity → read back before any further send |
+| 2 Read-back + expectations | `npx vite-node --script scripts/shipping-refund-campaign-readback.ts --label e7-2-after-create --order gid://shopify/Order/8078037057783 --refund <new refund gid> --expect-new-refund <new refund gid> --expect-order gid://shopify/Order/8078037057783 --expect-parent gid://shopify/OrderTransaction/10162809569527 --expect-amount 1.00 --expect-shipping-delta 1.00` | `expectations-e7-2-after-create.json` overall **PASS**: refund count +1 vs baseline only; `1.00` REFUND/SUCCESS/bogus/test, parent CAPTURE; agreement observation recorded (INCONCLUSIVE is honest inside the 15-min window) | STOP |
+| 3 Identical replay | `npx vite-node --script scripts/campaign-send.ts --send --doc docs/evidence/shipping-v0-e7/e7-refund.graphql --vars docs/evidence/shipping-v0-e7/e7-vars-1.00.json --out docs/evidence/shipping-v0-e7/e7-3-replay.json` | same `refund.id`, original `createdAt`, `userErrors: []` | new id → STOP |
+| 4 Altered-payload mismatch | `npx vite-node --script scripts/campaign-send.ts --send --doc docs/evidence/shipping-v0-e7/e7-refund.graphql --vars docs/evidence/shipping-v0-e7/e7-vars-changed-0.50.json --out docs/evidence/shipping-v0-e7/e7-4-mismatch.json` | `refund: null` + idempotency-mismatch userError (E6 observed `field: null`, message "Idempotency key has been used with a different request payload."); record the actual shape/location verbatim | record verbatim; no retry |
+| 5 Final | step-2 command repeated with `--label e7-5-final` (after ≥ 15 min add `--require-agreements` so a missing/foreign link is FAIL, not INCOMPLETE) | overall **PASS**: ids = baseline ∪ {step-1 refund}; shipping delta exactly +1.00; exactly one `RefundAgreement/REFUND` linked to the new refund with `app.id = 426185785345` when the window has passed | STOP, reconcile §6 |
 
 This ordering proves **first-execution concurrency** (the refund does not
 yet exist when both processes send), unlike a concurrency test run after a
@@ -155,13 +152,14 @@ If step 1 shows the variable `@idempotent(key: $idempotencyKey)` form is
 **rejected** (schema/top-level error naming the directive or key — record
 verbatim as the U1 answer):
 
-**F.** Prove zero effect before fallback: read back the order
-(Q-RECONCILE + Q-REFUND-DETAIL + Q-AGREEMENTS via the runner, `--label
-e7-F-zero-proof`) and confirm refund ids/count == baseline, totals
-unchanged, no new agreement. **Only then** render the §10.3 literal-key
-document with the same persisted `KEY` (never a new key) into
-`e7-refund-literal.graphql`, and re-run step 1's concurrent pair with it.
-Record which form produced each artifact.
+**F.** Prove zero effect before fallback: run the step-2 read-back with
+`--label e7-F-zero-proof` (no expectation flags) and confirm refund
+ids/count == the persisted baseline, totals unchanged, no new agreement —
+recorded INCOMPLETE/PASS evidence, not assumption. **Only then** re-run
+step 1's concurrent pair with `e7-refund-literal.graphql` (already
+rendered by `--init` with the same persisted `KEY` — never a new key) via
+`campaign-send.ts --send`. Record which document form produced each
+artifact.
 
 ### 3.4 Bounds and stops
 
@@ -229,8 +227,9 @@ never contribute to the attribution verdict (§12.8.1, §12.8.2).
 
 ### 4.3 Evidence checks (read-back)
 
-Immediate (runner `--label aneg-post-refund --order <NEG order gid>
---refund <NEG refund gid>`):
+Immediate (full GIDs; runner `--label aneg-post-refund --order
+gid://shopify/Order/<NEG order id> --refund gid://shopify/Refund/<NEG
+refund id>`):
 
 - Refund ids on the order = exactly the one new refund; `totalRefundedSet =
   2.00`; REFUND transaction `SUCCESS`, `test: true`, `gateway` as observed

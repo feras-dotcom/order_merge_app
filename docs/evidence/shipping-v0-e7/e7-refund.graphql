@@ -1,0 +1,11 @@
+mutation MergeShipShippingRefund($input: RefundInput!, $idempotencyKey: String!) {
+  refundCreate(input: $input) @idempotent(key: $idempotencyKey) {
+    refund {
+      id
+      note
+      createdAt
+      totalRefundedSet { presentmentMoney { amount currencyCode } }
+    }
+    userErrors { field message }
+  }
+}
