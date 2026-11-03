@@ -42,29 +42,51 @@ npx vite-node --script scripts/shipping-refund-admin.ts status
 ## Phase 1 — controls BEFORE any order exists (local DB only)
 
 Ordering requirement: the combine's `MergeOperation.createdAt` must be
-**after** every cutoff (Phase 1 activation, admission, approval
-`approvedAt`, dispatch). Configure everything first; never backdate.
+**on/after** the activation cutoff — the MAX of three epochs
+(`shippingActivationCutoff`): `AppControl.shippingEnabledAt` (kill switch),
+`Settings.shippingRolloutAt` (rollout membership), and
+`Settings.shippingAdjustmentEnabledAt` (merchant opt-in). Configure
+everything first; never backdate. NOTE: `shippingAllowShops` has INVERTED
+semantics — empty means NO shops; `allowShops` empty means ALL shops.
 
 ```sql
--- Settings (local disposable DB fixture): merchant opt-in epoch + auto-merge
-UPDATE "Settings" SET "shippingAdjustmentEnabled" = true,
+-- Settings (local disposable DB fixture): merchant opt-in epoch, rollout
+-- membership epoch, onboarding + auto-merge prerequisites
+UPDATE "Settings" SET
+  "shippingAdjustmentEnabled" = true,
   "shippingAdjustmentEnabledAt" = clock_timestamp() AT TIME ZONE 'UTC',
-  "autoMergeEnabled" = true
+  "shippingRolloutAt" = clock_timestamp() AT TIME ZONE 'UTC',
+  "autoMergeEnabled" = true,
+  "autoMergeAcknowledgedAt" = clock_timestamp() AT TIME ZONE 'UTC',
+  "onboardingStartedAt" = COALESCE("onboardingStartedAt", clock_timestamp() AT TIME ZONE 'UTC'),
+  "onboardingCompletedAt" = COALESCE("onboardingCompletedAt", clock_timestamp() AT TIME ZONE 'UTC')
   WHERE "shop" = 'ordermergetest2.myshopify.com';
 
--- AppControl: Phase 1 activation epochs + shipping allowlist
+-- Verify the policy is the REFUND_ALL default; do NOT set anything else.
+SELECT "shippingPolicy" FROM "Settings" WHERE "shop" = 'ordermergetest2.myshopify.com';
+-- expect: REFUND_ALL
+
+-- AppControl: shipping kill switch ON with its epoch, rollout allowlist.
+-- Merge mutation switches stay OFF until Phase 2 step 3 (backfill
+-- requires them off).
 UPDATE "AppControl" SET
+  "shippingAdjustmentsEnabled" = true,
   "shippingEnabledAt" = clock_timestamp() AT TIME ZONE 'UTC',
   "shippingAllowShops" = ARRAY['ordermergetest2.myshopify.com']::text[],
-  "rolloutAt" = clock_timestamp() AT TIME ZONE 'UTC',
-  "newMergesEnabled" = true, "completionEnabled" = true,
-  "allowShops" = ARRAY['ordermergetest2.myshopify.com']::text[],
-  "refundPolicy" = 'REFUND_ALL'
+  "allowShops" = ARRAY['ordermergetest2.myshopify.com']::text[]
   WHERE "id" = 'control';
+
+-- Activation verification: every epoch non-null, shop allowlisted —
+-- shippingActivationCutoff() and the admission gate (computeShippingGate)
+-- open only with all three stamped.
+SELECT "shippingAdjustmentsEnabled", "shippingEnabledAt", "shippingAllowShops"
+  FROM "AppControl" WHERE "id" = 'control';
+SELECT "shippingAdjustmentEnabled", "shippingAdjustmentEnabledAt", "shippingRolloutAt"
+  FROM "Settings" WHERE "shop" = 'ordermergetest2.myshopify.com';
 ```
 
 ```bash
-# S2 controls (dry-run first, then --apply)
+# S2 controls (dry-run first, then --apply; stamps admission/dispatch epochs)
 npx vite-node --script scripts/shipping-refund-admin.ts set-control \
   --admission on --dispatch on --global-cap 1 \
   --note "S3 happy path" --by <operator>
@@ -87,26 +109,61 @@ Protocol v2 (`orderEditCommit`, `MergeMutationAttempt` write-ahead,
 `MergeRecord`, tokened transferred lines, then the app's own `orderCancel`
 on the secondary with the canonical note and its attempt row).
 
-1. Operator creates the two test orders on the dev store via Bogus
-   Gateway (primary any items; secondary with $4.00 paid shipping).
-2. Start the app against the disposable DB with merge mutations enabled
-   and the refund flag **unset** (admission/dispatch stay inert):
+**Order setup (all operator actions on the dev store):** both orders use
+the SAME freshly created test customer (unique email/phone this run — a
+new customer guarantees the pair cannot combine with any historical test
+order), the same shipping address, the same shipping method, standard
+shippable product(s), Bogus Gateway, left UNFULFILLED, never refunded.
+The merge window (`mergeWindowHours`, default 24h) plus the customer/
+address match is what pairs them.
+
+**Shipping price:** the dev-store checkout's existing rate is $8 Standard
+— not used. Create the secondary via `orderCreate` (Admin GraphQL, or a
+draft order marked paid with bogus) carrying a **custom shipping line
+priced exactly $4.00 USD** — an explicit shipping price at creation is
+the genuine eligible $4 method; no store shipping settings are changed.
+If the operator cannot create a $4.00 shipping line this way, STOP and
+report BLOCKED — do not fall back to a different amount silently (the
+approval `maxRefundMinor` is 400).
+
+**Sequencing — the webhook path is preferred; backfill only while merge
+switches are OFF (`requireControlsOff`):**
+
+1. Operator creates the two orders (bogus, $4.00 shipping on the
+   secondary).
+2a. **Webhook path (preferred):** start the app dev tunnel so the real
+   `orders/create` webhook writes the PENDING `ProcessedWebhook` items:
 
    ```bash
-   DATABASE_URL=... MERGESHIP_MUTATIONS=enabled npm run dev
+   DATABASE_URL=... npm run dev   # shopify app dev tunnel
    # DISABLE_BACKGROUND_WORKER must NOT be set: the merge sweeper must run.
+   # MERGESHIP_MUTATIONS stays UNSET while items are recorded — nothing merges.
    # MERGESHIP_SHIPPING_REFUNDS stays unset — no refund worker activity.
    ```
 
-3. Deliver the combine trigger (orders/create webhook via the dev tunnel,
-   or `scripts/backfill-recent-orders.ts --since <order-create-iso> --apply`
-   which reads real order ids from Shopify and upserts PENDING work items).
+   Verify two PENDING `ProcessedWebhook` rows exist.
+2b. **Backfill alternative:** with merge switches OFF, run
+   `scripts/backfill-recent-orders.ts --since <order-create-iso> --apply`
+   — it refuses while `newMergesEnabled`/`completionEnabled` are on, so
+   leave them off until items exist, then enable.
+3. Enable the merge switches for the sweeper run only:
+
+   ```sql
+   UPDATE "AppControl" SET "newMergesEnabled" = true,
+     "completionEnabled" = true WHERE "id" = 'control';
+   ```
+
+   ```bash
+   DATABASE_URL=... MERGESHIP_MUTATIONS=enabled npm run dev
+   ```
+
 4. Wait for the sweeper to reach `APPLIED` with secondary cancelled.
    Expected durable evidence: `MergeOperation` terminal `APPLIED`,
    `MergeRecord` rows, `MergeMutationAttempt` SUCCEEDED rows for
    `EDIT_COMMIT` and `ORDER_CANCEL`, tokened lines on the primary, the
    secondary `cancelledAt` + canonical staff note + `RefundAgreement`/
-   `OrderEditAgreement` attribution.
+   `OrderEditAgreement` attribution. Then disable the merge switches
+   again (same UPDATE with `false`) and stop `npm run dev`.
 5. **Wait 15 minutes** — the admission settle delay
    (`sourceCancelledAt + 15min`) must pass before the scan can admit.
 
@@ -134,16 +191,28 @@ npx vite-node --script scripts/shipping-refund-admin.ts approve-hash \
   --row <ID> --hash <wireHash> --by <operator> --apply
 ```
 
-## Phase 5 — dispatch (T3 → single send → T4)
+## Phase 5 — dispatch (T3 → single send → T4) with S3 preflight
+
+The `dispatch` staged command wraps the same
+`runShippingRefundDispatchCycle` sender (DispatchPermit unchanged) behind
+a fail-closed preflight: disposable-DB identity, dev-store identity,
+exactly one due PREPARED row, expected order ids, approved wire hash and
+`plannedShippingMinor <= 400`. It runs the checks read-only first and
+refuses on any failure.
 
 ```bash
 MERGESHIP_SHIPPING_REFUNDS=enabled \
-npx vite-node --script scripts/shipping-refund-admin.ts worker --apply
+npx vite-node --script scripts/shipping-refund-admin.ts dispatch \
+  --shop ordermergetest2.myshopify.com \
+  --row <ID> --source <gid://shopify/Order/secondary> \
+  --primary <gid://shopify/Order/primary> \
+  --expect-db mergeship_test_s3a --apply
 ```
 
-Expected: `PREPARED` → `DISPATCHING` → `REFUND_RECORDED`, `refundId` set,
-`dispatchedAt` set, exactly ONE mutation-document call logged, T4 writes
-once. Any `WAIT`/`ABORTED` outcome → stop, inspect reason.
+Expected: all `checks` true → `PREPARED` → `DISPATCHING` →
+`REFUND_RECORDED`, `refundId` set, `dispatchedAt` set, exactly ONE
+mutation-document call logged, T4 writes once. Any `WAIT`/`ABORTED`
+outcome or failed check → stop, inspect reason.
 
 ## Phase 6 — read-back + reconciliation + verification
 

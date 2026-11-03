@@ -15,6 +15,7 @@
 //   npx vite-node --script scripts/shipping-refund-admin.ts admission --shop DEVSTORE --apply   (one admission scan for one shop; writes rows)
 //   npx vite-node --script scripts/shipping-refund-admin.ts reconcile --shop DEVSTORE --apply   (one reconciliation cycle for one shop)
 //   npx vite-node --script scripts/shipping-refund-admin.ts wire --row ID     (read-only frozen wire request + approval state)
+//   npx vite-node --script scripts/shipping-refund-admin.ts dispatch --shop DEVSTORE --row ID --source GID --primary GID --expect-db mergeship_test_X --apply   (S3 fail-closed dispatch)
 import defaultDb from "../app/db.server";
 import { DB_WALL } from "../app/lib/ownership.server";
 import {
@@ -227,6 +228,66 @@ async function main() {
         log: console.log,
       });
       console.log(JSON.stringify(r));
+      return;
+    }
+    case "dispatch": {
+      // Staged S3 dispatch with a fail-closed preflight. `worker` runs the
+      // same dispatch cycle but processes EVERY due shop; this command is
+      // for the isolated single-shop S3 run and refuses to proceed unless:
+      //   - the database is the expected disposable test database
+      //     (--expect-db, must match current_database() and the
+      //      mergeship_test_* naming),
+      //   - the shop is the approved development store,
+      //   - exactly one PREPARED row is due anywhere and it is --row,
+      //   - that row carries the expected source/primary order ids, an
+      //     approved wire hash, and plannedShippingMinor <= 400.
+      // The sender itself is unchanged: runShippingRefundDispatchCycle /
+      // DispatchPermit do the T3 gate, single send and T4.
+      const shop = requireDevStoreShop();
+      const row = get("--row"), source = get("--source"), primary = get("--primary");
+      const expectDb = get("--expect-db");
+      if (!row || !source || !primary || !expectDb) {
+        throw new Error("--row --source --primary --expect-db are required");
+      }
+      if (!/^mergeship_test_/.test(expectDb)) {
+        throw new Error(`--expect-db must be a disposable mergeship_test_* database (got ${expectDb})`);
+      }
+      const [dbName] = await db.$queryRaw<{ d: string }[]>`SELECT current_database() AS "d"`;
+      const due = await db.$queryRaw<{ id: string; shop: string }[]>`
+        SELECT "id","shop" FROM "ShippingRefund"
+        WHERE "status" = 'PREPARED'
+          AND ("nextCheckAt" IS NULL OR "nextCheckAt" <= ${DB_WALL})`;
+      const [r] = await db.$queryRaw<{
+        id: string; shop: string; status: string; sourceOrderId: string;
+        primaryOrderId: string; approvedWireHash: string | null;
+        plannedShippingMinor: string | null;
+      }[]>`
+        SELECT "id","shop","status","sourceOrderId","primaryOrderId",
+               "approvedWireHash","plannedShippingMinor"
+        FROM "ShippingRefund" WHERE "id" = ${row}`;
+      const checks: Record<string, boolean> = {
+        disposableDb: dbName?.d === expectDb,
+        rowExists: r?.status === "PREPARED",
+        shopIsDevStore: r?.shop === shop,
+        onlyDueRow: due.length === 1 && due[0]?.id === row,
+        ordersMatch: r?.sourceOrderId === source && r?.primaryOrderId === primary,
+        wireApproved: typeof r?.approvedWireHash === "string" && r.approvedWireHash.length === 64,
+        amountWithinLimit: typeof r?.plannedShippingMinor === "string" &&
+          /^\d+$/.test(r.plannedShippingMinor) && BigInt(r.plannedShippingMinor) <= 400n,
+      };
+      const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([k]) => k);
+      const summary = { dryRun: !APPLY, enabled: shippingRefundsDispatchEnabled(), checks, failed };
+      if (failed.length > 0 || !APPLY) {
+        console.log(JSON.stringify(summary));
+        if (!APPLY) return;
+        throw new Error(`S3 dispatch preflight failed: ${failed.join(", ")}`);
+      }
+      const { unauthenticated } = await import("../app/shopify.server");
+      const out = await runShippingRefundDispatchCycle({
+        adminFactory: async (s) => (await unauthenticated.admin(s)).admin,
+        log: console.log,
+      });
+      console.log(JSON.stringify(out));
       return;
     }
     case "admission": {
