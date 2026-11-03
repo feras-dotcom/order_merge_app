@@ -21,7 +21,6 @@ import {
 import { validateCostExtension } from "../scripts/lib/evidence-cost";
 import {
   agreementVariant,
-  agreementVariantsPermitted,
   ARCHIVE_MANIFEST_SHA256,
   ARCHIVED_REFUND,
   ARCHIVED_SOURCES as A,
@@ -90,9 +89,16 @@ describe("fixture provenance", () => {
     for (const s of SCHEMA_DERIVED_ALLOWED) expect(s).toMatch(/^(transaction-status|agreement-attribution):/);
   });
 
-  it("allows agreement variants only while G-AGREEMENT is not CONFIRMED", () => {
-    expect(ATTRIBUTION_STATUS).toBe("UNVERIFIED");
-    expect(agreementVariantsPermitted()).toBe(true);
+  it("agreement variants carry archived provenance now that G-AGREEMENT is CONFIRMED", () => {
+    expect(ATTRIBUTION_STATUS).toBe("CONFIRMED");
+    const v = agreementVariant("foreign-app", {
+      id: "gid://shopify/RefundAgreement/9",
+      appId: "gid://shopify/App/999",
+      refundId: "gid://shopify/Refund/9",
+      happenedAt: "2026-10-20T10:00:00Z",
+    });
+    expect(provenanceProblem(provenanceOf(v))).toBeNull();
+    expect(provenanceOf(v)?.kind).toBe("archived");
   });
 
   it("refuses a schema-derived fixture for any shape off the allowlist", () => {

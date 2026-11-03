@@ -21,7 +21,6 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { ATTRIBUTION_STATUS } from "../../app/lib/shipping-refund-gate";
 import { SHIPPING_REFUND_QUERY_DOCUMENTS } from "../../app/lib/shipping-refund-queries";
 import { MANIFEST_NAME, verifyManifest } from "../../scripts/lib/evidence-manifest";
 
@@ -37,10 +36,13 @@ export const ARCHIVE_MANIFEST_SHA256 =
 
 /**
  * The reviewed allowlist (§20.1.1). Transaction statuses that cannot be
- * produced on the development store before G-REAL (register, §12.1) and,
- * while G-AGREEMENT is not CONFIRMED, the agreement shapes the attribution
- * paths need. Changing it changes SCHEMA_DERIVED_ALLOWED_SHA256 — a test
- * fails until the pin is updated in a reviewed change.
+ * produced on the development store before G-REAL (register, §12.1) and a
+ * synthetic agreements-page marker. The three agreement-attribution
+ * variant shapes were removed when G-AGREEMENT reached CONFIRMED: the
+ * variants now derive from the archived RefundAgreement node, so a
+ * synthesized attribution shape is never needed. Changing this list
+ * changes SCHEMA_DERIVED_ALLOWED_SHA256 — a test fails until the pin is
+ * updated in a reviewed change.
  */
 export const SCHEMA_DERIVED_ALLOWED = [
   "transaction-status:PENDING",
@@ -48,14 +50,11 @@ export const SCHEMA_DERIVED_ALLOWED = [
   "transaction-status:FAILURE",
   "transaction-status:ERROR",
   "transaction-status:UNKNOWN",
-  "agreement-attribution:foreign-app",
-  "agreement-attribution:duplicate-link",
-  "agreement-attribution:other-refund-link",
   "agreement-attribution:incomplete-page",
 ] as const;
 export type SchemaDerivedShape = (typeof SCHEMA_DERIVED_ALLOWED)[number];
 export const SCHEMA_DERIVED_ALLOWED_SHA256 =
-  "e6f460e0dc0454209291daeb3a8059cbcd79b9f98fc87d55a6eb6535a8d66c85";
+  "f543d90195d817d452b4a496936f9d5cb18ec3561d4d3efcb56dd0e9b41626a4";
 
 /** Deliberate malformations; not claims about Shopify's shapes. */
 export const FAULT_INJECTIONS = ["detail-node-missing"] as const;
@@ -204,8 +203,10 @@ export function provenanceProblem(p: FixtureProvenance | undefined): string | nu
   return null;
 }
 
-/** True while the allowlist may still carry the agreement attribution variants. */
-export const agreementVariantsPermitted = () => ATTRIBUTION_STATUS !== "CONFIRMED";
+/** The foreign application id recorded by the A-NEG negative control
+ *  (docs/evidence/shipping-v0-aneg): a real staff-attributed agreement
+ *  application, used as the default foreign-app rebind. */
+export const A_NEG_FOREIGN_APP_ID = "gid://shopify/App/1830279";
 
 // ── archived sources ──────────────────────────────────────────────────────
 
@@ -387,21 +388,26 @@ export function archivedAppIdentity(appId: string): Record<string, any> {
   return archived(art, install, ["rebind:app-id"]);
 }
 
-// ── schema-derived attribution variants (allowlisted while not CONFIRMED) ──
+// ── attribution variants on the archived RefundAgreement node ────────────
+// Since G-AGREEMENT is CONFIRMED these never synthesize a shape: every
+// variant is the archived E2 RefundAgreement node with declared rebindings
+// (archived provenance, 20.1.1). `foreign-app` rebinds `app` — a null
+// appId yields app: null, otherwise the given foreign id. `duplicate-link`
+// and `other-refund-link` reuse the same archived node; the duplication
+// or foreign refund link is the caller's scenario arrangement.
 
 export function agreementVariant(
   variant: "foreign-app" | "duplicate-link" | "other-refund-link",
   over: { id: string; appId: string | null; refundId: string; happenedAt: string },
 ): Record<string, any> {
-  if (!agreementVariantsPermitted()) throw new Error("agreement variants are not allowlisted once G-AGREEMENT is CONFIRMED");
-  return schemaDerived(`agreement-attribution:${variant}`, {
-    __typename: "RefundAgreement",
+  const a = archivedRefundAgreement({
     id: over.id,
-    happenedAt: shopifyDateTime(over.happenedAt),
-    reason: "REFUND",
-    app: over.appId === null ? null : { id: over.appId },
-    refund: { id: over.refundId },
+    appId: over.appId ?? A_NEG_FOREIGN_APP_ID,
+    refundId: over.refundId,
+    happenedAt: over.happenedAt,
   });
+  if (over.appId === null) a.app = null;
+  return a;
 }
 
 export function incompletePageInfo(endCursor: string): Record<string, any> {

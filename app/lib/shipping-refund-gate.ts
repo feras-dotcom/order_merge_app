@@ -1079,16 +1079,23 @@ export function validateOperationForClaim(
 // Pure section: decisions over normalized evidence, no I/O. The reconcile
 // server module supplies the extracted read-backs; these functions classify.
 //
-// ATTRIBUTION_STATUS (12.3.1): the only value in S1 is UNVERIFIED. It is a
-// parameter of the classifiers below — never read from any environment
+// ATTRIBUTION_STATUS (12.3.1): the reviewed transition to CONFIRMED. It is
+// a parameter of the classifiers below — never read from any environment
 // variable, database row, request or setter; production wiring passes this
 // pinned constant and tests exercise the other union member on fixtures.
-// Moving the constant requires the reviewed change of 12.3.1 (archived
-// G-AGREEMENT CONFIRMED evidence cited by experiment id and manifest hash).
+// The 12.3.1 authorized transition cites the archived G-AGREEMENT evidence:
+// experiment id G-AGREEMENT/A-NEG (docs/evidence/shipping-v0-aneg/),
+// MANIFEST.sha256 = 1e5a99d026c02b0a0150853762efbe32d4b057aab6db9b9ec0234cd47c7bfd11,
+// outcome CONFIRMED for parts A and B (g-agreement-verdict.json), against
+// the pinned documents Q-RECONCILE
+// b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4,
+// Q-REFUND-DETAIL
+// 819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6 and
+// Q-AGREEMENTS
+// 26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8.
 // The single declaration carries the 'CONFIRMED' literal (19.3 item 3):
-// the `as` widens the value's type while the narrowed runtime value stays
-// "UNVERIFIED" — no runtime-mutable source can ever reach it.
-export const ATTRIBUTION_STATUS = "UNVERIFIED" as "UNVERIFIED" | "CONFIRMED";
+// no runtime-mutable source can ever reach it.
+export const ATTRIBUTION_STATUS = "CONFIRMED" as "UNVERIFIED" | "CONFIRMED";
 export type AttributionStatus = typeof ATTRIBUTION_STATUS;
 
 /** The status literal for an unanswered post-dispatch row. It lives here as

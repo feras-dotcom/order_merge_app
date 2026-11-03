@@ -121,7 +121,7 @@ export interface ShippingRefundReconcileDeps {
  * TEST-ONLY deps extension (12.3.1). `attributionStatus` is injected ONLY
  * by tests to exercise the CONFIRMED branch on fixtures; production code
  * never supplies it — the pinned `ATTRIBUTION_STATUS` constant supplies
- * "UNVERIFIED". The field lives on a separate type so an operational deps
+ * the pin. The field lives on a separate type so an operational deps
  * object cannot acquire it by accident, and the architecture scan forbids
  * the token in non-test sources outside this module and the gate module.
  * There is no env var, row, setter or request path to it.
@@ -488,7 +488,7 @@ export async function runShippingRefundReconcileCycle(
 ): Promise<ReconcileShopReport[]> {
   const log = deps.log ?? ((line: string) => console.error(line));
   // 12.3.1: production wiring never passes attributionStatus — the pinned
-  // constant supplies "UNVERIFIED". Test fixtures inject "CONFIRMED"
+  // constant supplies the pinned value. Test fixtures inject both arms —
   // through the ShippingRefundReconcileTestDeps seam only; the field does
   // not exist on the operational type and no env var, row, setter or
   // request reaches it.

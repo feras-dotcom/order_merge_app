@@ -127,8 +127,8 @@ const ctx = (attributionStatus: AttributionStatus, now = T_NOW) => ({
 // ── The pinned attribution status (12.3.1) ────────────────────────────────
 
 describe("ATTRIBUTION_STATUS", () => {
-  it("is pinned to UNVERIFIED in production code", () => {
-    expect(ATTRIBUTION_STATUS).toBe("UNVERIFIED");
+  it("is pinned to CONFIRMED in production code (12.3.1 reviewed transition)", () => {
+    expect(ATTRIBUTION_STATUS).toBe("CONFIRMED");
     // The declared type admits "CONFIRMED" only so test fixtures can
     // exercise the 12.8.2 branch through the injected seam; the value
     // itself can never move — there is no setter, env read or row read.

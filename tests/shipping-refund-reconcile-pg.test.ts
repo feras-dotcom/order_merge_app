@@ -693,7 +693,7 @@ describe.skipIf(!TEST_URL)(
       ]);
     });
 
-    it("the identical evidence under the production UNVERIFIED pin can never adopt", async () => {
+    it("the identical evidence adopts under the production CONFIRMED pin", async () => {
       const shop = uniqueShop();
       const rid = refundGid(5002);
       const dispatchedAt = await agoIso(10 * 60_000);
@@ -702,16 +702,15 @@ describe.skipIf(!TEST_URL)(
       const admin = reconAdmin(
         fullEvidence({ rid, srcId: fx.secondaryId, marker, dispatchedAt }),
       );
-      // No attributionStatus override — the pinned UNVERIFIED applies.
+      // No attributionStatus override — the pinned CONFIRMED applies.
       const reports = await runCycle([shop], admin);
-      expect(reports[0].outcomes["ADOPTED:REFUND_RECORDED"] ?? 0).toBe(0);
-      expect(reports[0].outcomes["WAIT:attribution"]).toBe(1);
+      expect(reports[0].outcomes["ADOPTED:REFUND_RECORDED"]).toBe(1);
       const row = await rowState(fx.rowId);
-      expect(row.status).toBe("IN_DOUBT");
-      expect(row.refundId).toBeNull();
+      expect(row.status).toBe("REFUND_RECORDED");
+      expect(row.refundId).toBe(rid);
     });
 
-    it("UNVERIFIED attribution past the window parks review — still no adoption", async () => {
+    it("injected UNVERIFIED past the window parks review — still no adoption", async () => {
       const shop = uniqueShop();
       const rid = refundGid(5003);
       const dispatchedAt = await agoIso(25 * 3600e3);
@@ -720,14 +719,16 @@ describe.skipIf(!TEST_URL)(
       const admin = reconAdmin(
         fullEvidence({ rid, srcId: fx.secondaryId, marker, dispatchedAt }),
       );
-      const reports = await runCycle([shop], admin);
+      const reports = await runCycle([shop], admin, {
+        attributionStatus: "UNVERIFIED",
+      });
       expect(reports[0].outcomes["REVIEW:ATTRIBUTION_UNVERIFIED"]).toBe(1);
       const row = await rowState(fx.rowId);
       expect(row.status).toBe("REVIEW_REQUIRED");
       expect(row.refundId).toBeNull();
     });
 
-    it("a REFUND_RECORDED row under UNVERIFIED is never verified — attribution waits then parks", async () => {
+    it("a REFUND_RECORDED row under injected UNVERIFIED is never verified — attribution waits then parks", async () => {
       const shop = uniqueShop();
       const rid = refundGid(5004);
       // dispatchedAt 20 min ago → anchor (respondedAt ?? dispatchedAt) is
@@ -738,7 +739,9 @@ describe.skipIf(!TEST_URL)(
       const admin = reconAdmin(
         fullEvidence({ rid, srcId: fx.secondaryId, marker, dispatchedAt }),
       );
-      const reports = await runCycle([shop], admin);
+      const reports = await runCycle([shop], admin, {
+        attributionStatus: "UNVERIFIED",
+      });
       expect(reports[0].outcomes["VERIFIED"] ?? 0).toBe(0);
       expect(
         (reports[0].outcomes["REVIEW:ATTRIBUTION_UNVERIFIED"] ?? 0) +

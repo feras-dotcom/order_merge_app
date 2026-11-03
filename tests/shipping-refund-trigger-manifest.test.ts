@@ -1281,8 +1281,8 @@ describe("attribution CONFIRMED cannot be activated (12.3.1, 19.3)", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("the pinned value itself is UNVERIFIED", async () => {
+  it("the pinned value itself is CONFIRMED after the 12.3.1 reviewed transition", async () => {
     const gate = await import("../app/lib/shipping-refund-gate");
-    expect(gate.ATTRIBUTION_STATUS).toBe("UNVERIFIED");
+    expect(gate.ATTRIBUTION_STATUS).toBe("CONFIRMED");
   });
 });
