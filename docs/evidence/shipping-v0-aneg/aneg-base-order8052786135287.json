@@ -1,0 +1,40 @@
+{
+  "experiment": "G-AGREEMENT/A-NEG",
+  "label": "base-order-8052786135287",
+  "runAtUtc": "2026-11-03 (re-read during the A-NEG campaign; operator-executed, independently checked)",
+  "archivedAtUtc": "2026-11-03T08:51:08Z",
+  "apiVersion": "2026-04",
+  "store": "ordermergetest2.myshopify.com",
+  "role": "BASE — MergeShip-cancelled secondary baseline (12.8.1)",
+  "subject": {
+    "orderId": "gid://shopify/Order/8052786135287",
+    "cancelledBy": "MergeShip (Protocol v2, restock: true, no refund) — per the accepted shipping-v0 archive",
+    "refunds": [],
+    "refundAgreements": [],
+    "agreements": [
+      {
+        "__typename": "OrderAgreement",
+        "id": "gid://shopify/SalesAgreement/8613999411447",
+        "reason": "ORDER",
+        "app": { "id": "gid://shopify/App/426185785345" }
+      }
+    ]
+  },
+  "limitation": "PRESERVED: the exact Protocol v2 cancellation command (orderCancel arguments / execution-path record) was not completely recovered; BasicEvents show a MergeShip-labelled cancel and restock at cancelledAt, attributed by display title rather than app GID.",
+  "archivedReadbacks": {
+    "q-agreements-base_cancelled.json": "2ffb3fdc5112d638e86eb0115b3a48479e082c7c8b8ec253e4602fdf04e4fed2",
+    "q-reconcile-base_cancelled.json": "5eff9426c40117aa3e5bd6a3d80aaa218b993a26e3f673f5a174e63ce191b04b",
+    "base-cancel-events.json": "bebcf36037ebf8e42e97f7917c13cd14256f0c4b33639b7cc034b4289f0c40c1"
+  },
+  "documents": {
+    "Q-RECONCILE": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+    "Q-AGREEMENTS": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8"
+  },
+  "pageComplete": true,
+  "verifiedAppId": "gid://shopify/App/426185785345",
+  "checks": [
+    { "name": "base.no-refunds", "verdict": "PASS", "detail": "zero refunds, zero RefundAgreements; supports STRICT_EMPTY for this secondary" },
+    { "name": "base.limitation-preserved", "verdict": "PASS", "detail": "exact v2 cancellation command not completely recovered; recorded, not remedied" }
+  ],
+  "verdict": "PASS"
+}

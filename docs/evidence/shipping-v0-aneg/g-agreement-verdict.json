@@ -1,0 +1,22 @@
+{
+  "experiment": "G-AGREEMENT",
+  "determinedAtUtc": "2026-11-03T08:51:08Z",
+  "criteria": "SHIPPING-PHASE2-DESIGN 12.8.2",
+  "partA": {
+    "outcome": "CONFIRMED",
+    "checklist": [
+      { "requirement": "BASE recorded", "result": "met — gid://shopify/Order/8052786135287, zero refunds, zero RefundAgreements (aneg-base-order8052786135287.json; shipping-v0 archive)" },
+      { "requirement": "POS satisfies every 12.8.1 field", "result": "met — gid://shopify/Refund/1126385221879, exactly one RefundAgreement/REFUND, refund.id matches, app.id = Q-APPID gid://shopify/App/426185785345, $1.00 USD shipping-only, financial evidence matches what was sent (aneg-pos-order1133.json; shipping-v0-e7 archive)" },
+      { "requirement": "NEG comparable-shape control with linked RefundAgreement read after the visibility window, app null or different", "result": "met — gid://shopify/Refund/1126665912567 on #1134, staff-created via Shopify Admin, $2.00 USD shipping-only on a PAID dev-store test order; linked RefundAgreement read post-15-minute shows app.id gid://shopify/App/1830279, different from MergeShip's id (aneg-neg-order1134.json)" },
+      { "requirement": "typed match holds for POS", "result": "met — __typename RefundAgreement, reason REFUND, matching refund.id and app.id, financial evidence" }
+    ],
+    "negativeConditions": "none observed — no missing POS agreement, no foreign __typename/reason, no equal app.id on NEG, no double-linked refund, no financial disagreement",
+    "inconclusiveConditions": "none — provenance recorded for all counted refunds, documents by pinned sha256, agreement lists complete, reads after the visibility window, BASE recorded"
+  },
+  "partB": {
+    "outcome": "CONFIRMED",
+    "basis": "The G-E7 refund gid://shopify/Refund/1126385221879 is the first refund created with MergeShip's own app credentials on the development store. It was read back post-window with the pinned documents (shipping-v0-e7, label e7-5-final) and shows exactly one RefundAgreement/REFUND with app.id equal to Q-APPID. NEG is now on record (aneg-neg-order1134.json). The dispatcher was not required to issue the refund for the attribution question 12.8 answers: what Part B measures is whether a refund created through this app's credentials produces discriminating RefundAgreement evidence.",
+    "wordingResolution": "12.8.3 'The first refund the dispatcher actually creates' clarified to 'the first refund created with MergeShip's own app credentials' — aligned with the already-correct text 'the first app-created refund's attribution' (experiment table, section 20) and the 'uses the separately approved G-E7 refund' kind column. 12.8.2 unchanged."
+  },
+  "authorizationNote": "This determination records the 12.8.2 outcome only. ATTRIBUTION_STATUS remains UNVERIFIED: moving the constant requires the separately reviewed change of 12.3.1/12.8.4 citing this archive by manifest hash. S3 remains gated on that reviewed transition, not on this record alone."
+}

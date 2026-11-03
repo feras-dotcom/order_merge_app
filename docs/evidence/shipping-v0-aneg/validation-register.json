@@ -1,0 +1,57 @@
+{
+  "experiment": "G-AGREEMENT/A-NEG",
+  "store": "ordermergetest2.myshopify.com",
+  "apiVersion": "2026-04",
+  "archivedAtUtc": "2026-11-03T08:51:08Z",
+  "records": [
+    {
+      "name": "Q-RECONCILE",
+      "purpose": "refund-list read on NEG/POS/BASE orders",
+      "file": "aneg-neg-order1134.json",
+      "sha256": "b8b1389b8049215c84b164725dd4d4a54b4b0070d7e8e4c1330de7bf3f5685b4",
+      "verdict": "PASS"
+    },
+    {
+      "name": "Q-REFUND-DETAIL",
+      "purpose": "strict refund detail on NEG and POS refund ids",
+      "file": "aneg-neg-order1134.json",
+      "sha256": "819d87965b0ec68238f3900d7de82b75839e24901a7f5aa858a2fc6a93a754e6",
+      "verdict": "PASS"
+    },
+    {
+      "name": "Q-AGREEMENTS",
+      "purpose": "agreement attribution pages on all three orders; pagination complete",
+      "file": "aneg-neg-order1134.json",
+      "sha256": "26055b83248131155c8d8d53929bc755bb3435b01d3ab4575448b130d58014c8",
+      "verdict": "PASS"
+    },
+    {
+      "name": "POS-CROSSREF",
+      "purpose": "positive control = G-E7 refund; verbatim readbacks already archived in shipping-v0-e7",
+      "file": "aneg-pos-order1133.json",
+      "sha256": null,
+      "verdict": "PASS"
+    },
+    {
+      "name": "BASE-CROSSREF",
+      "purpose": "baseline = accepted shipping-v0 archive order 8052786135287",
+      "file": "aneg-base-order8052786135287.json",
+      "sha256": null,
+      "verdict": "PASS"
+    },
+    {
+      "name": "PROVENANCE",
+      "purpose": "NEG creation provenance record (Admin UI, staff, no app credentials)",
+      "file": "neg-refund-1126665912567-provenance.json",
+      "sha256": null,
+      "verdict": "PASS"
+    },
+    {
+      "name": "VERDICT",
+      "purpose": "G-AGREEMENT part A and part B outcome determination under 12.8.2",
+      "file": "g-agreement-verdict.json",
+      "sha256": null,
+      "verdict": "PASS"
+    }
+  ]
+}

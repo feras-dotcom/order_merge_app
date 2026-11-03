@@ -1,0 +1,14 @@
+{
+  "experiment": "G-AGREEMENT/A-NEG",
+  "refundId": "gid://shopify/Refund/1126665912567",
+  "orderName": "#1134",
+  "store": "ordermergetest2.myshopify.com",
+  "archivedAtUtc": "2026-11-03T08:51:08Z",
+  "creationChannel": "Shopify Admin UI",
+  "actor": "staff member (role label only; no staff identity recorded)",
+  "appCredentialsUsed": false,
+  "agreementAppId": "gid://shopify/App/1830279",
+  "mergeshipAppId": "gid://shopify/App/426185785345",
+  "note": "The linked RefundAgreement attributes the refund to a different application id than MergeShip's verified Q-APPID identity — the discriminating observation 12.8.1 expects of a qualifying NEG.",
+  "approval": "A-NEG is a separately approved experiment (12.8.3); this archive records the executed run and its verified readback."
+}
