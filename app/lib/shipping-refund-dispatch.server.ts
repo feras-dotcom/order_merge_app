@@ -402,7 +402,7 @@ interface LockedGateState extends ShippingGateLiveState {
  *  only after the T3 transaction promise has resolved. */
 const T3_COMMIT_AUTHORITY: unique symbol = Symbol("shipping-refund-t3-commit");
 
-const assertT3Authority = (authority: unknown): asserts authority is typeof T3_COMMIT_AUTHORITY => {
+const assertT3Authority: (authority: unknown) => asserts authority is typeof T3_COMMIT_AUTHORITY = (authority) => {
   if (authority !== T3_COMMIT_AUTHORITY) {
     throw new Error(
       "DispatchPermit can only be minted from a resolved T3 commit inside the dispatch module",

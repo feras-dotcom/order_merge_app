@@ -12,6 +12,9 @@
 //   npx vite-node --script scripts/shipping-refund-admin.ts sweep-prepared-horizon [--shop S] [--limit N] --apply
 //   npx vite-node --script scripts/shipping-refund-admin.ts resolve --row ID --by WHO --resolution X --note TEXT --apply
 //   npx vite-node --script scripts/shipping-refund-admin.ts worker --apply   (one dispatch cycle; inert unless the worker env flag is enabled)
+//   npx vite-node --script scripts/shipping-refund-admin.ts admission --shop DEVSTORE --apply   (one admission scan for one shop; writes rows)
+//   npx vite-node --script scripts/shipping-refund-admin.ts reconcile --shop DEVSTORE --apply   (one reconciliation cycle for one shop)
+//   npx vite-node --script scripts/shipping-refund-admin.ts wire --row ID     (read-only frozen wire request + approval state)
 import defaultDb from "../app/db.server";
 import { DB_WALL } from "../app/lib/ownership.server";
 import {
@@ -24,6 +27,20 @@ import {
   runShippingRefundDispatchCycle,
 } from "../app/lib/shipping-refund-worker.server";
 import { shippingRefundsDispatchEnabled } from "../app/lib/shipping-refund-dispatch.server";
+import { runShippingRefundAdmissionScan } from "../app/lib/shipping-refund-admission.server";
+import { runShippingRefundReconcileCycle } from "../app/lib/shipping-refund-reconcile.server";
+
+/** Hard development-store guard for the staged S3 commands: admission and
+ *  reconcile may only ever target the approved development store. Matches
+ *  the readback script's SHIPRB_STORE/EXPECTED_STORE convention. */
+const S3_DEV_STORE = process.env.SHIPRB_STORE ?? "ordermergetest2.myshopify.com";
+const requireDevStoreShop = (): string => {
+  const shop = get("--shop");
+  if (shop !== S3_DEV_STORE) {
+    throw new Error(`staged commands require --shop ${S3_DEV_STORE} (development store only)`);
+  }
+  return shop;
+};
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -210,6 +227,58 @@ async function main() {
         log: console.log,
       });
       console.log(JSON.stringify(r));
+      return;
+    }
+    case "admission": {
+      // Mutating: one admission scan for one shop — claims candidates,
+      // freezes PREPARED rows. Staged S3 execution only; the shop must be
+      // the approved development store. --apply required like every
+      // other mutating command.
+      const shop = requireDevStoreShop();
+      if (!APPLY) {
+        console.log(JSON.stringify({ dryRun: true, shop, wouldRun: "runShippingRefundAdmissionScan" }));
+        return;
+      }
+      const { unauthenticated } = await import("../app/shopify.server");
+      const r = await runShippingRefundAdmissionScan([shop], {
+        adminFactory: async (s) => (await unauthenticated.admin(s)).admin,
+        log: console.log,
+      });
+      console.log(JSON.stringify(r));
+      return;
+    }
+    case "reconcile": {
+      // Mutating: one reconciliation cycle for one shop — read-only
+      // toward Shopify but writes IN_DOUBT/adoption/review transitions.
+      // Staged S3 execution only; development store guard + --apply.
+      const shop = requireDevStoreShop();
+      if (!APPLY) {
+        console.log(JSON.stringify({ dryRun: true, shop, wouldRun: "runShippingRefundReconcileCycle" }));
+        return;
+      }
+      const { unauthenticated } = await import("../app/shopify.server");
+      const r = await runShippingRefundReconcileCycle([shop], {
+        adminFactory: async (s) => (await unauthenticated.admin(s)).admin,
+        log: console.log,
+      });
+      console.log(JSON.stringify(r));
+      return;
+    }
+    case "wire": {
+      // Read-only: the frozen wire request and approval state for one row —
+      // what the operator approves with approve-hash before dispatch.
+      const row = get("--row");
+      if (!row) throw new Error("--row is required");
+      const [r] = await db.$queryRaw<{
+        id: string; shop: string; status: string; reasonCode: string | null;
+        wireHash: string | null; approvedWireHash: string | null;
+        wireVariables: unknown; idempotencyKey: string | null;
+        dispatchToken: string | null;
+      }[]>`
+        SELECT "id","shop","status","reasonCode","wireHash","approvedWireHash",
+               "wireVariables","idempotencyKey","dispatchToken"
+        FROM "ShippingRefund" WHERE "id" = ${row}`;
+      console.log(JSON.stringify(r ?? null, null, 1));
       return;
     }
     default:
