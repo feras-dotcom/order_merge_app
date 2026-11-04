@@ -129,14 +129,18 @@ async function main() {
           throw new Error(`MERCHANT_NOT_OPTED_IN: ${shop} has no live shipping opt-in epoch`);
         }
         await tx.$queryRaw`SELECT "id" FROM "ShippingExecuteControl" WHERE "id" = 'control' FOR SHARE`;
+        // merchantOptInEpoch must copy the Settings timestamp inside SQL —
+        // a JS Date bound back into a naive timestamp column is read in the
+        // session timezone and lands hours off on non-UTC sessions.
         await tx.$executeRaw`
           INSERT INTO "ShippingExecuteApproval"
             ("shop","approvedAt","approvedBy","revokedAt","merchantOptInEpoch","ackVersion","ackRecordedAt","currencyCode","maxRefundMinor","dailyCap","autoApprove","note")
-          VALUES (${shop}, ${DB_WALL}, ${BY}, NULL, ${st.shippingAdjustmentEnabledAt},
-                  ${REQUIRED_ACK_VERSION}, ${DB_WALL}, ${currency}, ${maxMinor}, ${cap}, ${auto ?? false}, ${note})
+          SELECT ${shop}, ${DB_WALL}, ${BY}, NULL, s."shippingAdjustmentEnabledAt",
+                 ${REQUIRED_ACK_VERSION}, ${DB_WALL}, ${currency}, ${maxMinor}, ${cap}, ${auto ?? false}, ${note}
+          FROM "Settings" s WHERE s."shop" = ${shop}
           ON CONFLICT ("shop") DO UPDATE SET
             "approvedAt" = ${DB_WALL}, "approvedBy" = ${BY}, "revokedAt" = NULL,
-            "merchantOptInEpoch" = ${st.shippingAdjustmentEnabledAt},
+            "merchantOptInEpoch" = (SELECT s2."shippingAdjustmentEnabledAt" FROM "Settings" s2 WHERE s2."shop" = ${shop}),
             "ackVersion" = ${REQUIRED_ACK_VERSION}, "ackRecordedAt" = ${DB_WALL},
             "currencyCode" = ${currency}, "maxRefundMinor" = ${maxMinor},
             "dailyCap" = ${cap}, "autoApprove" = ${auto ?? false}, "note" = ${note}`;
