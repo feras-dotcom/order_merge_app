@@ -107,7 +107,11 @@ export interface ShippingRefundReconcileDeps {
    *  the real Session-table lookup below: production wiring MUST NOT
    *  substitute a loader that identifies a different session row or that
    *  always reports usable — the offline-session validity check is a
-   *  prerequisite for any future operational caller. */
+   *  prerequisite for any future operational caller. The one sanctioned
+   *  exception is the S3 dev-store operator script (scripts/s3-cli.ts),
+   *  which substitutes a CLI identity-proof loader
+   *  (scripts/lib/s3-cli-admin.ts) because CLI auth has no stored Session;
+   *  that loader fails closed and is never wired into the server. */
   sessionLoader?: (shop: string) => Promise<{ expires: Date | null } | null>;
   /** Test seam for the cycle-level catalog check (mirrors admission). The
    *   transition writer always re-checks inside its own transaction. */

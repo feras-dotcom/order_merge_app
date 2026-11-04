@@ -221,6 +221,15 @@ const productionContext = (): SweepContext => {
   };
 };
 
+/** Operator/test seam: the exact production sweep context with explicit
+ *  overrides — the pieces are not re-created here so a caller cannot drift
+ *  from the server's wiring. The server loop itself uses
+ *  productionContext() unchanged (scripts/s3-cli.ts is the only caller). */
+export const buildSweepContext = (overrides: Partial<SweepContext>): SweepContext => ({
+  ...productionContext(),
+  ...overrides,
+});
+
 declare global {
   // eslint-disable-next-line no-var
   var __mergeshipWorkerStarted: boolean | undefined;

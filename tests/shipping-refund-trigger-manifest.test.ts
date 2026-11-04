@@ -1119,6 +1119,9 @@ describe("dispatch path confined to the S2 modules", () => {
       // entry.server starts the worker's own timer (3.1, 3.4).
       "app/entry.server.tsx",
       "scripts/shipping-refund-admin.ts",
+      // The S3 staged dev-store CLI legitimately drives the dispatch cycle
+      // through the pinned CLI transport.
+      "scripts/s3-cli.ts",
     ]);
     const banned = /\b(DispatchPermit|sendRefund|shipping[-_]?refund[-_]?(dispatch|worker)|MERGESHIP_SHIPPING_REFUNDS)\b/i;
     const offenders: string[] = [];
@@ -1176,6 +1179,10 @@ describe("dispatch path confined to the S2 modules", () => {
     const ALLOWED = new Set([
       "app/lib/shipping-refund-contract.ts",
       "app/lib/shipping-refund-dispatch.server.ts",
+      // The S3 CLI transport must string-equal the exact document sendRefund
+      // passes, so it reads the same single accessor — it never constructs
+      // a dispatch request of its own.
+      "scripts/lib/s3-cli-admin.ts",
     ]);
     const offenders: string[] = [];
     for (const root of ["app", "scripts"]) {
@@ -1186,6 +1193,30 @@ describe("dispatch path confined to the S2 modules", () => {
         if (/shippingRefundMutationDocument/.test(text)) {
           offenders.push(rel);
         }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("the S3 CLI transport is confined to the S3 operator script and tests", () => {
+    // scripts/lib/s3-cli-admin.ts is the S3-only `shopify app execute`
+    // adapter: it may be imported only by the staged dev-store CLI and its
+    // tests — never by app/ (the server must keep the offline-session
+    // transport) and never by any other script.
+    const MODULE_TOKEN = "s3-cli-admin";
+    const ALLOWED = new Set([
+      "scripts/lib/s3-cli-admin.ts",
+      "scripts/s3-cli.ts",
+      "tests/s3-cli-admin.test.ts",
+      "tests/shipping-refund-trigger-manifest.test.ts",
+    ]);
+    const offenders: string[] = [];
+    for (const root of ["app", "scripts", "tests"]) {
+      for (const f of walk(join(REPO_ROOT, root), [".ts", ".tsx"])) {
+        const rel = relative(REPO_ROOT, f).replace(/\\/g, "/");
+        if (ALLOWED.has(rel)) continue;
+        const text = significantText(readFileSync(f, "utf8"), "ts");
+        if (text.includes(MODULE_TOKEN)) offenders.push(rel);
       }
     }
     expect(offenders).toEqual([]);
