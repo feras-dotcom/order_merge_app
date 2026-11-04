@@ -9,10 +9,10 @@
 // write-once refund budget, zero retries and a JSONL transport log.
 //
 //   - read-only : queries only; every mutation is refused before spawn.
-//   - merge     : mutations whose operation name is one of the eight pinned
-//                 MergeShip merge-path names (merge.server.ts /
-//                 operation-protocol.server.ts — the ONLY mutations the
-//                 engine ever sends); anything else refuses.
+//   - merge     : mutations string-equal to one of the eight pinned merge
+//                 documents (the exact templates merge.server.ts /
+//                 operation-protocol.server.ts send — the ONLY mutations
+//                 the engine ever sends); anything else refuses.
 //   - refund    : the ONLY mutation permitted is a document string-equal to
 //                 the pinned contract document sendRefund passes — and only
 //                 once per adapter instance; a second dispatch document
@@ -40,6 +40,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { AdminClient } from "../../app/lib/graphql.server";
+import {
+  EDIT_ADD_VARIANT_MUTATION,
+  EDIT_BEGIN_MUTATION,
+  EDIT_LINE_DISCOUNT_MUTATION,
+} from "../../app/lib/merge.server";
+import {
+  CANCEL_MUTATION,
+  CLOSE_MUTATION,
+  COMMIT_MUTATION,
+  NOTE_MUTATION,
+  TAGS_ADD_MUTATION,
+} from "../../app/lib/operation-protocol.server";
 import { shippingRefundMutationDocument } from "../../app/lib/shipping-refund-contract";
 
 // ── Hard pins (literals, no env override) ─────────────────────────────────────
@@ -423,22 +435,26 @@ export function classifyS3Document(doc: string): ClassifiedDocument {
 
 export type S3CliMode = "read-only" | "merge" | "refund";
 
-/** The complete set of merge-path mutation operation names — pinned from
- *  app/lib/merge.server.ts (MergeEditBegin / MergeEditAddVariant /
- *  MergeEditDiscount) and app/lib/operation-protocol.server.ts
- *  (MergeEditCommit / MergeCancelSecondary / MergeTagsAdd /
- *  MergeAnnotateNote / MergeOrderClose). Verified against the source: no
- *  other mutation exists on the merge path. */
-const S3_MERGE_MUTATION_NAMES: ReadonlySet<string> = new Set([
-  "MergeEditBegin",
-  "MergeEditAddVariant",
-  "MergeEditDiscount",
-  "MergeEditCommit",
-  "MergeCancelSecondary",
-  "MergeTagsAdd",
-  "MergeAnnotateNote",
-  "MergeOrderClose",
+/** The complete set of merge-path mutation documents — the exact eight
+ *  `#graphql` template strings the engine sends, imported verbatim from
+ *  app/lib/merge.server.ts and app/lib/operation-protocol.server.ts. Merge
+ *  mode requires string equality with one of these documents, so a
+ *  modified document, an added field, a changed argument (notifyCustomer,
+ *  allowDuplicates, refundMethod, restock) or a different mutation that
+ *  merely reuses an approved operation name is refused before spawn. */
+const S3_MERGE_MUTATION_DOCUMENTS: ReadonlySet<string> = new Set([
+  EDIT_BEGIN_MUTATION,
+  EDIT_ADD_VARIANT_MUTATION,
+  EDIT_LINE_DISCOUNT_MUTATION,
+  COMMIT_MUTATION,
+  CANCEL_MUTATION,
+  TAGS_ADD_MUTATION,
+  NOTE_MUTATION,
+  CLOSE_MUTATION,
 ]);
+if (S3_MERGE_MUTATION_DOCUMENTS.size !== 8) {
+  throw new Error("merge mutation allowlist must contain the eight distinct pinned documents");
+}
 
 export class S3CliPolicyError extends Error {
   name = "S3CliPolicyError";
@@ -521,9 +537,9 @@ export function createS3CliAdmin(opts: S3CliAdminOptions): AdminClient {
           );
         }
         if (mode === "merge") {
-          if (!cls.opName || !S3_MERGE_MUTATION_NAMES.has(cls.opName)) {
+          if (!S3_MERGE_MUTATION_DOCUMENTS.has(query)) {
             throw new S3CliPolicyError(
-              `mutation ${cls.opName ?? "<anonymous>"} is not one of the pinned merge mutations`,
+              `mutation ${cls.opName ?? "<anonymous>"} is not one of the eight pinned merge documents`,
             );
           }
         }
@@ -798,6 +814,55 @@ export function evaluateS3DispatchPreflight(
       typeof r?.plannedShippingMinor === "string" &&
       /^\d+$/.test(r.plannedShippingMinor) &&
       BigInt(r.plannedShippingMinor) <= 400n,
+  };
+  const failed = Object.entries(checks)
+    .filter(([, ok]) => !ok)
+    .map(([k]) => k);
+  return { checks, failed, ok: failed.length === 0 };
+}
+
+// ── S3 sweep scope (pure — unit-tested; restricts the sweep to the two
+//    approved orders) ─────────────────────────────────────────────────────
+
+export interface S3SweepScopeFacts {
+  /** The two approved test-order gids (--orders, sorted for comparison). */
+  readonly expectedOrderIds: readonly [string, string];
+  /** Every ProcessedWebhook row for the dev store. */
+  readonly workItems: readonly { readonly orderId: string }[];
+  /** Every MergeOperation for the dev store (any phase). */
+  readonly operations: readonly {
+    readonly id: string;
+    readonly involvedOrderIds: readonly string[];
+  }[];
+}
+
+export interface S3SweepScopeVerdict {
+  readonly checks: Record<string, boolean>;
+  readonly failed: string[];
+  readonly ok: boolean;
+}
+
+/** The sweep may only ever act on the two approved test orders. Before
+ *  every mutating sweep invocation the disposable database must contain
+ *  exactly the two expected work items for the dev store and at most one
+ *  MergeOperation whose involved orders are a subset of the approved
+ *  pair — an extra or mismatched order, an extra item, or more than one
+ *  operation fails closed. */
+export function evaluateS3SweepScope(
+  facts: S3SweepScopeFacts,
+): S3SweepScopeVerdict {
+  const expected = new Set(facts.expectedOrderIds);
+  const workIds = new Set(facts.workItems.map((w) => w.orderId));
+  const extraWork = facts.workItems.filter((w) => !expected.has(w.orderId));
+  const missing = [...expected].filter((id) => !workIds.has(id));
+  const foreignOps = facts.operations.filter(
+    (o) => !o.involvedOrderIds.every((id) => expected.has(id)),
+  );
+  const checks: Record<string, boolean> = {
+    exactlyTwoWorkItems: facts.workItems.length === 2 && missing.length === 0,
+    noExtraWorkItems: extraWork.length === 0,
+    atMostOneOperation: facts.operations.length <= 1,
+    noForeignOperationOrders: foreignOps.length === 0,
   };
   const failed = Object.entries(checks)
     .filter(([, ok]) => !ok)

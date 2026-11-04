@@ -9,7 +9,7 @@
 //
 //   npx vite-node --script scripts/s3-cli.ts identity --evidence <dir>
 //   npx vite-node --script scripts/s3-cli.ts backfill --orders <gidA>,<gidB> --since <iso> [--evidence <dir>] [--apply]
-//   npx vite-node --script scripts/s3-cli.ts sweep [--ticks N] [--evidence <dir>] [--apply]
+//   npx vite-node --script scripts/s3-cli.ts sweep --orders <gidA>,<gidB> [--ticks N] [--evidence <dir>] [--apply]
 //   npx vite-node --script scripts/s3-cli.ts admission [--evidence <dir>] [--apply]
 //   npx vite-node --script scripts/s3-cli.ts reconcile [--evidence <dir>] [--apply]
 //   npx vite-node --script scripts/s3-cli.ts wire --row ID [--evidence <dir>]
@@ -49,6 +49,7 @@ import {
   createS3CliAdmin,
   createS3CliSessionLoader,
   evaluateS3DispatchPreflight,
+  evaluateS3SweepScope,
   runS3IdentityProbe,
   S3_STORE,
 } from "./lib/s3-cli-admin";
@@ -177,11 +178,26 @@ async function main() {
     }
     case "sweep": {
       // Mutating: runSweepOnce leases and drives merge work. Refuses unless
-      // MERGESHIP_MUTATIONS=enabled and the disposable database holds rows
-      // for the dev store only — fail closed before any tick.
+      // MERGESHIP_MUTATIONS=enabled, --orders names exactly the two approved
+      // test orders, and the disposable database contains exactly those two
+      // work items and no unexpected merge operation for the dev store —
+      // fail closed before any tick.
       const ticks = get("--ticks") !== undefined ? Number(get("--ticks")) : 1;
       if (!Number.isInteger(ticks) || ticks < 1 || ticks > MAX_SWEEP_TICKS) {
         throw new Error(`--ticks must be an integer 1-${MAX_SWEEP_TICKS}`);
+      }
+      const expectedOrders = (get("--orders") ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (
+        expectedOrders.length !== 2 ||
+        new Set(expectedOrders).size !== 2 ||
+        !expectedOrders.every((o) => ORDER_GID.test(o))
+      ) {
+        throw new Error(
+          "--orders requires exactly two distinct gid://shopify/Order/<id> values",
+        );
       }
       await s3DbPreflight();
       if (process.env.MERGESHIP_MUTATIONS !== "enabled") {
@@ -197,18 +213,38 @@ async function main() {
       }
       const snapshot = async () => ({
         operations: await db.$queryRaw<
-          { id: string; phase: string | null; createdAt: Date }[]
+          {
+            id: string;
+            phase: string | null;
+            sideEffectsDone: boolean;
+            involvedOrderIds: string[];
+            createdAt: Date;
+          }[]
         >`
-          SELECT "id","phase","createdAt" FROM "MergeOperation"
-          WHERE "shop" = ${S3_STORE} ORDER BY "createdAt"`,
+          SELECT "id","phase","sideEffectsDone","involvedOrderIds","createdAt"
+          FROM "MergeOperation" WHERE "shop" = ${S3_STORE} ORDER BY "createdAt"`,
         workItems: await db.$queryRaw<
           { orderId: string; status: string; outcome: string | null }[]
         >`
           SELECT "orderId","status","outcome" FROM "ProcessedWebhook"
           WHERE "shop" = ${S3_STORE} ORDER BY "createdAt"`,
       });
+      const scope = await (async () => {
+        const { operations, workItems } = await snapshot();
+        return evaluateS3SweepScope({
+          expectedOrderIds: [expectedOrders[0], expectedOrders[1]],
+          workItems,
+          operations,
+        });
+      })();
+      if (!scope.ok) {
+        const result = { dryRun: !APPLY, refused: true, checks: scope.checks, failed: scope.failed };
+        writeStageResult("sweep", result);
+        console.log(JSON.stringify(result));
+        throw new Error(`refused: S3 sweep scope failed: ${scope.failed.join(", ")}`);
+      }
       if (!APPLY) {
-        const result = { dryRun: true, ticks, wouldRun: "runSweepOnce", before: await snapshot() };
+        const result = { dryRun: true, ticks, wouldRun: "runSweepOnce", scope: scope.checks, before: await snapshot() };
         writeStageResult("sweep", result);
         console.log(JSON.stringify(result));
         return;

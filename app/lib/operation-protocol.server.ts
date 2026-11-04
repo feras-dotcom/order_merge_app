@@ -75,7 +75,7 @@ export const matchesCancelStaffNote = (
   opToken != null &&
   (note ?? "").trim().replace(/\s+/g, " ") === cancelStaffNote(primaryOrderName, opToken);
 
-const COMMIT_MUTATION = `#graphql
+export const COMMIT_MUTATION = `#graphql
   mutation MergeEditCommit($id: ID!, $staffNote: String) {
     orderEditCommit(id: $id, notifyCustomer: false, staffNote: $staffNote) {
       order { id }
@@ -83,7 +83,7 @@ const COMMIT_MUTATION = `#graphql
     }
   }`;
 
-const CANCEL_MUTATION = `#graphql
+export const CANCEL_MUTATION = `#graphql
   mutation MergeCancelSecondary($orderId: ID!, $staffNote: String!) {
     orderCancel(
       orderId: $orderId
@@ -103,7 +103,7 @@ const JOB_QUERY = `#graphql
     job(id: $id) { done }
   }`;
 
-const TAGS_ADD_MUTATION = `#graphql
+export const TAGS_ADD_MUTATION = `#graphql
   mutation MergeTagsAdd($id: ID!, $tags: [String!]!) {
     tagsAdd(id: $id, tags: $tags) {
       node { id }
@@ -111,7 +111,7 @@ const TAGS_ADD_MUTATION = `#graphql
     }
   }`;
 
-const NOTE_MUTATION = `#graphql
+export const NOTE_MUTATION = `#graphql
   mutation MergeAnnotateNote($input: OrderInput!) {
     orderUpdate(input: $input) {
       order { id note }
@@ -119,7 +119,7 @@ const NOTE_MUTATION = `#graphql
     }
   }`;
 
-const CLOSE_MUTATION = `#graphql
+export const CLOSE_MUTATION = `#graphql
   mutation MergeOrderClose($input: OrderCloseInput!) {
     orderClose(input: $input) {
       order { id closedAt }

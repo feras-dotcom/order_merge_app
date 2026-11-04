@@ -12,9 +12,22 @@ import { describe, expect, it } from "vitest";
 
 import { shippingRefundMutationDocument } from "../app/lib/shipping-refund-contract";
 import {
+  EDIT_ADD_VARIANT_MUTATION,
+  EDIT_BEGIN_MUTATION,
+  EDIT_LINE_DISCOUNT_MUTATION,
+} from "../app/lib/merge.server";
+import {
+  CANCEL_MUTATION,
+  CLOSE_MUTATION,
+  COMMIT_MUTATION,
+  NOTE_MUTATION,
+  TAGS_ADD_MUTATION,
+} from "../app/lib/operation-protocol.server";
+import {
   createS3CliAdmin,
   createS3CliSessionLoader,
   evaluateS3DispatchPreflight,
+  evaluateS3SweepScope,
   runS3IdentityProbe,
   S3_APP_ID,
   S3_STORE,
@@ -117,22 +130,57 @@ describe("read-only mode", () => {
 });
 
 describe("merge mode", () => {
-  const PINNED = [
-    "MergeEditBegin",
-    "MergeEditAddVariant",
-    "MergeEditDiscount",
-    "MergeEditCommit",
-    "MergeCancelSecondary",
-    "MergeTagsAdd",
-    "MergeAnnotateNote",
-    "MergeOrderClose",
-  ];
+  // The real merge documents, imported from the modules that send them —
+  // the policy is exact string equality, not an operation-name list.
+  const PINNED_DOCS = [
+    ["MergeEditBegin", EDIT_BEGIN_MUTATION],
+    ["MergeEditAddVariant", EDIT_ADD_VARIANT_MUTATION],
+    ["MergeEditDiscount", EDIT_LINE_DISCOUNT_MUTATION],
+    ["MergeEditCommit", COMMIT_MUTATION],
+    ["MergeCancelSecondary", CANCEL_MUTATION],
+    ["MergeTagsAdd", TAGS_ADD_MUTATION],
+    ["MergeAnnotateNote", NOTE_MUTATION],
+    ["MergeOrderClose", CLOSE_MUTATION],
+  ] as const;
 
-  it.each(PINNED)("permits the pinned %s mutation", async (name) => {
+  it.each(PINNED_DOCS)("permits the real %s document", async (_name, doc) => {
     const rec = recorder();
     const a = admin("merge", rec, runnerReturning(result({ data: { f: 1 } }), rec));
-    await a.graphql(`mutation ${name} { f }`);
+    await a.graphql(doc);
     expect(rec.calls).toHaveLength(1);
+  });
+
+  it("rejects a document that reuses an approved operation name for another mutation", async () => {
+    const rec = recorder();
+    const a = admin("merge", rec, runnerReturning(result({ data: {} }), rec));
+    await expect(a.graphql("mutation MergeEditBegin { f }")).rejects.toThrow(/pinned merge/);
+    await expect(
+      a.graphql("mutation MergeEditCommit($id: ID!) { orderEditCommit(id: $id, notifyCustomer: true) { order { id } } }"),
+    ).rejects.toThrow(/pinned merge/);
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it("rejects the real document with safety-critical arguments changed or fields added", async () => {
+    const rec = recorder();
+    const a = admin("merge", rec, runnerReturning(result({ data: {} }), rec));
+    // notifyCustomer flipped on the real commit document.
+    const badCommit = COMMIT_MUTATION.replace("notifyCustomer: false", "notifyCustomer: true");
+    expect(badCommit).not.toBe(COMMIT_MUTATION);
+    await expect(a.graphql(badCommit)).rejects.toThrow(/pinned merge/);
+    // refundMethod flipped on the real cancel document (the merge must
+    // never refund).
+    const badCancel = CANCEL_MUTATION.replace(
+      "refundMethod: { originalPaymentMethodsRefund: false }",
+      "refundMethod: { originalPaymentMethodsRefund: true }",
+    );
+    await expect(a.graphql(badCancel)).rejects.toThrow(/pinned merge/);
+    // An added root field on the real begin document.
+    const added = EDIT_BEGIN_MUTATION.replace(
+      "orderEditBegin(id: $id) {",
+      "orderEditBegin(id: $id) {",
+    ).replace("userErrors { field message }", "order { id } userErrors { field message }");
+    await expect(a.graphql(added)).rejects.toThrow(/pinned merge/);
+    expect(rec.calls).toHaveLength(0);
   });
 
   it("rejects the pinned refund document, unknown mutations and multi-operation docs", async () => {
@@ -426,5 +474,62 @@ describe("evaluateS3DispatchPreflight", () => {
     const v = evaluateS3DispatchPreflight(facts);
     expect(v.ok).toBe(false);
     expect(v.failed).toEqual([check]);
+  });
+});
+
+describe("evaluateS3SweepScope", () => {
+  const A = "gid://shopify/Order/101";
+  const B = "gid://shopify/Order/102";
+  const base = {
+    expectedOrderIds: [A, B] as [string, string],
+    workItems: [{ orderId: A }, { orderId: B }],
+    operations: [] as { id: string; involvedOrderIds: string[] }[],
+  };
+  const over = (p: Partial<typeof base>) => ({ ...base, ...p });
+
+  it("passes with exactly the two expected work items and no operations", () => {
+    const v = evaluateS3SweepScope(base);
+    expect(v.ok).toBe(true);
+    expect(v.failed).toEqual([]);
+  });
+
+  it("passes with the single expected operation involving the two orders", () => {
+    const v = evaluateS3SweepScope(
+      over({ operations: [{ id: "op1", involvedOrderIds: [B, A] }] }),
+    );
+    expect(v.ok).toBe(true);
+  });
+
+  it.each([
+    ["missing work item", over({ workItems: [{ orderId: A }] }), "exactlyTwoWorkItems"],
+    [
+      "extra work item",
+      over({ workItems: [{ orderId: A }, { orderId: B }, { orderId: "gid://shopify/Order/103" }] }),
+      "exactlyTwoWorkItems",
+    ],
+    [
+      "foreign work item",
+      over({ workItems: [{ orderId: A }, { orderId: "gid://shopify/Order/103" }] }),
+      "exactlyTwoWorkItems",
+    ],
+    [
+      "two operations",
+      over({
+        operations: [
+          { id: "op1", involvedOrderIds: [A, B] },
+          { id: "op2", involvedOrderIds: [A, B] },
+        ],
+      }),
+      "atMostOneOperation",
+    ],
+    [
+      "operation touching a foreign order",
+      over({ operations: [{ id: "op1", involvedOrderIds: [A, "gid://shopify/Order/103"] }] }),
+      "noForeignOperationOrders",
+    ],
+  ])("fails on %s", (_label, facts, check) => {
+    const v = evaluateS3SweepScope(facts);
+    expect(v.ok).toBe(false);
+    expect(v.failed).toContain(check);
   });
 });

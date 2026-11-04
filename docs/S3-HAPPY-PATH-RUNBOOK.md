@@ -189,7 +189,8 @@ No `MergeOperation` rows are inserted and nothing is cancelled via Admin.
 The combine is the real pipeline: work item → `runSweepOnce` →
 `executeMerge`/`driveOperation` Protocol v2 (write-ahead
 `MergeMutationAttempt`, `orderEditCommit`, `MergeRecord`, tokened lines,
-the app's own `orderCancel` with the canonical note).
+the app's own `orderCancel` with the canonical note, then COMPLETED
+side-effects).
 
 1. **Temporary shipping rate (operator, Shopify Admin):** Settings →
    Shipping and delivery → the shipping profile covering the test
@@ -231,19 +232,33 @@ the app's own `orderCancel` with the canonical note).
 
    ```bash
    MERGESHIP_MUTATIONS=enabled npx vite-node --script scripts/s3-cli.ts sweep \
+     --orders <gid://shopify/Order/A>,<gid://shopify/Order/B> \
      --ticks 1 --evidence $EVID --apply
    ```
 
-   Repeat single ticks, inspecting the printed op/work state between
-   ticks, until the operation is `APPLIED` with the secondary cancelled
-   (the 120 s new-order index grace may hold work PENDING initially). Any
-   `REVIEW_REQUIRED` → STOP. Expected durable evidence:
-   `MergeOperation` `APPLIED` with `createdAt` after every Phase 1 epoch,
-   `MergeRecord` rows, `MergeMutationAttempt` SUCCEEDED rows for
-   `EDIT_COMMIT` and `ORDER_CANCEL`, tokened primary lines, secondary
-   `cancelledAt` + canonical staff note, `OrderEditAgreement` attributed
-   to `gid://shopify/App/426185785345`; `transport.jsonl` shows only
-   merge-mode mutations.
+   Every sweep invocation re-verifies the scope before mutating: exactly
+   the two approved work items and at most one operation touching only
+   those orders — it refuses anything else. Repeat single ticks,
+   inspecting the printed op/work state between ticks, until the
+   operation completes (the 120 s new-order index grace may hold work
+   PENDING initially). Any `REVIEW_REQUIRED` → STOP.
+
+   **Completion checkpoint — `APPLIED` is not enough.** Admission may
+   start only when the operation is FULLY finished:
+
+   ```sql
+   SELECT "phase","sideEffectsDone","involvedOrderIds","createdAt","appliedEvidence"
+     FROM "MergeOperation" WHERE "shop" = 'ordermergetest2.myshopify.com';
+   ```
+
+   Require: `phase = 'COMPLETED'` AND `sideEffectsDone = true`, plus the
+   durable merge evidence: `MergeRecord` rows, `MergeMutationAttempt`
+   SUCCEEDED rows for `EDIT_COMMIT` and `ORDER_CANCEL`, tokened primary
+   lines, the secondary `cancelledAt` + canonical staff note,
+   `OrderEditAgreement` attributed to `gid://shopify/App/426185785345`,
+   `involvedOrderIds` exactly the two approved orders, `createdAt` after
+   every Phase 1 epoch, and `transport.jsonl` showing only merge-mode
+   mutations (orderEdit*/orderCancel/tagsAdd/orderUpdate/orderClose).
 6. **Disable the merge switches** (same UPDATE with `false`).
 7. **Wait 15 minutes** from the secondary's `cancelledAt` (admission
    settle delay).

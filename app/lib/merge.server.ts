@@ -448,7 +448,7 @@ export const CALCULATED_ORDER_QUERY = `#graphql
     }
   }`;
 
-const EDIT_BEGIN_MUTATION = `#graphql
+export const EDIT_BEGIN_MUTATION = `#graphql
   mutation MergeEditBegin($id: ID!) {
     orderEditBegin(id: $id) {
       calculatedOrder { id }
@@ -456,7 +456,7 @@ const EDIT_BEGIN_MUTATION = `#graphql
     }
   }`;
 
-const EDIT_ADD_VARIANT_MUTATION = `#graphql
+export const EDIT_ADD_VARIANT_MUTATION = `#graphql
   mutation MergeEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $locationId: ID) {
     orderEditAddVariant(
       id: $id
@@ -470,7 +470,7 @@ const EDIT_ADD_VARIANT_MUTATION = `#graphql
     }
   }`;
 
-const EDIT_LINE_DISCOUNT_MUTATION = `#graphql
+export const EDIT_LINE_DISCOUNT_MUTATION = `#graphql
   mutation MergeEditDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
     orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
       calculatedLineItem { id }
