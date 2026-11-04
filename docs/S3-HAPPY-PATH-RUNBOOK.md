@@ -39,6 +39,14 @@ copy the `offline_ordermergetest2.myshopify.com` Session row). Verify:
 npx vite-node --script scripts/shipping-refund-admin.ts status
 ```
 
+**Database preflight (before Phase 1):** every staged S3 command
+(`admission`, `reconcile`, `dispatch`) runs the canonical
+`preflightDisposableDatabase` checks before any write — no production
+env markers, loopback host only, disposable-name rules and the
+`mergeship-shadow-disposable:<token>` marker — so `MERGESHIP_SHADOW_TOKEN`
+must match the provisioning token and `DATABASE_URL` must be the
+loopback disposable URL (a name prefix alone is not the guard).
+
 ## Phase 1 — controls BEFORE any order exists (local DB only)
 
 Ordering requirement: the combine's `MergeOperation.createdAt` must be
@@ -129,14 +137,17 @@ match is what pairs them.
 
 **Order verification (read-only, before the combine):** confirm on both
 orders — `displayFinancialStatus = PAID`, `fulfillmentStatus` empty/
-UNFULFILLED, exactly one successful transaction with `test = true` on
-the Bogus Gateway, identical `customer` id, identical shipping address,
-shipping line title `S3 Test Shipping`. Confirm the **secondary's**
-shipping line price is exactly `$4.00` (400 minor units) before the
-combine starts — if it is not, STOP and report BLOCKED rather than
-proceeding at a different amount (approval `maxRefundMinor` is 400).
-Suggested read: the pinned Q-RECONCILE document or an equivalent
-read-only order read; capture the responses as evidence.
+UNFULFILLED, exactly **one eligible successful Bogus Gateway
+CAPTURE/SALE allocation** with `test = true` (a normal
+AUTHORIZATION + CAPTURE transaction sequence is acceptable — count the
+capture, not the authorization), identical `customer` id, identical
+shipping address, shipping line title `S3 Test Shipping`. Confirm the
+**secondary's** shipping line price is exactly `$4.00` (400 minor
+units) before the combine starts — if it is not, STOP and report
+BLOCKED rather than proceeding at a different amount (approval
+`maxRefundMinor` is 400). Suggested read: the pinned Q-RECONCILE
+document or an equivalent read-only order read; capture the responses
+as evidence.
 
 **Sequencing — the webhook path is preferred; backfill only while merge
 switches are OFF (`requireControlsOff`):**

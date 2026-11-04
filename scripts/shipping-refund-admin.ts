@@ -30,11 +30,24 @@ import {
 import { shippingRefundsDispatchEnabled } from "../app/lib/shipping-refund-dispatch.server";
 import { runShippingRefundAdmissionScan } from "../app/lib/shipping-refund-admission.server";
 import { runShippingRefundReconcileCycle } from "../app/lib/shipping-refund-reconcile.server";
+import { preflightDisposableDatabase } from "../tests/helpers/disposable-db";
 
-/** Hard development-store guard for the staged S3 commands: admission and
- *  reconcile may only ever target the approved development store. Matches
- *  the readback script's SHIPRB_STORE/EXPECTED_STORE convention. */
-const S3_DEV_STORE = process.env.SHIPRB_STORE ?? "ordermergetest2.myshopify.com";
+/** S3 safety gate for the staged mutating commands: the canonical
+ *  preflightDisposableDatabase checks — no production env, loopback host,
+ *  disposable-name rules and the mergeship-shadow-disposable marker —
+ *  verified on a fresh connection before any staged write or dispatch.
+ *  MERGESHIP_SHADOW_TOKEN must match the provisioning token. */
+const s3DbPreflight = async (): Promise<{ fingerprint: string }> => {
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL is required for the staged S3 commands");
+  return preflightDisposableDatabase(url);
+};
+
+/** Hard development-store pin for the staged S3 commands: admission,
+ *  reconcile and dispatch may only ever target the approved development
+ *  store — a literal, never an env override, so the experiment cannot be
+ *  redirected to another store. */
+const S3_DEV_STORE = "ordermergetest2.myshopify.com";
 const requireDevStoreShop = (): string => {
   const shop = get("--shop");
   if (shop !== S3_DEV_STORE) {
@@ -244,6 +257,7 @@ async function main() {
       // The sender itself is unchanged: runShippingRefundDispatchCycle /
       // DispatchPermit do the T3 gate, single send and T4.
       const shop = requireDevStoreShop();
+      await s3DbPreflight();
       const row = get("--row"), source = get("--source"), primary = get("--primary");
       const expectDb = get("--expect-db");
       if (!row || !source || !primary || !expectDb) {
@@ -300,6 +314,7 @@ async function main() {
         console.log(JSON.stringify({ dryRun: true, shop, wouldRun: "runShippingRefundAdmissionScan" }));
         return;
       }
+      await s3DbPreflight();
       const { unauthenticated } = await import("../app/shopify.server");
       const r = await runShippingRefundAdmissionScan([shop], {
         adminFactory: async (s) => (await unauthenticated.admin(s)).admin,
@@ -317,6 +332,7 @@ async function main() {
         console.log(JSON.stringify({ dryRun: true, shop, wouldRun: "runShippingRefundReconcileCycle" }));
         return;
       }
+      await s3DbPreflight();
       const { unauthenticated } = await import("../app/shopify.server");
       const r = await runShippingRefundReconcileCycle([shop], {
         adminFactory: async (s) => (await unauthenticated.admin(s)).admin,
