@@ -109,28 +109,42 @@ Protocol v2 (`orderEditCommit`, `MergeMutationAttempt` write-ahead,
 `MergeRecord`, tokened transferred lines, then the app's own `orderCancel`
 on the secondary with the canonical note and its attempt row).
 
-**Order setup (all operator actions on the dev store):** both orders use
-the SAME freshly created test customer (unique email/phone this run — a
-new customer guarantees the pair cannot combine with any historical test
-order), the same shipping address, the same shipping method, standard
-shippable product(s), Bogus Gateway, left UNFULFILLED, never refunded.
-The merge window (`mergeWindowHours`, default 24h) plus the customer/
-address match is what pairs them.
+**Temporary shipping rate (before the orders, part of S3-AUTH setup):**
+the dev store's existing checkout rate is $8 Standard — not used. The
+operator creates a temporary flat rate in Shopify Admin → Settings →
+Shipping and delivery → the profile covering the test products/zone:
+name **`S3 Test Shipping`**, price **$4.00 USD**. After the run the rate
+is removed in the same screen (cleanup step below). No other shipping
+setting is changed.
 
-**Shipping price:** the dev-store checkout's existing rate is $8 Standard
-— not used. Create the secondary via `orderCreate` (Admin GraphQL, or a
-draft order marked paid with bogus) carrying a **custom shipping line
-priced exactly $4.00 USD** — an explicit shipping price at creation is
-the genuine eligible $4 method; no store shipping settings are changed.
-If the operator cannot create a $4.00 shipping line this way, STOP and
-report BLOCKED — do not fall back to a different amount silently (the
-approval `maxRefundMinor` is 400).
+**Order setup (all operator actions on the dev store):** two **normal
+storefront checkouts** on `ordermergetest2.myshopify.com` paid through
+the Bogus Gateway, both under the SAME freshly created test customer
+(unique email/phone this run — a new customer guarantees the pair
+cannot combine with any historical test order), the same shipping
+address, and the same `S3 Test Shipping` method on both. Standard
+shippable product(s); left UNFULFILLED; never refunded. The merge
+window (`mergeWindowHours`, default 24h) plus the customer/address
+match is what pairs them.
+
+**Order verification (read-only, before the combine):** confirm on both
+orders — `displayFinancialStatus = PAID`, `fulfillmentStatus` empty/
+UNFULFILLED, exactly one successful transaction with `test = true` on
+the Bogus Gateway, identical `customer` id, identical shipping address,
+shipping line title `S3 Test Shipping`. Confirm the **secondary's**
+shipping line price is exactly `$4.00` (400 minor units) before the
+combine starts — if it is not, STOP and report BLOCKED rather than
+proceeding at a different amount (approval `maxRefundMinor` is 400).
+Suggested read: the pinned Q-RECONCILE document or an equivalent
+read-only order read; capture the responses as evidence.
 
 **Sequencing — the webhook path is preferred; backfill only while merge
 switches are OFF (`requireControlsOff`):**
 
-1. Operator creates the two orders (bogus, $4.00 shipping on the
-   secondary).
+1. Operator creates the `S3 Test Shipping` $4.00 flat rate (Admin →
+   Settings → Shipping and delivery), then places the two storefront
+   checkouts through Bogus Gateway, then runs the read-only order
+   verification above.
 2a. **Webhook path (preferred):** start the app dev tunnel so the real
    `orders/create` webhook writes the PENDING `ProcessedWebhook` items:
 
@@ -258,17 +272,20 @@ Reconciliation remains safe to run (read-only toward Shopify). A row in
 
 ## Cleanup
 
-Drop the disposable database (`dropdb mergeship_test_s3a`), unset the
-env vars. Dev-store artifacts (orders, merge records, the refund) are
-normal dev-store data — leave them for the evidence archive.
+Remove the temporary `S3 Test Shipping` rate in Shopify Admin → Settings
+→ Shipping and delivery. Drop the disposable database
+(`dropdb mergeship_test_s3a`), unset the env vars. Dev-store artifacts
+(orders, merge records, the refund) are normal dev-store data — leave
+them for the evidence archive.
 
 ## S3-AUTH — the authorization the operator must grant
 
-Before Phase 2, written approval for: **(a)** creation of exactly two
-development-store test orders via Bogus Gateway; **(b)** the app's own
-Protocol v2 combine (`orderEditCommit` + `orderCancel`) on those orders;
-**(c)** admission/preparation of the resulting secondary's shipping
-refund; **(d)** exactly **one** `refundCreate`, shipping-only, ≤ $4.00
-USD, on `ordermergetest2.myshopify.com` through the real dispatch path.
-Nothing else: no real gateway, no production, no other shops, no
-additional mutations.
+Before Phase 2, written approval for: **(a)** a temporary `S3 Test
+Shipping` $4.00 flat rate on the dev store plus two storefront
+checkouts paid through the Bogus Gateway; **(b)** the app's own
+Protocol v2 combine (`orderEditCommit` + `orderCancel`) on those
+orders; **(c)** admission/preparation of the resulting secondary's
+shipping refund; **(d)** exactly **one** `refundCreate`, shipping-only,
+≤ $4.00 USD, on `ordermergetest2.myshopify.com` through the real
+dispatch path. Nothing else: no real gateway, no production, no other
+shops, no additional mutations.
