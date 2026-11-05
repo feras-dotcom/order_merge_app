@@ -1,0 +1,56 @@
+created database mergeship_test_s3c
+Prisma schema loaded from prisma\schema.prisma
+Datasource "db": PostgreSQL database "mergeship_test_s3c", schema "public" at "127.0.0.1:55537"
+
+14 migrations found in prisma/migrations
+
+Applying migration `20240530213853_create_session_table`
+Applying migration `20260922160532_add_processed_webhooks`
+Applying migration `20260922170132_add_settings`
+Applying migration `20260923150000_add_merge_records`
+Applying migration `20260924000000_add_shipping_cost_savings`
+Applying migration `20260929000000_add_shopify_shop_gid`
+Applying migration `20261001000000_launch_safety`
+Applying migration `20261002000000_onboarding_state`
+Applying migration `20261003000000_durable_work_and_claims`
+Applying migration `20261004000000_external_mutation_protocol`
+Applying migration `20261014000000_shipping_adjustment_foundation`
+Applying migration `20261020000000_shipping_v0_phase_1_1`
+Applying migration `20261021000000_shipping_v0_phase_2_s1a`
+Applying migration `20261103000000_shipping_refund_dispatch_edge`
+
+The following migration(s) have been applied:
+
+migrations/
+  └─ 20240530213853_create_session_table/
+    └─ migration.sql
+  └─ 20260922160532_add_processed_webhooks/
+    └─ migration.sql
+  └─ 20260922170132_add_settings/
+    └─ migration.sql
+  └─ 20260923150000_add_merge_records/
+    └─ migration.sql
+  └─ 20260924000000_add_shipping_cost_savings/
+    └─ migration.sql
+  └─ 20260929000000_add_shopify_shop_gid/
+    └─ migration.sql
+  └─ 20261001000000_launch_safety/
+    └─ migration.sql
+  └─ 20261002000000_onboarding_state/
+    └─ migration.sql
+  └─ 20261003000000_durable_work_and_claims/
+    └─ migration.sql
+  └─ 20261004000000_external_mutation_protocol/
+    └─ migration.sql
+  └─ 20261014000000_shipping_adjustment_foundation/
+    └─ migration.sql
+  └─ 20261020000000_shipping_v0_phase_1_1/
+    └─ migration.sql
+  └─ 20261021000000_shipping_v0_phase_2_s1a/
+    └─ migration.sql
+  └─ 20261103000000_shipping_refund_dispatch_edge/
+    └─ migration.sql
+      
+All migrations have been successfully applied.
+marked disposable: mergeship_test_s3c@127.0.0.1:55537
+Suites: MERGESHIP_TEST_DATABASE_URL='postgresql://postgres@127.0.0.1:55537/mergeship_test_s3c' (credentials redacted — re-add yours) MERGESHIP_SHADOW_TOKEN='<token>' npx vitest run tests/...

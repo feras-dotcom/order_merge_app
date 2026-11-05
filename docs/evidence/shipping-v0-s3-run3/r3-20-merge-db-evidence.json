@@ -1,0 +1,252 @@
+{
+ "preflight": {
+  "db": "mergeship_test_s3c",
+  "addr": "127.0.0.1",
+  "port": 55537
+ },
+ "out": [
+  {
+   "sql": "UPDATE \"AppControl\" SET \"newMergesEnabled\" = false, \"completionEnabled\" = false, \"updatedAt\" = clock_timestamp() AT TIME",
+   "result": 1
+  },
+  {
+   "sql": "SELECT \"newMergesEnabled\",\"completionEnabled\",\"updatedAt\" FROM \"AppControl\"",
+   "result": [
+    {
+     "newMergesEnabled": false,
+     "completionEnabled": false,
+     "updatedAt": "2026-11-05T15:06:00.190Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT to_jsonb(o) AS op FROM \"MergeOperation\" o",
+   "result": [
+    {
+     "op": {
+      "id": "08800a12-6ffa-4af9-9b3e-39decc92383f",
+      "shop": "ordermergetest2.myshopify.com",
+      "phase": "COMPLETED",
+      "status": "COMPLETED",
+      "opToken": "NCE0VNX0",
+      "attempts": 0,
+      "createdAt": "2026-11-05T15:01:29.517",
+      "lastError": null,
+      "updatedAt": "2026-11-05T15:05:41.489",
+      "customerId": "gid://shopify/Customer/10838159130871",
+      "leaseToken": "98bd32fa-8712-4170-b926-d8329f430863",
+      "workItemId": "3d0f6e5d-dbc2-43d3-8473-3a71507714de",
+      "leasedUntil": "2026-11-05T15:07:29.676",
+      "nextCheckAt": null,
+      "secondaries": [
+       {
+        "id": "gid://shopify/Order/8143926624503",
+        "done": true,
+        "name": "#1138",
+        "items": 1,
+        "cancelPhase": "CANCEL_VERIFIED",
+        "cancelledAt": "2026-11-05T15:04:13Z",
+        "secondaryIndex": 1,
+        "staffNoteMatched": true
+       }
+      ],
+      "reviewReason": null,
+      "primaryOrderId": "gid://shopify/Order/8143923609847",
+      "appliedEvidence": {
+       "lines": [
+        {
+         "quantity": 1,
+         "variantId": "gid://shopify/ProductVariant/51204236181751",
+         "lineItemId": "gid://shopify/LineItem/20298742661367",
+         "secondaryId": "gid://shopify/Order/8143926624503"
+        }
+       ],
+       "happenedAt": "2026-11-05T15:02:56Z",
+       "agreementId": "gid://shopify/SalesAgreement/8713408545015"
+      },
+      "firstDispatchAt": "2026-11-05T15:02:46.44",
+      "protocolVersion": 2,
+      "sideEffectsDone": true,
+      "expectedTransfer": [
+       {
+        "lines": [
+         {
+          "quantity": 1,
+          "variantId": "gid://shopify/ProductVariant/51204236181751",
+          "description": "Merged from #1138, already paid · MS-NCE0VNX0-1",
+          "sourceQuantity": 1,
+          "sourceLineItemId": "gid://shopify/LineItem/20298620109047"
+         }
+        ],
+        "secondaryId": "gid://shopify/Order/8143926624503",
+        "secondaryIndex": 1
+       }
+      ],
+      "involvedOrderIds": [
+       "gid://shopify/Order/8143923609847",
+       "gid://shopify/Order/8143926624503"
+      ],
+      "primaryOrderName": "#1137",
+      "reviewRequiredAt": null,
+      "calculatedOrderId": "gid://shopify/CalculatedOrder/222044651767",
+      "addedLineItemCount": 1,
+      "expectedLocationId": "gid://shopify/Location/109314801911",
+      "primaryLineItemIdsBefore": [
+       "gid://shopify/LineItem/20298613883127"
+      ],
+      "primaryLineItemCountBefore": 1
+     }
+    }
+   ]
+  },
+  {
+   "sql": "SELECT to_jsonb(r) AS rec FROM \"MergeRecord\" r",
+   "result": [
+    {
+     "rec": {
+      "id": "b53bcd2b-f48d-4bcb-83cb-fc669598dbd9",
+      "shop": "ordermergetest2.myshopify.com",
+      "createdAt": "2026-11-05T15:04:29.354",
+      "customerId": "gid://shopify/Customer/10838159130871",
+      "operationId": "08800a12-6ffa-4af9-9b3e-39decc92383f",
+      "itemsCombined": 1,
+      "mergedOrderId": "gid://shopify/Order/8143926624503",
+      "primaryOrderId": "gid://shopify/Order/8143923609847",
+      "mergedOrderName": "#1138",
+      "primaryOrderName": "#1137"
+     }
+    }
+   ]
+  },
+  {
+   "sql": "SELECT \"kind\",\"targetOrderId\",\"attemptNo\",\"state\",\"dispatchedAt\",\"respondedAt\",\"responseSummary\",\"jobId\" FROM \"MergeMuta",
+   "result": [
+    {
+     "kind": "EDIT_COMMIT",
+     "targetOrderId": "gid://shopify/Order/8143923609847",
+     "attemptNo": 1,
+     "state": "SUCCEEDED",
+     "dispatchedAt": "2026-11-05T15:02:46.442Z",
+     "respondedAt": "2026-11-05T15:02:59.807Z",
+     "responseSummary": null,
+     "jobId": null
+    },
+    {
+     "kind": "ORDER_CANCEL",
+     "targetOrderId": "gid://shopify/Order/8143926624503",
+     "attemptNo": 1,
+     "state": "SUCCEEDED",
+     "dispatchedAt": "2026-11-05T15:04:03.295Z",
+     "respondedAt": "2026-11-05T15:04:15.329Z",
+     "responseSummary": null,
+     "jobId": "gid://shopify/Job/dfff27e1-3e4a-4bc2-bfed-6db065ac3c41"
+    },
+    {
+     "kind": "ANNOTATE",
+     "targetOrderId": "gid://shopify/Order/8143926624503",
+     "attemptNo": 1,
+     "state": "SUCCEEDED",
+     "dispatchedAt": "2026-11-05T15:04:41.048Z",
+     "respondedAt": "2026-11-05T15:05:04.887Z",
+     "responseSummary": null,
+     "jobId": null
+    },
+    {
+     "kind": "CLOSE",
+     "targetOrderId": "gid://shopify/Order/8143926624503",
+     "attemptNo": 1,
+     "state": "SUCCEEDED",
+     "dispatchedAt": "2026-11-05T15:05:04.902Z",
+     "respondedAt": "2026-11-05T15:05:16.201Z",
+     "responseSummary": null,
+     "jobId": null
+    },
+    {
+     "kind": "ANNOTATE",
+     "targetOrderId": "gid://shopify/Order/8143923609847",
+     "attemptNo": 1,
+     "state": "SUCCEEDED",
+     "dispatchedAt": "2026-11-05T15:05:16.216Z",
+     "respondedAt": "2026-11-05T15:05:41.474Z",
+     "responseSummary": null,
+     "jobId": null
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS locks FROM \"MergeOrderLock\"",
+   "result": [
+    {
+     "locks": 0
+    }
+   ]
+  },
+  {
+   "sql": "SELECT to_jsonb(w) AS item FROM \"ProcessedWebhook\" w",
+   "result": [
+    {
+     "item": {
+      "id": "e4d88903-73a3-4465-86d3-5541626996e5",
+      "shop": "ordermergetest2.myshopify.com",
+      "doneAt": null,
+      "status": "PENDING",
+      "orderId": "gid://shopify/Order/8143926624503",
+      "outcome": null,
+      "attempts": 0,
+      "createdAt": "2026-11-05T14:55:07.892",
+      "updatedAt": "2026-11-05T14:55:07.892",
+      "deadlineAt": "2026-11-05T20:55:07.892",
+      "lastReason": "CUTOVER_BACKFILL",
+      "leaseToken": null,
+      "retryAfter": "2026-11-05T14:55:07.892",
+      "leasedUntil": null,
+      "operationId": null,
+      "reviewReason": null
+     }
+    },
+    {
+     "item": {
+      "id": "3d0f6e5d-dbc2-43d3-8473-3a71507714de",
+      "shop": "ordermergetest2.myshopify.com",
+      "doneAt": "2026-11-05T15:04:29.387",
+      "status": "DONE",
+      "orderId": "gid://shopify/Order/8143923609847",
+      "outcome": "MERGED",
+      "attempts": 1,
+      "createdAt": "2026-11-05T14:55:07.881",
+      "updatedAt": "2026-11-05T15:04:29.387",
+      "deadlineAt": "2026-11-05T20:55:07.881",
+      "lastReason": "CUTOVER_BACKFILL",
+      "leaseToken": null,
+      "retryAfter": null,
+      "leasedUntil": null,
+      "operationId": "08800a12-6ffa-4af9-9b3e-39decc92383f",
+      "reviewReason": null
+     }
+    }
+   ]
+  },
+  {
+   "sql": "SELECT to_jsonb(a) AS adj FROM \"ShippingAdjustment\" a",
+   "result": []
+  },
+  {
+   "sql": "SELECT count(*)::int AS refunds FROM \"ShippingRefund\"",
+   "result": [
+    {
+     "refunds": 0
+    }
+   ]
+  },
+  {
+   "sql": "SELECT (o.\"createdAt\" > GREATEST(c.\"shippingEnabledAt\", s.\"shippingRolloutAt\", s.\"shippingAdjustmentEnabledAt\", x.\"admis",
+   "result": [
+    {
+     "op_after_all_cutoffs": true,
+     "op_created": "2026-11-05T15:01:29.517Z",
+     "latest_cutoff": "2026-11-05T13:06:38.078Z"
+    }
+   ]
+  }
+ ]
+}

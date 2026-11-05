@@ -1,0 +1,32 @@
+{
+ "id": "sr_0472d4e2c869467e841ccd8415759147",
+ "shop": "ordermergetest2.myshopify.com",
+ "status": "PREPARED",
+ "reasonCode": null,
+ "wireHash": "b25ed9574e16123b44943b98c41b2eae3c6da1d78ef436e029661fdba5f4c327",
+ "approvedWireHash": null,
+ "wireVariables": {
+  "input": {
+   "note": "MergeShip shipping adjustment MS-SHIPREFUND-4d854578-911b-4960-957d-8d34069d2be0 — shipping refunded for order merged into #1137.",
+   "notify": false,
+   "orderId": "gid://shopify/Order/8143926624503",
+   "currency": "USD",
+   "shipping": {
+    "amount": "4.00",
+    "fullRefund": false
+   },
+   "transactions": [
+    {
+     "kind": "REFUND",
+     "amount": "4.00",
+     "gateway": "bogus",
+     "orderId": "gid://shopify/Order/8143926624503",
+     "parentId": "gid://shopify/OrderTransaction/10262841229559"
+    }
+   ]
+  },
+  "idempotencyKey": "63d6dbac-d6e6-4b31-9014-e2c5e877e71d"
+ },
+ "idempotencyKey": "63d6dbac-d6e6-4b31-9014-e2c5e877e71d",
+ "dispatchToken": null
+}

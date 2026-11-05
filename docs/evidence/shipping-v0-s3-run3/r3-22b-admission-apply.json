@@ -1,0 +1,20 @@
+[
+ {
+  "shop": "ordermergetest2.myshopify.com",
+  "stoppedBy": null,
+  "gateOpen": true,
+  "admissionCutoffAt": "2026-11-05T13:06:38.078Z",
+  "dueRowsExamined": 0,
+  "claimed": 1,
+  "terminalClaims": 0,
+  "deferredSettleDelay": 0,
+  "outcomes": {
+   "CLAIMED:QUEUED": 1,
+   "FROZEN:PREPARED": 1
+  },
+  "evaluations": 1,
+  "secondaryErrors": [],
+  "quarantined": [],
+  "malformed": []
+ }
+]

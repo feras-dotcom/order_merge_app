@@ -1,0 +1,31 @@
+{
+ "preflight": {
+  "db": "mergeship_test_s3c",
+  "addr": "127.0.0.1",
+  "port": 55537
+ },
+ "out": [
+  {
+   "sql": "UPDATE \"AppControl\" SET \"newMergesEnabled\" = false, \"completionEnabled\" = false, \"updatedAt\" = clock_timestamp() AT TIME",
+   "result": 1
+  },
+  {
+   "sql": "SELECT \"newMergesEnabled\",\"completionEnabled\",\"updatedAt\" FROM \"AppControl\"",
+   "result": [
+    {
+     "newMergesEnabled": false,
+     "completionEnabled": false,
+     "updatedAt": "2026-11-05T14:55:48.568Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS ops FROM \"MergeOperation\"",
+   "result": [
+    {
+     "ops": 0
+    }
+   ]
+  }
+ ]
+}

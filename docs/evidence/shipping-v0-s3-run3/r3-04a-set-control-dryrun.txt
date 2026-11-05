@@ -1,0 +1,1 @@
+{"dryRun":true,"admission":true,"dispatch":true,"globalDailyCap":1,"note":"S3 happy path run3 (S3-AUTH 2026-11-05)","by":"S3-operator"}

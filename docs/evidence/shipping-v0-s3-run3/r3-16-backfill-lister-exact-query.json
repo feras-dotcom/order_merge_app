@@ -1,0 +1,54 @@
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+{
+  "orders": {
+    "nodes": [
+      {
+        "id": "gid://shopify/Order/8143542812919",
+        "name": "#1135",
+        "createdAt": "2026-11-05T11:30:54Z",
+        "customer": {
+          "id": "gid://shopify/Customer/10837761523959"
+        },
+        "cancelledAt": null,
+        "closed": false,
+        "tags": [
+          "Consolidated"
+        ]
+      },
+      {
+        "id": "gid://shopify/Order/8143923609847",
+        "name": "#1137",
+        "createdAt": "2026-11-05T14:41:23Z",
+        "customer": {
+          "id": "gid://shopify/Customer/10838159130871"
+        },
+        "cancelledAt": null,
+        "closed": false,
+        "tags": []
+      },
+      {
+        "id": "gid://shopify/Order/8143926624503",
+        "name": "#1138",
+        "createdAt": "2026-11-05T14:42:46Z",
+        "customer": {
+          "id": "gid://shopify/Customer/10838159130871"
+        },
+        "cancelledAt": null,
+        "closed": false,
+        "tags": []
+      }
+    ],
+    "pageInfo": {
+      "hasNextPage": false
+    }
+  }
+}

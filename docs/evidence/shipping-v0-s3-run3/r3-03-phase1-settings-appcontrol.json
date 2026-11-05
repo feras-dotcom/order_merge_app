@@ -1,0 +1,58 @@
+{
+ "preflight": {
+  "db": "mergeship_test_s3c",
+  "addr": "127.0.0.1",
+  "port": 55537
+ },
+ "out": [
+  {
+   "sql": "INSERT INTO \"Settings\" (\"id\",\"shop\",\"autoMergeEnabled\",\"autoMergeAcknowledgedAt\",\"onboardingStartedAt\",\"onboardingComple",
+   "result": 1
+  },
+  {
+   "sql": "UPDATE \"AppControl\" SET \"shippingAdjustmentsEnabled\" = true, \"shippingEnabledAt\" = clock_timestamp() AT TIME ZONE 'UTC',",
+   "result": 1
+  },
+  {
+   "sql": "SELECT \"shippingPolicy\", \"shippingRetainedMinor\", \"mergeWindowHours\" FROM \"Settings\" WHERE \"shop\" = 'ordermergetest2.mys",
+   "result": [
+    {
+     "shippingPolicy": "REFUND_ALL",
+     "shippingRetainedMinor": null,
+     "mergeWindowHours": 24
+    }
+   ]
+  },
+  {
+   "sql": "SELECT \"shippingAdjustmentsEnabled\",\"shippingEnabledAt\",\"shippingAllowShops\",\"newMergesEnabled\",\"completionEnabled\",\"all",
+   "result": [
+    {
+     "shippingAdjustmentsEnabled": true,
+     "shippingEnabledAt": "2026-11-05T13:06:06.595Z",
+     "shippingAllowShops": [
+      "ordermergetest2.myshopify.com"
+     ],
+     "newMergesEnabled": false,
+     "completionEnabled": false,
+     "allowShops": [
+      "ordermergetest2.myshopify.com"
+     ]
+    }
+   ]
+  },
+  {
+   "sql": "SELECT \"shippingAdjustmentEnabled\",\"shippingAdjustmentEnabledAt\",\"shippingRolloutAt\",\"autoMergeEnabled\",\"autoMergeAcknow",
+   "result": [
+    {
+     "shippingAdjustmentEnabled": true,
+     "shippingAdjustmentEnabledAt": "2026-11-05T13:06:06.577Z",
+     "shippingRolloutAt": "2026-11-05T13:06:06.577Z",
+     "autoMergeEnabled": true,
+     "autoMergeAcknowledgedAt": "2026-11-05T13:06:06.577Z",
+     "onboardingStartedAt": "2026-11-05T13:06:06.577Z",
+     "onboardingCompletedAt": "2026-11-05T13:06:06.577Z"
+    }
+   ]
+  }
+ ]
+}

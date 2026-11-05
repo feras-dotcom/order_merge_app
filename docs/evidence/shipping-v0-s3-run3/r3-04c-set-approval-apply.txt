@@ -1,0 +1,2 @@
+{"dryRun":false,"shop":"ordermergetest2.myshopify.com","currency":"USD","maxRefundMinor":"400","dailyCap":1,"autoApprove":false,"note":"S3 happy path run3 (S3-AUTH 2026-11-05)","by":"S3-operator"}
+[shipping-refund] control-change approval by=S3-operator shop=ordermergetest2.myshopify.com

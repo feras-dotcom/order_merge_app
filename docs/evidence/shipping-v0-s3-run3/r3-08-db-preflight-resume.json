@@ -1,0 +1,164 @@
+{
+ "preflight": {
+  "db": "mergeship_test_s3c",
+  "addr": "127.0.0.1",
+  "port": 55537
+ },
+ "out": [
+  {
+   "sql": "SELECT current_database() AS db, inet_server_addr()::text AS addr, inet_server_port() AS port, clock_timestamp() AT TIME",
+   "result": [
+    {
+     "db": "mergeship_test_s3c",
+     "addr": "127.0.0.1/32",
+     "port": 55537,
+     "now": "2026-11-05T14:53:44.212Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT migration_name, finished_at FROM \"_prisma_migrations\" ORDER BY started_at",
+   "result": [
+    {
+     "migration_name": "20240530213853_create_session_table",
+     "finished_at": "2026-11-05T13:05:36.559Z"
+    },
+    {
+     "migration_name": "20260922160532_add_processed_webhooks",
+     "finished_at": "2026-11-05T13:05:36.572Z"
+    },
+    {
+     "migration_name": "20260922170132_add_settings",
+     "finished_at": "2026-11-05T13:05:36.583Z"
+    },
+    {
+     "migration_name": "20260923150000_add_merge_records",
+     "finished_at": "2026-11-05T13:05:36.597Z"
+    },
+    {
+     "migration_name": "20260924000000_add_shipping_cost_savings",
+     "finished_at": "2026-11-05T13:05:36.602Z"
+    },
+    {
+     "migration_name": "20260929000000_add_shopify_shop_gid",
+     "finished_at": "2026-11-05T13:05:36.606Z"
+    },
+    {
+     "migration_name": "20261001000000_launch_safety",
+     "finished_at": "2026-11-05T13:05:36.623Z"
+    },
+    {
+     "migration_name": "20261002000000_onboarding_state",
+     "finished_at": "2026-11-05T13:05:36.635Z"
+    },
+    {
+     "migration_name": "20261003000000_durable_work_and_claims",
+     "finished_at": "2026-11-05T13:05:36.657Z"
+    },
+    {
+     "migration_name": "20261004000000_external_mutation_protocol",
+     "finished_at": "2026-11-05T13:05:36.708Z"
+    },
+    {
+     "migration_name": "20261014000000_shipping_adjustment_foundation",
+     "finished_at": "2026-11-05T13:05:36.736Z"
+    },
+    {
+     "migration_name": "20261020000000_shipping_v0_phase_1_1",
+     "finished_at": "2026-11-05T13:05:36.741Z"
+    },
+    {
+     "migration_name": "20261021000000_shipping_v0_phase_2_s1a",
+     "finished_at": "2026-11-05T13:05:36.838Z"
+    },
+    {
+     "migration_name": "20261103000000_shipping_refund_dispatch_edge",
+     "finished_at": "2026-11-05T13:05:36.842Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT * FROM \"AppControl\"",
+   "result": [
+    {
+     "id": "control",
+     "newMergesEnabled": false,
+     "completionEnabled": false,
+     "allowShops": [
+      "ordermergetest2.myshopify.com"
+     ],
+     "note": null,
+     "updatedAt": "2026-11-05T13:06:06.595Z",
+     "shippingAdjustmentsEnabled": true,
+     "shippingAllowShops": [
+      "ordermergetest2.myshopify.com"
+     ],
+     "shippingEnabledAt": "2026-11-05T13:06:06.595Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT * FROM \"ShippingExecuteControl\"",
+   "result": [
+    {
+     "id": "control",
+     "admissionEnabled": true,
+     "admissionEnabledAt": "2026-11-05T13:06:27.655Z",
+     "dispatchEnabled": true,
+     "dispatchEnabledAt": "2026-11-05T13:06:27.655Z",
+     "globalDailyCap": 1,
+     "note": "S3 happy path run3 (S3-AUTH 2026-11-05)",
+     "updatedAt": "2026-11-05T13:06:27.655Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS n FROM \"Settings\"",
+   "result": [
+    {
+     "n": 1
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS n FROM \"Session\"",
+   "result": [
+    {
+     "n": 0
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS n FROM \"ProcessedWebhook\"",
+   "result": [
+    {
+     "n": 0
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS n FROM \"MergeOperation\"",
+   "result": [
+    {
+     "n": 0
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS n FROM \"ShippingRefund\"",
+   "result": [
+    {
+     "n": 0
+    }
+   ]
+  },
+  {
+   "sql": "SELECT count(*)::int AS n FROM \"ShippingExecuteApproval\"",
+   "result": [
+    {
+     "n": 1
+    }
+   ]
+  }
+ ]
+}

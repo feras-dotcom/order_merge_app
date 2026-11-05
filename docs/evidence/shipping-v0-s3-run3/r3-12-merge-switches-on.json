@@ -1,0 +1,43 @@
+{
+ "preflight": {
+  "db": "mergeship_test_s3c",
+  "addr": "127.0.0.1",
+  "port": 55537
+ },
+ "out": [
+  {
+   "sql": "UPDATE \"AppControl\" SET \"newMergesEnabled\" = true, \"completionEnabled\" = true, \"updatedAt\" = clock_timestamp() AT TIME Z",
+   "result": 1
+  },
+  {
+   "sql": "SELECT \"newMergesEnabled\",\"completionEnabled\",\"allowShops\",\"updatedAt\" FROM \"AppControl\"",
+   "result": [
+    {
+     "newMergesEnabled": true,
+     "completionEnabled": true,
+     "allowShops": [
+      "ordermergetest2.myshopify.com"
+     ],
+     "updatedAt": "2026-11-05T14:55:17.551Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT \"orderId\",\"status\",\"outcome\",\"createdAt\" FROM \"ProcessedWebhook\"",
+   "result": [
+    {
+     "orderId": "gid://shopify/Order/8143923609847",
+     "status": "PENDING",
+     "outcome": null,
+     "createdAt": "2026-11-05T14:55:07.881Z"
+    },
+    {
+     "orderId": "gid://shopify/Order/8143926624503",
+     "status": "PENDING",
+     "outcome": null,
+     "createdAt": "2026-11-05T14:55:07.892Z"
+    }
+   ]
+  }
+ ]
+}

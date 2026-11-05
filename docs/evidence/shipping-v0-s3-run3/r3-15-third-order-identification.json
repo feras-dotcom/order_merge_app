@@ -1,0 +1,112 @@
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+{
+  "orders": {
+    "nodes": [
+      {
+        "id": "gid://shopify/Order/8143926624503",
+        "name": "#1138",
+        "createdAt": "2026-11-05T14:42:46Z",
+        "cancelledAt": null,
+        "closed": false,
+        "test": true,
+        "displayFinancialStatus": "PAID",
+        "displayFulfillmentStatus": "UNFULFILLED",
+        "customer": {
+          "id": "gid://shopify/Customer/10838159130871"
+        },
+        "sourceName": "web",
+        "shippingAddress": {
+          "name": "John S3Run3",
+          "address1": "456 Test Avenue",
+          "city": "New York",
+          "provinceCode": "NY",
+          "zip": "10001"
+        },
+        "shippingLines": {
+          "nodes": [
+            {
+              "title": "S3 Test Shipping",
+              "discountedPriceSet": {
+                "shopMoney": {
+                  "amount": "4.0"
+                }
+              }
+            }
+          ]
+        },
+        "lineItems": {
+          "nodes": [
+            {
+              "variant": {
+                "id": "gid://shopify/ProductVariant/51204236181751"
+              },
+              "quantity": 1
+            }
+          ]
+        },
+        "totalPriceSet": {
+          "shopMoney": {
+            "amount": "604.0"
+          }
+        }
+      },
+      {
+        "id": "gid://shopify/Order/8143923609847",
+        "name": "#1137",
+        "createdAt": "2026-11-05T14:41:23Z",
+        "cancelledAt": null,
+        "closed": false,
+        "test": true,
+        "displayFinancialStatus": "PAID",
+        "displayFulfillmentStatus": "UNFULFILLED",
+        "customer": {
+          "id": "gid://shopify/Customer/10838159130871"
+        },
+        "sourceName": "web",
+        "shippingAddress": {
+          "name": "John S3Run3",
+          "address1": "456 Test Avenue",
+          "city": "New York",
+          "provinceCode": "NY",
+          "zip": "10001"
+        },
+        "shippingLines": {
+          "nodes": [
+            {
+              "title": "S3 Test Shipping",
+              "discountedPriceSet": {
+                "shopMoney": {
+                  "amount": "4.0"
+                }
+              }
+            }
+          ]
+        },
+        "lineItems": {
+          "nodes": [
+            {
+              "variant": {
+                "id": "gid://shopify/ProductVariant/51204236181751"
+              },
+              "quantity": 1
+            }
+          ]
+        },
+        "totalPriceSet": {
+          "shopMoney": {
+            "amount": "604.0"
+          }
+        }
+      }
+    ]
+  }
+}
