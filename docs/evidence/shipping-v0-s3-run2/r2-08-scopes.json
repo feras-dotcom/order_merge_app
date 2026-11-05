@@ -1,0 +1,43 @@
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+{
+  "currentAppInstallation": {
+    "accessScopes": [
+      {
+        "handle": "read_customers"
+      },
+      {
+        "handle": "write_order_edits"
+      },
+      {
+        "handle": "write_orders"
+      },
+      {
+        "handle": "write_products"
+      },
+      {
+        "handle": "read_merchant_managed_fulfillment_orders"
+      },
+      {
+        "handle": "read_locations"
+      },
+      {
+        "handle": "read_order_edits"
+      },
+      {
+        "handle": "read_orders"
+      },
+      {
+        "handle": "read_products"
+      }
+    ]
+  }
+}

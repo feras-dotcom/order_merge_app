@@ -1,0 +1,5 @@
+{
+ "dryRun": true,
+ "shop": "ordermergetest2.myshopify.com",
+ "wouldRun": "runShippingRefundAdmissionScan"
+}

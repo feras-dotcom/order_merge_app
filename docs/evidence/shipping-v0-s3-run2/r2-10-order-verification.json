@@ -1,0 +1,262 @@
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+{
+  "a": {
+    "id": "gid://shopify/Order/8143542812919",
+    "name": "#1135",
+    "createdAt": "2026-11-05T11:30:54Z",
+    "cancelledAt": null,
+    "closed": false,
+    "test": true,
+    "displayFinancialStatus": "PAID",
+    "displayFulfillmentStatus": "UNFULFILLED",
+    "currencyCode": "USD",
+    "customer": {
+      "id": "gid://shopify/Customer/10837761523959",
+      "numberOfOrders": "0"
+    },
+    "shippingAddress": {
+      "name": "Jane S3Test",
+      "address1": "123 Test Street, New York, NY 10001, United States",
+      "address2": null,
+      "city": "New York",
+      "provinceCode": "NY",
+      "zip": "10001",
+      "countryCodeV2": "US"
+    },
+    "totalPriceSet": {
+      "shopMoney": {
+        "amount": "604.0",
+        "currencyCode": "USD"
+      }
+    },
+    "totalRefundedSet": {
+      "shopMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "refunds": [],
+    "tags": [],
+    "note": null,
+    "shippingLines": {
+      "nodes": [
+        {
+          "title": "S3 Test Shipping",
+          "code": "S3 Test Shipping",
+          "source": "shopify",
+          "carrierIdentifier": null,
+          "originalPriceSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          },
+          "discountedPriceSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          },
+          "taxLines": []
+        }
+      ]
+    },
+    "lineItems": {
+      "nodes": [
+        {
+          "id": "gid://shopify/LineItem/20297731440887",
+          "quantity": 1,
+          "currentQuantity": 1,
+          "unfulfilledQuantity": 1,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/51204236181751"
+          }
+        }
+      ]
+    },
+    "transactions": [
+      {
+        "id": "gid://shopify/OrderTransaction/10262244884727",
+        "kind": "AUTHORIZATION",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": null,
+        "processedAt": "2026-11-05T11:30:53Z"
+      },
+      {
+        "id": "gid://shopify/OrderTransaction/10262245146871",
+        "kind": "CAPTURE",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/10262244884727"
+        },
+        "processedAt": "2026-11-05T11:30:55Z"
+      }
+    ],
+    "fulfillmentOrders": {
+      "nodes": [
+        {
+          "id": "gid://shopify/FulfillmentOrder/9236157694199",
+          "status": "OPEN",
+          "requestStatus": "UNSUBMITTED",
+          "fulfillmentHolds": [],
+          "assignedLocation": {
+            "location": {
+              "id": "gid://shopify/Location/109314801911",
+              "name": "Shop location"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "b": {
+    "id": "gid://shopify/Order/8143559655671",
+    "name": "#1136",
+    "createdAt": "2026-11-05T11:39:38Z",
+    "cancelledAt": null,
+    "closed": false,
+    "test": true,
+    "displayFinancialStatus": "PAID",
+    "displayFulfillmentStatus": "UNFULFILLED",
+    "currencyCode": "USD",
+    "customer": {
+      "id": "gid://shopify/Customer/10837761523959",
+      "numberOfOrders": "0"
+    },
+    "shippingAddress": {
+      "name": "Jane S3Test",
+      "address1": "123 Test Street, New York, NY 10001, United States",
+      "address2": null,
+      "city": "New York",
+      "provinceCode": "NY",
+      "zip": "10001",
+      "countryCodeV2": "US"
+    },
+    "totalPriceSet": {
+      "shopMoney": {
+        "amount": "604.0",
+        "currencyCode": "USD"
+      }
+    },
+    "totalRefundedSet": {
+      "shopMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "refunds": [],
+    "tags": [],
+    "note": null,
+    "shippingLines": {
+      "nodes": [
+        {
+          "title": "S3 Test Shipping",
+          "code": "S3 Test Shipping",
+          "source": "shopify",
+          "carrierIdentifier": null,
+          "originalPriceSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          },
+          "discountedPriceSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          },
+          "taxLines": []
+        }
+      ]
+    },
+    "lineItems": {
+      "nodes": [
+        {
+          "id": "gid://shopify/LineItem/20297768993015",
+          "quantity": 1,
+          "currentQuantity": 1,
+          "unfulfilledQuantity": 1,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/51204236181751"
+          }
+        }
+      ]
+    },
+    "transactions": [
+      {
+        "id": "gid://shopify/OrderTransaction/10262267658487",
+        "kind": "AUTHORIZATION",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": null,
+        "processedAt": "2026-11-05T11:39:37Z"
+      },
+      {
+        "id": "gid://shopify/OrderTransaction/10262267789559",
+        "kind": "CAPTURE",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/10262267658487"
+        },
+        "processedAt": "2026-11-05T11:39:40Z"
+      }
+    ],
+    "fulfillmentOrders": {
+      "nodes": [
+        {
+          "id": "gid://shopify/FulfillmentOrder/9236175880439",
+          "status": "OPEN",
+          "requestStatus": "UNSUBMITTED",
+          "fulfillmentHolds": [],
+          "assignedLocation": {
+            "location": {
+              "id": "gid://shopify/Location/109314801911",
+              "name": "Shop location"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

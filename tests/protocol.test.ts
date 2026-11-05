@@ -1838,3 +1838,111 @@ it("40. cancellation snapshot boundedness: oversized secondaries park in review 
     expect(ops.locks.size).toBe(2);
   }
 });
+
+// ── S3 run 2 regression: the COMPLETED move must preserve the verified
+//    cancellation evidence recordHistoryAndVerifyCancel persisted. Before
+//    the fix, the in-memory `secondaries` array only carried cancelPhase,
+//    so the stored row lost cancelledAt/staffNoteMatched/done and shipping
+//    admission classified the op CANCELLED_AT_INVALID. ─────────────────────
+
+it("S3r2: verifyCancel path — the STORED secondary keeps its verified evidence after COMPLETED", async () => {
+  const ctx = setup();
+  const { shopify, deps, ops } = ctx;
+  const result = await executeMerge(shopify.admin, SHOP, IDS, deps);
+  const final = await driveToIdle(ctx, result.operation!);
+  expect(final?.phase).toBe("COMPLETED");
+  expect(final?.sideEffectsDone).toBe(true);
+  // Assert on the persisted row, not the drive result: the defect was a
+  // stale in-memory array overwriting the enriched stored entry.
+  const stored = await ops.getOperation(result.operation!.id);
+  const s = stored!.secondaries[0];
+  expect(s.cancelPhase).toBe("CANCEL_VERIFIED");
+  expect(s.cancelledAt).toBe(shopify.order(2).cancelledAt);
+  expect(s.staffNoteMatched).toBe(true);
+  expect(s.done).toBe(true);
+});
+
+it("S3r2: precondition recordVerified path — the STORED secondary keeps its verified evidence after COMPLETED", async () => {
+  const ctx = setup();
+  const { shopify, deps, ops } = ctx;
+  await deps.claims.acquire(SHOP, [id(1), id(2)], "claim", deps.leaseTtlMs);
+  const sourceLine = shopify.order(2).lineItems[0];
+  const op = await ops.createOperation(
+    opInput(ctx, {
+      calculatedOrderId: "gid://shopify/CalculatedOrder/1",
+      leaseToken: "v2-lease",
+      expectedTransfer: [
+        {
+          secondaryId: id(2),
+          secondaryIndex: 1,
+          lines: [
+            {
+              sourceLineItemId: sourceLine.id!,
+              variantId: sourceLine.variant!.id,
+              quantity: 1,
+              sourceQuantity: 1,
+              description: "Merged from #2, already paid",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  await ops.transition(
+    { id: op.id, leaseToken: "v2-lease", workItemId: null },
+    {
+      expectedPhase: "READY",
+      phase: "APPLIED",
+      secondaries: [{ id: id(2), name: "#2", items: 1, cancelPhase: "CANCEL_READY" }],
+      appliedEvidence: {
+        agreementId: "gid://shopify/OrderEditAgreement/1",
+        happenedAt: deps.now().toISOString(),
+        lines: [
+          {
+            secondaryId: id(2),
+            lineItemId: "gid://shopify/LineItem/9001",
+            variantId: sourceLine.variant!.id,
+            quantity: 1,
+          },
+        ],
+      },
+      nextCheckAt: "now",
+    },
+  );
+  // Reach cancelPrecondition rather than the in-doubt verify loop: the
+  // latest ORDER_CANCEL attempt is REJECTED, while the earlier SUCCEEDED
+  // attempt still lets classifyCancellation prove the cancellation ours.
+  const seed = (n: number, state: MutationAttempt["state"], summary: string | null): MutationAttempt => ({
+    id: `att-seed-${n}`,
+    operationId: op.id,
+    kind: "ORDER_CANCEL",
+    targetOrderId: id(2),
+    attemptNo: n,
+    state,
+    dispatchToken: `seed-${n}`,
+    dispatchedAt: deps.now(),
+    respondedAt: deps.now(),
+    responseSummary: summary,
+    jobId: n === 1 ? "gid://shopify/Job/1" : null,
+  });
+  ops.attempts.push(
+    seed(1, "SUCCEEDED", null),
+    seed(2, "REJECTED", "not dispatched: ownership lost before send"),
+  );
+  shopify.order(2).cancelledAt = deps.now().toISOString();
+  shopify.order(2).cancellation = {
+    staffNote: cancelStaffNote(op.primaryOrderName, op.opToken!),
+  };
+
+  const final = await driveToIdle(ctx, op.id);
+  expect(final?.phase).toBe("COMPLETED");
+  expect(final?.sideEffectsDone).toBe(true);
+  expect(shopify.mutationCalls("MergeCancelSecondary")).toBe(0); // adopted, never re-issued
+  expect(ops.records).toHaveLength(1);
+  const stored = await ops.getOperation(op.id);
+  const s = stored!.secondaries[0];
+  expect(s.cancelPhase).toBe("CANCEL_VERIFIED");
+  expect(s.cancelledAt).toBe(shopify.order(2).cancelledAt);
+  expect(s.staffNoteMatched).toBe(true);
+  expect(s.done).toBe(true);
+});

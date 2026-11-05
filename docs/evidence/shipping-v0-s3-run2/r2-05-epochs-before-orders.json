@@ -1,0 +1,85 @@
+{
+ "preflight": {
+  "db": "mergeship_test_s3b",
+  "addr": "127.0.0.1",
+  "port": 55537
+ },
+ "out": [
+  {
+   "sql": "SELECT * FROM \"ShippingExecuteControl\"",
+   "result": [
+    {
+     "id": "control",
+     "admissionEnabled": true,
+     "admissionEnabledAt": "2026-11-04T21:00:23.867Z",
+     "dispatchEnabled": true,
+     "dispatchEnabledAt": "2026-11-04T21:00:23.867Z",
+     "globalDailyCap": 1,
+     "note": "S3 happy path run2 (S3-AUTH 2026-11-04)",
+     "updatedAt": "2026-11-04T21:00:23.867Z"
+    }
+   ]
+  },
+  {
+   "sql": "SELECT * FROM \"ShippingExecuteApproval\"",
+   "result": [
+    {
+     "shop": "ordermergetest2.myshopify.com",
+     "approvedAt": "2026-11-04T21:00:33.786Z",
+     "approvedBy": "S3-operator",
+     "note": "S3 happy path run2 (S3-AUTH 2026-11-04)",
+     "revokedAt": null,
+     "merchantOptInEpoch": "2026-11-04T21:00:03.753Z",
+     "ackVersion": "v1",
+     "ackRecordedAt": "2026-11-04T21:00:33.786Z",
+     "currencyCode": "USD",
+     "maxRefundMinor": "400",
+     "dailyCap": 1,
+     "autoApprove": false
+    }
+   ]
+  },
+  {
+   "sql": "SELECT \"shippingAdjustmentsEnabled\",\"shippingEnabledAt\",\"shippingAllowShops\",\"newMergesEnabled\",\"completionEnabled\",\"all",
+   "result": [
+    {
+     "shippingAdjustmentsEnabled": true,
+     "shippingEnabledAt": "2026-11-04T21:00:03.761Z",
+     "shippingAllowShops": [
+      "ordermergetest2.myshopify.com"
+     ],
+     "newMergesEnabled": false,
+     "completionEnabled": false,
+     "allowShops": [
+      "ordermergetest2.myshopify.com"
+     ]
+    }
+   ]
+  },
+  {
+   "sql": "SELECT \"shop\",\"shippingAdjustmentEnabled\",\"shippingAdjustmentEnabledAt\",\"shippingRolloutAt\",\"shippingPolicy\",\"autoMergeE",
+   "result": [
+    {
+     "shop": "ordermergetest2.myshopify.com",
+     "shippingAdjustmentEnabled": true,
+     "shippingAdjustmentEnabledAt": "2026-11-04T21:00:03.753Z",
+     "shippingRolloutAt": "2026-11-04T21:00:03.753Z",
+     "shippingPolicy": "REFUND_ALL",
+     "autoMergeEnabled": true,
+     "onboardingCompletedAt": "2026-11-04T21:00:03.753Z",
+     "mergeWindowHours": 24
+    }
+   ]
+  },
+  {
+   "sql": "SELECT (a.\"merchantOptInEpoch\" = s.\"shippingAdjustmentEnabledAt\") AS opt_in_epoch_matches, GREATEST(c.\"shippingEnabledAt",
+   "result": [
+    {
+     "opt_in_epoch_matches": true,
+     "latest_cutoff": "2026-11-04T21:00:33.786Z",
+     "db_now": "2026-11-04T21:00:43.543Z"
+    }
+   ]
+  }
+ ]
+}

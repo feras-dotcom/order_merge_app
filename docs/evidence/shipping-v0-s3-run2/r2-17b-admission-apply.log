@@ -1,0 +1,2 @@
+[shipping-refund] malformed-operations shop=ordermergetest2.myshopify.com count=1
+[{"shop":"ordermergetest2.myshopify.com","stoppedBy":null,"gateOpen":true,"admissionCutoffAt":"2026-11-04T21:00:33.786Z","dueRowsExamined":0,"claimed":0,"terminalClaims":1,"deferredSettleDelay":0,"outcomes":{"TERMINAL:CANCELLED_AT_INVALID":1},"evaluations":0,"secondaryErrors":[],"quarantined":[],"malformed":[{"operationId":"daaadaae-2173-4a9b-a1d1-e521d39284b9","secondaryIndex":null,"defect":"cancelled-at-invalid"}]}]

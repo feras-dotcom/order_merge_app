@@ -1,0 +1,2 @@
+{"dryRun":false,"admission":true,"dispatch":true,"globalDailyCap":1,"note":"S3 happy path run2 (S3-AUTH 2026-11-04)","by":"S3-operator"}
+[shipping-refund] control-change by=S3-operator admission=true dispatch=true globalDailyCap=1

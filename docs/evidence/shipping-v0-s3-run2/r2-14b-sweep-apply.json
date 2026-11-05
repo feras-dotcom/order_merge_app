@@ -1,0 +1,31 @@
+{
+ "dryRun": false,
+ "ticks": 1,
+ "lastTick": 1,
+ "state": {
+  "operations": [
+   {
+    "id": "daaadaae-2173-4a9b-a1d1-e521d39284b9",
+    "phase": "COMPLETED",
+    "sideEffectsDone": true,
+    "involvedOrderIds": [
+     "gid://shopify/Order/8143542812919",
+     "gid://shopify/Order/8143559655671"
+    ],
+    "createdAt": "2026-11-05T11:50:54.917Z"
+   }
+  ],
+  "workItems": [
+   {
+    "orderId": "gid://shopify/Order/8143542812919",
+    "status": "DONE",
+    "outcome": "MERGED"
+   },
+   {
+    "orderId": "gid://shopify/Order/8143559655671",
+    "status": "PENDING",
+    "outcome": null
+   }
+  ]
+ }
+}

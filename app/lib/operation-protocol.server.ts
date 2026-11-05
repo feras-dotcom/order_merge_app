@@ -835,13 +835,21 @@ export async function driveOperation(
       });
       return "again";
     }
+    const cancelledIso = iso(st.cancelledAt);
     await deps.hooks?.beforeHistoryTx?.();
     await deps.ops.recordHistoryAndVerifyCancel(
       { ...current, secondaries },
       s.id,
-      { cancelledAt: iso(st.cancelledAt) },
+      { cancelledAt: cancelledIso },
     );
+    // Mirror the fields recordHistoryAndVerifyCancel just persisted: the
+    // COMPLETED move below writes this in-memory array, and dropping the
+    // verified evidence here erases it from the durable record (S3 run 2
+    // found admission classifying the op CANCELLED_AT_INVALID).
     s.cancelPhase = "CANCEL_VERIFIED";
+    s.cancelledAt = cancelledIso;
+    s.staffNoteMatched = true;
+    s.done = true;
     return "verified";
   }
 
@@ -857,13 +865,18 @@ export async function driveOperation(
     secondaries: OperationSecondary[],
   ): Promise<string | "verified" | null> {
     const recordVerified = async (cancelledAt: unknown) => {
+      const cancelledIso = iso(cancelledAt);
       await deps.hooks?.beforeHistoryTx?.();
       await deps.ops.recordHistoryAndVerifyCancel(
         { ...current, secondaries },
         s.id,
-        { cancelledAt: iso(cancelledAt) },
+        { cancelledAt: cancelledIso },
       );
+      // Same durable-evidence preservation as verifyCancel above.
       s.cancelPhase = "CANCEL_VERIFIED";
+      s.cancelledAt = cancelledIso;
+      s.staffNoteMatched = true;
+      s.done = true;
     };
 
     // Converted legacy ops never reach here — fail closed anyway.

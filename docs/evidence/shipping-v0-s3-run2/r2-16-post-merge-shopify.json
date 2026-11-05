@@ -1,0 +1,219 @@
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+{
+  "currentAppInstallation": {
+    "app": {
+      "id": "gid://shopify/App/426185785345"
+    }
+  },
+  "secondary": {
+    "id": "gid://shopify/Order/8143559655671",
+    "name": "#1136",
+    "cancelledAt": "2026-11-05T11:53:27Z",
+    "cancelReason": "OTHER",
+    "closed": true,
+    "displayFinancialStatus": "PAID",
+    "displayFulfillmentStatus": "UNFULFILLED",
+    "tags": [
+      "Merged"
+    ],
+    "note": "Consolidated into primary order #1135 by MergeShip",
+    "totalRefundedSet": {
+      "shopMoney": {
+        "amount": "0.0"
+      }
+    },
+    "refunds": [],
+    "shippingLines": {
+      "nodes": [
+        {
+          "title": "S3 Test Shipping",
+          "discountedPriceSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          }
+        }
+      ]
+    },
+    "transactions": [
+      {
+        "id": "gid://shopify/OrderTransaction/10262267658487",
+        "kind": "AUTHORIZATION",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0"
+          }
+        }
+      },
+      {
+        "id": "gid://shopify/OrderTransaction/10262267789559",
+        "kind": "CAPTURE",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0"
+          }
+        }
+      }
+    ],
+    "events": {
+      "nodes": [
+        {
+          "action": "closed",
+          "message": "MergeShip archived this order.",
+          "createdAt": "2026-11-05T11:54:33Z",
+          "appTitle": "MergeShip"
+        },
+        {
+          "action": "note_created",
+          "message": "MergeShip added a note to this order.",
+          "createdAt": "2026-11-05T11:54:19Z",
+          "appTitle": "MergeShip"
+        },
+        {
+          "action": "cancelled",
+          "message": "MergeShip canceled this order.",
+          "createdAt": "2026-11-05T11:53:27Z",
+          "appTitle": "MergeShip"
+        },
+        {
+          "action": "restock_line_items",
+          "message": "MergeShip restocked 1 line item.",
+          "createdAt": "2026-11-05T11:53:27Z",
+          "appTitle": "MergeShip"
+        },
+        {
+          "action": "confirmed",
+          "message": "Received new order <a href=\"https://ordermergetest2.myshopify.com/admin/orders/8143559655671\">#1136</a> by Jane S3Test.",
+          "createdAt": "2026-11-05T11:39:41Z",
+          "appTitle": null
+        },
+        {
+          "action": "mail_sent",
+          "message": "Order confirmation email was sent to Jane S3Test (s3-run2-20261104@example.com).",
+          "createdAt": "2026-11-05T11:39:41Z",
+          "appTitle": null
+        },
+        {
+          "action": "capture_success",
+          "message": "$604.00 USD was captured using a Bogus ending in •• 1.",
+          "createdAt": "2026-11-05T11:39:40Z",
+          "appTitle": null
+        },
+        {
+          "action": "tax_finalization_capture_started",
+          "message": "Unknown event Order#tax_finalization_capture_started...",
+          "createdAt": "2026-11-05T11:39:40Z",
+          "appTitle": null
+        },
+        {
+          "action": "authorization_success",
+          "message": "$604.00 USD was authorized using a Bogus ending in •• 1.",
+          "createdAt": "2026-11-05T11:39:39Z",
+          "appTitle": null
+        },
+        {
+          "action": "confirmation_number_generated",
+          "message": "Confirmation #FADZJCLVW was generated for this order.",
+          "createdAt": "2026-11-05T11:39:38Z",
+          "appTitle": null
+        },
+        {
+          "action": "placed",
+          "message": "Jane S3Test placed this order on Online Store (checkout #49629315006711).",
+          "createdAt": "2026-11-05T11:39:38Z",
+          "appTitle": null
+        }
+      ]
+    }
+  },
+  "primary": {
+    "id": "gid://shopify/Order/8143542812919",
+    "name": "#1135",
+    "cancelledAt": null,
+    "displayFinancialStatus": "PAID",
+    "displayFulfillmentStatus": "UNFULFILLED",
+    "tags": [
+      "Consolidated"
+    ],
+    "lineItems": {
+      "nodes": [
+        {
+          "id": "gid://shopify/LineItem/20297731440887",
+          "quantity": 1,
+          "currentQuantity": 1,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/51204236181751"
+          },
+          "discountAllocations": []
+        },
+        {
+          "id": "gid://shopify/LineItem/20297828499703",
+          "quantity": 1,
+          "currentQuantity": 1,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/51204236181751"
+          },
+          "discountAllocations": [
+            {
+              "allocatedAmountSet": {
+                "shopMoney": {
+                  "amount": "600.0"
+                }
+              },
+              "discountApplication": {
+                "description": "Merged from #1136, already paid · MS-GNRTPAN2-1"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "agreements": {
+      "nodes": [
+        {
+          "id": "gid://shopify/SalesAgreement/8712935145719",
+          "reason": "ORDER",
+          "happenedAt": "2026-11-05T11:30:52Z",
+          "app": {
+            "id": "gid://shopify/App/580111",
+            "title": "Online Store"
+          }
+        },
+        {
+          "id": "gid://shopify/SalesAgreement/8712979939575",
+          "reason": "ORDER_EDIT",
+          "happenedAt": "2026-11-05T11:52:14Z",
+          "app": {
+            "id": "gid://shopify/App/426185785345",
+            "title": "MergeShip"
+          },
+          "sales": {
+            "nodes": [
+              {
+                "actionType": "ORDER",
+                "lineType": "PRODUCT",
+                "quantity": 1
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

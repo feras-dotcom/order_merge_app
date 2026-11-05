@@ -1,0 +1,67 @@
+{
+ "method": "railway ssh MergeShip production; node; prisma $transaction SET TRANSACTION READ ONLY",
+ "env": {
+  "MERGESHIP_MUTATIONS": "enabled",
+  "DISABLE_BACKGROUND_WORKER": "false",
+  "MERGESHIP_SHIPPING_REFUNDS": "<unset>",
+  "NODE_ENV": "production",
+  "RAILWAY_DEPLOYMENT_ID": "e58f90b8-f978-43c4-937a-a8e74fe58db1",
+  "RAILWAY_GIT_COMMIT_SHA": "07773b5d3bc6f186568e1c2d83c5ee673f875572",
+  "RAILWAY_GIT_BRANCH": "main"
+ },
+ "cwd": "/app",
+ "ro": [
+  {
+   "transaction_read_only": "on"
+  }
+ ],
+ "appControl": [
+  {
+   "id": "control",
+   "newMergesEnabled": true,
+   "completionEnabled": true,
+   "allowShops": [],
+   "updatedAt": "2026-10-07T11:20:18.735Z"
+  }
+ ],
+ "settings": [
+  {
+   "shop": "ordermergetest2.myshopify.com",
+   "autoMergeEnabled": false,
+   "autoMergeAcknowledgedAt": "2026-11-02T14:30:57.769Z",
+   "onboardingStartedAt": "2026-11-02T14:30:18.280Z",
+   "onboardingCompletedAt": "2026-11-02T14:30:57.769Z",
+   "mergeWindowHours": 1
+  }
+ ],
+ "migrations": [
+  {
+   "migration_name": "20261004000000_external_mutation_protocol"
+  },
+  {
+   "migration_name": "20261003000000_durable_work_and_claims"
+  },
+  {
+   "migration_name": "20261002000000_onboarding_state"
+  }
+ ],
+ "workers": [
+  {
+   "instanceId": "5b7b3d93-bc6e-4635-92b4-095ffb411cf2",
+   "heartbeatAt": "2026-11-04T20:58:41.944Z",
+   "version": "07773b5d3bc6f186568e1c2d83c5ee673f875572"
+  }
+ ],
+ "recentWork": [
+  {
+   "status": "DONE",
+   "n": 2,
+   "latest": "2026-11-03T07:24:06.606Z"
+  }
+ ],
+ "now": [
+  {
+   "now": "2026-11-04T20:58:55.097Z"
+  }
+ ]
+}
