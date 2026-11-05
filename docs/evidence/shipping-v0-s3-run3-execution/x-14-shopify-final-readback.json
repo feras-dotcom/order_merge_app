@@ -1,0 +1,174 @@
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+{
+  "refund": {
+    "id": "gid://shopify/Refund/1127322779895",
+    "createdAt": "2026-11-05T15:57:09Z",
+    "note": "MergeShip shipping adjustment MS-SHIPREFUND-4d854578-911b-4960-957d-8d34069d2be0 — shipping refunded for order merged into #1137.",
+    "order": {
+      "id": "gid://shopify/Order/8143926624503",
+      "name": "#1138"
+    },
+    "totalRefundedSet": {
+      "shopMoney": {
+        "amount": "4.0",
+        "currencyCode": "USD"
+      }
+    },
+    "refundShippingLines": {
+      "nodes": [
+        {
+          "shippingLine": {
+            "title": "S3 Test Shipping"
+          },
+          "subtotalAmountSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          },
+          "taxAmountSet": {
+            "shopMoney": {
+              "amount": "0.0"
+            }
+          }
+        }
+      ]
+    },
+    "refundLineItems": {
+      "nodes": []
+    },
+    "transactions": {
+      "nodes": [
+        {
+          "id": "gid://shopify/OrderTransaction/10263222714615",
+          "kind": "REFUND",
+          "status": "SUCCESS",
+          "test": true,
+          "gateway": "bogus",
+          "amountSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          },
+          "parentTransaction": {
+            "id": "gid://shopify/OrderTransaction/10262841229559"
+          }
+        }
+      ]
+    }
+  },
+  "order": {
+    "id": "gid://shopify/Order/8143926624503",
+    "name": "#1138",
+    "displayFinancialStatus": "PARTIALLY_REFUNDED",
+    "totalRefundedSet": {
+      "shopMoney": {
+        "amount": "4.0",
+        "currencyCode": "USD"
+      }
+    },
+    "totalRefundedShippingSet": {
+      "shopMoney": {
+        "amount": "4.0",
+        "currencyCode": "USD"
+      }
+    },
+    "refunds": [
+      {
+        "id": "gid://shopify/Refund/1127322779895",
+        "createdAt": "2026-11-05T15:57:09Z"
+      }
+    ],
+    "transactions": [
+      {
+        "id": "gid://shopify/OrderTransaction/10262841098487",
+        "kind": "AUTHORIZATION",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0"
+          }
+        },
+        "parentTransaction": null
+      },
+      {
+        "id": "gid://shopify/OrderTransaction/10262841229559",
+        "kind": "CAPTURE",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0"
+          }
+        },
+        "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/10262841098487"
+        }
+      },
+      {
+        "id": "gid://shopify/OrderTransaction/10263222714615",
+        "kind": "REFUND",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "4.0"
+          }
+        },
+        "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/10262841229559"
+        }
+      }
+    ],
+    "agreements": {
+      "nodes": [
+        {
+          "id": "gid://shopify/SalesAgreement/8713355133175",
+          "reason": "ORDER",
+          "happenedAt": "2026-11-05T14:42:45Z",
+          "app": {
+            "id": "gid://shopify/App/580111",
+            "title": "Online Store"
+          }
+        },
+        {
+          "id": "gid://shopify/SalesAgreement/8713667281143",
+          "reason": "REFUND",
+          "happenedAt": "2026-11-05T15:57:09Z",
+          "app": {
+            "id": "gid://shopify/App/426185785345",
+            "title": "MergeShip"
+          },
+          "refund": {
+            "id": "gid://shopify/Refund/1127322779895"
+          }
+        }
+      ]
+    }
+  },
+  "primary": {
+    "id": "gid://shopify/Order/8143923609847",
+    "name": "#1137",
+    "displayFinancialStatus": "PAID",
+    "totalRefundedSet": {
+      "shopMoney": {
+        "amount": "0.0"
+      }
+    },
+    "refunds": []
+  }
+}

@@ -1,0 +1,227 @@
+{
+ "preflight": {
+  "db": "mergeship_test_s3c",
+  "addr": "127.0.0.1",
+  "port": 55537
+ },
+ "out": [
+  {
+   "sql": "SELECT to_jsonb(r) AS row FROM \"ShippingRefund\" r",
+   "result": [
+    {
+     "row": {
+      "id": "sr_0472d4e2c869467e841ccd8415759147",
+      "lane": "EXECUTE",
+      "shop": "ordermergetest2.myshopify.com",
+      "marker": "MS-SHIPREFUND-4d854578-911b-4960-957d-8d34069d2be0",
+      "status": "VERIFIED",
+      "gateway": "bogus",
+      "attempts": 1,
+      "refundId": "gid://shopify/Refund/1127322779895",
+      "wireHash": "b25ed9574e16123b44943b98c41b2eae3c6da1d78ef436e029661fdba5f4c327",
+      "createdAt": "2026-11-05T15:20:24.227",
+      "updatedAt": "2026-11-05T16:14:31.838",
+      "approvedAt": "2026-11-05T15:55:42.629",
+      "approvedBy": "S3-operator",
+      "leaseToken": null,
+      "policyKind": "REFUND_ALL",
+      "preparedAt": "2026-11-05T15:21:25.774",
+      "reasonCode": null,
+      "resolution": null,
+      "resolvedAt": null,
+      "resolvedBy": null,
+      "verifiedAt": "2026-11-05T16:14:31.838",
+      "leasedUntil": null,
+      "nextCheckAt": null,
+      "preEvidence": {
+       "baseline": {
+        "mode": "STRICT_EMPTY",
+        "refunds": [],
+        "currency": "USD",
+        "capturedAt": "2026-11-05T15:21:25.707Z",
+        "refundCount": 0,
+        "transactionIds": [
+         "gid://shopify/OrderTransaction/10262841098487",
+         "gid://shopify/OrderTransaction/10262841229559"
+        ],
+        "totalRefundedMinor": "0",
+        "moneyTransactionCount": 2,
+        "totalRefundedShippingMinor": "0"
+       },
+       "refundIds": [],
+       "refundCount": 0,
+       "transactionIds": [
+        "gid://shopify/OrderTransaction/10262841098487",
+        "gid://shopify/OrderTransaction/10262841229559"
+       ],
+       "secondaryAggregates": {
+        "totalRefundedMinor": "0",
+        "totalRefundedShippingMinor": "0"
+       },
+       "captureTransactionId": "gid://shopify/OrderTransaction/10262841229559",
+       "authorizationTransactionId": "gid://shopify/OrderTransaction/10262841098487"
+      },
+      "respondedAt": "2026-11-05T15:57:11.88",
+      "currencyCode": "USD",
+      "dispatchedAt": "2026-11-05T15:56:58.93",
+      "responseKind": "ACCEPTED",
+      "reviewReason": null,
+      "dispatchToken": "22ef8107-8774-4d67-a5d7-32a6fca53396",
+      "sourceOrderId": "gid://shopify/Order/8143926624503",
+      "switchEpochAt": "2026-11-05T13:06:06.595",
+      "wireVariables": {
+       "input": {
+        "note": "MergeShip shipping adjustment MS-SHIPREFUND-4d854578-911b-4960-957d-8d34069d2be0 — shipping refunded for order merged into #1137.",
+        "notify": false,
+        "orderId": "gid://shopify/Order/8143926624503",
+        "currency": "USD",
+        "shipping": {
+         "amount": "4.00",
+         "fullRefund": false
+        },
+        "transactions": [
+         {
+          "kind": "REFUND",
+          "amount": "4.00",
+          "gateway": "bogus",
+          "orderId": "gid://shopify/Order/8143926624503",
+          "parentId": "gid://shopify/OrderTransaction/10262841229559"
+         }
+        ]
+       },
+       "idempotencyKey": "63d6dbac-d6e6-4b31-9014-e2c5e877e71d"
+      },
+      "documentSha256": "10c8b9ce918f20febb8c58cb36227547834a5421d914fa23b92e76272f4d77cf",
+      "idempotencyKey": "63d6dbac-d6e6-4b31-9014-e2c5e877e71d",
+      "primaryOrderId": "gid://shopify/Order/8143923609847",
+      "resolutionNote": null,
+      "rolloutEpochAt": "2026-11-05T13:06:06.577",
+      "merchantEpochAt": "2026-11-05T13:06:06.577",
+      "mutationVersion": "MergeShipShippingRefund@2026-04",
+      "refundCreatedAt": "2026-11-05T18:57:09",
+      "responseSummary": "refund gid://shopify/Refund/1127322779895 accepted",
+      "settlementState": "SUCCESS",
+      "admissionEpochAt": "2026-11-05T13:06:27.655",
+      "approvedWireHash": "b25ed9574e16123b44943b98c41b2eae3c6da1d78ef436e029661fdba5f4c327",
+      "mergeOperationId": "08800a12-6ffa-4af9-9b3e-39decc92383f",
+      "primaryOrderName": "#1137",
+      "verifiedEvidence": {
+       "appId": "gid://shopify/App/426185785345",
+       "refundId": "gid://shopify/Refund/1127322779895",
+       "checkedAt": "2026-11-05T16:13:41.348Z",
+       "agreementId": "gid://shopify/SalesAgreement/8713667281143",
+       "amountMinor": "400",
+       "currencyCode": "USD",
+       "aggregateCheck": "verified",
+       "refundTransactionId": "gid://shopify/OrderTransaction/10263222714615"
+      },
+      "admissionCutoffAt": "2026-11-05T13:06:38.078",
+      "settlementCheckAt": "2026-11-05T16:14:31.838",
+      "sourceCancelledAt": "2026-11-05T15:04:13",
+      "activationCutoffAt": "2026-11-05T13:06:06.595",
+      "approvalAckVersion": "v1",
+      "approvalApprovedAt": "2026-11-05T13:06:38.078",
+      "approvalOptInEpoch": "2026-11-05T13:06:06.577",
+      "operationCreatedAt": "2026-11-05T15:01:29.517",
+      "parentTransactionId": "gid://shopify/OrderTransaction/10262841229559",
+      "plannedShippingMinor": "400",
+      "dispatchEpochAtAdmission": "2026-11-05T13:06:27.655"
+     }
+    }
+   ]
+  },
+  {
+   "sql": "SELECT to_jsonb(e) AS ev FROM \"ShippingRefundEvent\" e ORDER BY e.\"at\"",
+   "result": [
+    {
+     "ev": {
+      "at": "2026-11-05T15:20:24.281",
+      "id": "fb7ca45d-2dc4-4fb0-b940-068d76e549dc",
+      "actor": "shipping-refund-claim",
+      "toStatus": "QUEUED",
+      "fromStatus": null,
+      "shippingRefundId": "sr_0472d4e2c869467e841ccd8415759147"
+     }
+    },
+    {
+     "ev": {
+      "at": "2026-11-05T15:21:25.778",
+      "id": "d4e455b5-f803-47ab-828e-619bce0502f6",
+      "actor": "shipping-refund-freeze",
+      "toStatus": "PREPARED",
+      "fromStatus": "QUEUED",
+      "shippingRefundId": "sr_0472d4e2c869467e841ccd8415759147"
+     }
+    },
+    {
+     "ev": {
+      "at": "2026-11-05T15:56:58.934",
+      "id": "d53a035f-f224-46e9-8d46-f87bd1a87ca4",
+      "actor": "shipping-refund-dispatch",
+      "toStatus": "DISPATCHING",
+      "fromStatus": "PREPARED",
+      "shippingRefundId": "sr_0472d4e2c869467e841ccd8415759147"
+     }
+    },
+    {
+     "ev": {
+      "at": "2026-11-05T15:57:11.882",
+      "id": "5eb6c037-afcf-44cd-a5ae-89c38416aef9",
+      "actor": "shipping-refund-dispatch",
+      "toStatus": "REFUND_RECORDED",
+      "fromStatus": "DISPATCHING",
+      "shippingRefundId": "sr_0472d4e2c869467e841ccd8415759147"
+     }
+    },
+    {
+     "ev": {
+      "at": "2026-11-05T16:14:31.849",
+      "id": "97aa5013-5cb1-4dc8-bf1f-8a2b31612916",
+      "actor": "shipping-refund-reconcile",
+      "toStatus": "VERIFIED",
+      "fromStatus": "REFUND_RECORDED",
+      "shippingRefundId": "sr_0472d4e2c869467e841ccd8415759147"
+     }
+    }
+   ]
+  },
+  {
+   "sql": "SELECT to_jsonb(a) AS approval FROM \"ShippingExecuteApproval\" a",
+   "result": [
+    {
+     "approval": {
+      "note": "S3 happy path run3 (S3-AUTH 2026-11-05)",
+      "shop": "ordermergetest2.myshopify.com",
+      "dailyCap": 1,
+      "revokedAt": null,
+      "ackVersion": "v1",
+      "approvedAt": "2026-11-05T13:06:38.078",
+      "approvedBy": "S3-operator",
+      "autoApprove": false,
+      "currencyCode": "USD",
+      "ackRecordedAt": "2026-11-05T13:06:38.078",
+      "maxRefundMinor": "400",
+      "merchantOptInEpoch": "2026-11-05T13:06:06.577"
+     }
+    }
+   ]
+  },
+  {
+   "sql": "SELECT to_jsonb(c) AS control FROM \"ShippingExecuteControl\" c",
+   "result": [
+    {
+     "control": {
+      "id": "control",
+      "note": "S3 happy path run3 (S3-AUTH 2026-11-05)",
+      "updatedAt": "2026-11-05T13:06:27.655",
+      "globalDailyCap": 1,
+      "dispatchEnabled": true,
+      "admissionEnabled": true,
+      "dispatchEnabledAt": "2026-11-05T13:06:27.655",
+      "admissionEnabledAt": "2026-11-05T13:06:27.655"
+     }
+    }
+   ]
+  }
+ ]
+}

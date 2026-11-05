@@ -1,0 +1,16 @@
+[
+ {
+  "shop": "ordermergetest2.myshopify.com",
+  "stoppedBy": null,
+  "sweptToInDoubt": 0,
+  "rowsExamined": 1,
+  "adopted": 0,
+  "verified": 1,
+  "reviewRequired": 0,
+  "waited": 0,
+  "outcomes": {
+   "VERIFIED": 1
+  },
+  "errors": []
+ }
+]

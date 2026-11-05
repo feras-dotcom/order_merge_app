@@ -1,0 +1,3 @@
+[shipping-refund] dispatched row=sr_0472d4e2c869467e841ccd8415759147 refund=gid://shopify/Refund/1127322779895
+{"enabled":true,"rows":1,"outcomes":{"DISPATCHED:ACCEPTED":1}}
+exit=0

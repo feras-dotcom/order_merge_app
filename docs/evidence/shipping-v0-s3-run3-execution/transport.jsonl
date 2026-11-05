@@ -1,0 +1,9 @@
+{"at":"2026-11-05T15:56:46.934Z","mode":"read-only","opType":"query","opName":"S3Identity","rootFields":["shop","currentAppInstallation"],"durationMs":12516,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T15:56:58.863Z","mode":"refund","opType":"query","opName":"ShippingRefundExecRecheck","rootFields":["order","order"],"durationMs":11853,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T15:57:11.861Z","mode":"refund","opType":"mutation","opName":"MergeShipShippingRefund","rootFields":["refundCreate"],"durationMs":12918,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T16:13:41.333Z","mode":"read-only","opType":"query","opName":"S3Identity","rootFields":["shop","currentAppInstallation"],"durationMs":16005,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T16:13:54.013Z","mode":"read-only","opType":"query","opName":"ShippingRefundReconcile","rootFields":["order"],"durationMs":12617,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T16:14:06.438Z","mode":"read-only","opType":"query","opName":"ShippingRefundDetail","rootFields":["nodes"],"durationMs":12418,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T16:14:19.709Z","mode":"read-only","opType":"query","opName":"ShippingRefundAppIdentity","rootFields":["currentAppInstallation"],"durationMs":13266,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T16:14:31.806Z","mode":"read-only","opType":"query","opName":"ShippingRefundAgreements","rootFields":["order"],"durationMs":12093,"exitCode":0,"outcome":"ok"}
+{"at":"2026-11-05T16:15:18.710Z","mode":"read-only","opType":"query","opName":"S3Identity","rootFields":["shop","currentAppInstallation"],"durationMs":12403,"exitCode":0,"outcome":"ok"}

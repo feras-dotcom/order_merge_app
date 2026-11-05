@@ -1,0 +1,21 @@
+{
+ "dryRun": false,
+ "enabled": true,
+ "checks": {
+  "disposableDb": true,
+  "rowExists": true,
+  "shopIsDevStore": true,
+  "onlyDueRow": true,
+  "ordersMatch": true,
+  "wireApproved": true,
+  "amountWithinLimit": true
+ },
+ "failed": [],
+ "result": {
+  "enabled": true,
+  "rows": 1,
+  "outcomes": {
+   "DISPATCHED:ACCEPTED": 1
+  }
+ }
+}

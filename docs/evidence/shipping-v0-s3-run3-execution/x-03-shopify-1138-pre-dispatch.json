@@ -1,0 +1,78 @@
+Authenticating ...
+[2K[1A[2K[G
+Executing GraphQL operation ...
+[2K[1A[2K[G
+╭─ success ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  Operation succeeded.                                                        │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+{
+  "order": {
+    "id": "gid://shopify/Order/8143926624503",
+    "name": "#1138",
+    "cancelledAt": "2026-11-05T15:04:13Z",
+    "closed": true,
+    "displayFinancialStatus": "PAID",
+    "currencyCode": "USD",
+    "totalRefundedSet": {
+      "shopMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "totalRefundedShippingSet": {
+      "shopMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "refunds": [],
+    "shippingLines": {
+      "nodes": [
+        {
+          "title": "S3 Test Shipping",
+          "discountedPriceSet": {
+            "shopMoney": {
+              "amount": "4.0",
+              "currencyCode": "USD"
+            }
+          }
+        }
+      ]
+    },
+    "transactions": [
+      {
+        "id": "gid://shopify/OrderTransaction/10262841098487",
+        "kind": "AUTHORIZATION",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": null
+      },
+      {
+        "id": "gid://shopify/OrderTransaction/10262841229559",
+        "kind": "CAPTURE",
+        "status": "SUCCESS",
+        "test": true,
+        "gateway": "bogus",
+        "amountSet": {
+          "shopMoney": {
+            "amount": "604.0",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/10262841098487"
+        }
+      }
+    ]
+  }
+}

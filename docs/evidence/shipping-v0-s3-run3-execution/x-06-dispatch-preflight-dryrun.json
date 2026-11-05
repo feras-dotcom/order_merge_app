@@ -1,0 +1,14 @@
+{
+ "dryRun": true,
+ "enabled": true,
+ "checks": {
+  "disposableDb": true,
+  "rowExists": true,
+  "shopIsDevStore": true,
+  "onlyDueRow": true,
+  "ordersMatch": true,
+  "wireApproved": true,
+  "amountWithinLimit": true
+ },
+ "failed": []
+}
