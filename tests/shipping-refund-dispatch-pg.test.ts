@@ -226,12 +226,24 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
   });
 
   it("T4 records the Shopify refund instant as naive UTC under a non-UTC database timezone", async () => {
-    const [{ dbName }] = await db.$queryRaw<{ dbName: string }[]>`
-      SELECT current_database() AS "dbName"`;
-    // ALTER DATABASE affects only new sessions. The suite preflight has
-    // already verified this is a marked, loopback-only disposable database.
-    await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" SET timezone = 'Asia/Tokyo'`);
-    const tokyoDb = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
+    const databaseTimeZoneSetting = async () => {
+      const [{ timezone }] = await db.$queryRaw<{ timezone: string | null }[]>`
+        SELECT (
+          SELECT config.setting
+          FROM pg_db_role_setting AS setting
+          CROSS JOIN LATERAL unnest(setting.setconfig) AS config(setting)
+          WHERE setting.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND setting.setrole = 0
+            AND lower(split_part(config.setting, '=', 1)) = 'timezone'
+        ) AS "timezone"`;
+      return timezone;
+    };
+    const originalDatabaseTimeZone = await databaseTimeZoneSetting();
+    // The preflight and suite client use the original URL without query
+    // parameters; only this dedicated connection overrides its session zone.
+    const tokyoUrl = new URL(TEST_URL!);
+    tokyoUrl.searchParams.set("options", "-c TimeZone=Asia/Tokyo");
+    const tokyoDb = new PrismaClient({ datasources: { db: { url: tokyoUrl.toString() } } });
     try {
       const [{ tz }] = await tokyoDb.$queryRaw<{ tz: string }[]>`
         SELECT current_setting('TimeZone') AS "tz"`;
@@ -268,7 +280,7 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
       });
     } finally {
       await tokyoDb.$disconnect();
-      await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" RESET timezone`);
+      expect(await databaseTimeZoneSetting()).toBe(originalDatabaseTimeZone);
     }
   });
 
