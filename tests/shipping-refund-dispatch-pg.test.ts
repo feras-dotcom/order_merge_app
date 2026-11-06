@@ -225,6 +225,70 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
     cleanupEnv();
   });
 
+  it("T4 records the Shopify refund instant as naive UTC under a non-UTC database timezone", async () => {
+    const [{ dbName }] = await db.$queryRaw<{ dbName: string }[]>`
+      SELECT current_database() AS "dbName"`;
+    // ALTER DATABASE affects only new sessions. The suite preflight has
+    // already verified this is a marked, loopback-only disposable database.
+    await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" SET timezone = 'Asia/Tokyo'`);
+    const tokyoDb = new PrismaClient({ datasources: { db: { url: TEST_URL } } });
+    try {
+      const [{ tz }] = await tokyoDb.$queryRaw<{ tz: string }[]>`
+        SELECT current_setting('TimeZone') AS "tz"`;
+      expect(tz).toBe("Asia/Tokyo");
+
+      const s = shop(); await seedGate(s);
+      const r = await seedPrepared(s, { approvedHash: true });
+      const t3 = await openDispatchGate(r.id, r.leaseToken, {}, tokyoDb);
+      expect(t3.kind).toBe("PERMIT");
+      if (t3.kind !== "PERMIT") return;
+
+      // Non-Zulu input proves the stored value is the UTC instant, not
+      // either the input's wall time or the database session's wall time.
+      const createdAt = "2030-01-07T05:34:56.789-07:00";
+      const refundId = refundGid(++seq);
+      const { admin, calls } = fakeAdmin({
+        data: { refundCreate: { refund: { id: refundId, createdAt }, userErrors: [] } },
+      });
+      const outcome = classifyDispatchResponse(await sendRefund(t3.permit, admin));
+      expect(calls()).toBe(1); // fake admin only; no live Shopify call
+      expect(await recordDispatchOutcome(r.id, t3.permit.dispatchToken, outcome, {}, tokyoDb))
+        .toEqual({ wrote: true, status: "REFUND_RECORDED" });
+
+      const [stored] = await tokyoDb.$queryRaw<
+        { status: string; refundId: string; utcMatches: boolean; utcText: string; tz: string }[]
+      >`SELECT "status", "refundId",
+                "refundCreatedAt" = (${createdAt}::timestamptz AT TIME ZONE 'UTC') AS "utcMatches",
+                "refundCreatedAt"::text AS "utcText",
+                current_setting('TimeZone') AS "tz"
+         FROM "ShippingRefund" WHERE "id" = ${r.id}`;
+      expect(stored).toMatchObject({
+        status: "REFUND_RECORDED", refundId, utcMatches: true,
+        utcText: "2030-01-07 12:34:56.789", tz: "Asia/Tokyo",
+      });
+    } finally {
+      await tokyoDb.$disconnect();
+      await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" RESET timezone`);
+    }
+  });
+
+  it("T4 accepted response without a createdAt preserves NULL", async () => {
+    const s = shop(); await seedGate(s);
+    const r = await seedPrepared(s, { approvedHash: true });
+    const t3 = await openDispatchGate(r.id, r.leaseToken, {}, db);
+    expect(t3.kind).toBe("PERMIT");
+    if (t3.kind !== "PERMIT") return;
+    const refundId = refundGid(++seq);
+    const outcome = classifyDispatchResponse({
+      data: { refundCreate: { refund: { id: refundId }, userErrors: [] } },
+    });
+    expect(await recordDispatchOutcome(r.id, t3.permit.dispatchToken, outcome, {}, db))
+      .toEqual({ wrote: true, status: "REFUND_RECORDED" });
+    const [stored] = await db.$queryRaw<{ status: string; refundId: string; refundCreatedAt: Date | null }[]>`
+      SELECT "status", "refundId", "refundCreatedAt" FROM "ShippingRefund" WHERE "id" = ${r.id}`;
+    expect(stored).toMatchObject({ status: "REFUND_RECORDED", refundId, refundCreatedAt: null });
+  });
+
   it("capacity waits never abort and never consume attempts", async () => {
     const s = shop(); await seedGate(s);
     const r = await seedPrepared(s); // approvedWireHash null + autoApprove false

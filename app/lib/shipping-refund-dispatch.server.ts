@@ -9,7 +9,7 @@
 // send. I7: nothing here or anywhere resends — one wire request per row,
 // ever (10.5, I1).
 import { performance } from "node:perf_hooks";
-import type { PrismaClient, Prisma } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import defaultDb from "../db.server";
 import {
   DB_WALL,
@@ -869,11 +869,16 @@ const writeOutcomeOnce = async (
   return db.$transaction(async (tx) => {
     await setActor(tx);
     if (outcome.kind === "ACCEPTED" && outcome.refundId !== null) {
+      // Shopify's instant must be stored as a naive UTC timestamp, regardless
+      // of the PostgreSQL session timezone. Keep the absent-timestamp case NULL.
+      const refundCreatedAt = outcome.refundCreatedAt === null
+        ? Prisma.sql`NULL`
+        : Prisma.sql`(${new Date(outcome.refundCreatedAt)}::timestamptz AT TIME ZONE 'UTC')`;
       const updated = await tx.$executeRaw`
         UPDATE "ShippingRefund" SET
           "status" = 'REFUND_RECORDED',
           "refundId" = ${outcome.refundId},
-          "refundCreatedAt" = ${outcome.refundCreatedAt === null ? null : new Date(outcome.refundCreatedAt)},
+          "refundCreatedAt" = ${refundCreatedAt},
           "respondedAt" = ${DB_WALL},
           "responseKind" = 'ACCEPTED',
           "responseSummary" = ${outcome.summary.slice(0, 1900)},
