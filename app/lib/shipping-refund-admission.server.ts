@@ -241,6 +241,66 @@ interface QueuedRowContext {
 type RowOutcome = string;
 
 /**
+ * The merge-evidence re-assessment of §7.4, shared by the QUEUED-row
+ * evaluation and the S2 pre-dispatch recheck (8.4 R2): reloads the
+ * operation, re-finds the secondary inside it and re-runs
+ * assessSecondaryEvidence over fresh MergeRecord/MergeMutationAttempt
+ * reads. The verdict vocabulary and the reviewReason strings are identical
+ * wherever it runs; database errors propagate to the caller's boundary.
+ */
+export async function reassessMergeEvidence(
+  row: { shop: string; mergeOperationId: string; sourceOrderId: string; primaryOrderId: string },
+  db: PrismaClient,
+): Promise<{ ok: true } | { ok: false; reviewReason: string }> {
+  const op = await loadScanOperation(row.shop, row.mergeOperationId, db);
+  if (
+    op !== null &&
+    (typeof op.primaryOrderId !== "string" ||
+      !ORDER_GID_RE.test(op.primaryOrderId) ||
+      !ORDER_GID_RE.test(row.primaryOrderId) ||
+      op.primaryOrderId !== row.primaryOrderId)
+  ) {
+    return {
+      ok: false,
+      reviewReason: "the merge operation's primary order does not match the refund row's primary order",
+    };
+  }
+  const secondary =
+    op === null ? undefined : candidateSecondaryElements(op).find((s) => s.id === row.sourceOrderId);
+  if (op === null || secondary === undefined) {
+    return {
+      ok: false,
+      reviewReason: op === null
+        ? "the merge operation is no longer readable"
+        : "the secondary is no longer present in the operation",
+    };
+  }
+  const [records, attempts] = await Promise.all([
+    listMergeRecordsForSecondaries(row.shop, [row.sourceOrderId], db),
+    listMergeAttemptsForOperations([op.id], db),
+  ]);
+  const assessment = assessSecondaryEvidence({
+    operation: {
+      id: op.id,
+      protocolVersion: op.protocolVersion,
+      phase: op.phase,
+      calculatedOrderId: op.calculatedOrderId,
+      opToken: op.opToken,
+      primaryOrderId: op.primaryOrderId,
+      expectedTransfer: op.expectedTransfer,
+      appliedEvidence: op.appliedEvidence,
+    },
+    secondary: secondary as { id: string; cancelPhase?: string; done?: boolean; cancelledAt?: string | null; staffNoteMatched?: boolean },
+    mergeRecords: records,
+    attempts,
+  });
+  if (!assessment.eligible) {
+    return { ok: false, reviewReason: assessment.issues.join(" | ").slice(0, 2000) };
+  }
+  return { ok: true };
+}
+
+/**
  * The §7.3/§8 pipeline for one QUEUED row held under `leaseToken`: merge
  * evidence re-assessment, the session guard immediately before any Shopify
  * call, the read-only evaluator, the §8.2 execution recheck under
@@ -281,51 +341,15 @@ async function evaluateAndSettleQueuedRow(
     }
   }
   // ── Merge evidence re-assessment (7.4: at claim and at R1) ──
-  const op = await loadScanOperation(row.shop, row.mergeOperationId, db);
-  const secondary =
-    op === null ? undefined : candidateSecondaryElements(op).find((s) => s.id === row.sourceOrderId);
-  if (op === null || secondary === undefined) {
+  const mergeEvidence = await reassessMergeEvidence(row, db);
+  if (!mergeEvidence.ok) {
     await settleQueuedShippingRefund(
       row.id,
       leaseToken,
       {
         status: "REVIEW_REQUIRED",
         reasonCode: "MERGE_EVIDENCE_CONTRADICTION",
-        reviewReason: op === null
-          ? "the merge operation is no longer readable"
-          : "the secondary is no longer present in the operation",
-      },
-      db,
-    );
-    return "REVIEW_REQUIRED";
-  }
-  const [records, attempts] = await Promise.all([
-    listMergeRecordsForSecondaries(row.shop, [row.sourceOrderId], db),
-    listMergeAttemptsForOperations([op.id], db),
-  ]);
-  const assessment = assessSecondaryEvidence({
-    operation: {
-      id: op.id,
-      protocolVersion: op.protocolVersion,
-      phase: op.phase,
-      calculatedOrderId: op.calculatedOrderId,
-      opToken: op.opToken,
-      primaryOrderId: op.primaryOrderId,
-      expectedTransfer: op.expectedTransfer,
-      appliedEvidence: op.appliedEvidence,
-    },
-    secondary: secondary as { id: string; cancelPhase?: string; done?: boolean; cancelledAt?: string | null; staffNoteMatched?: boolean },
-    mergeRecords: records,
-    attempts,
-  });
-  if (!assessment.eligible) {
-    await settleQueuedShippingRefund(
-      row.id,
-      leaseToken,
-      {
-        status: "REVIEW_REQUIRED",
-        reasonCode: "MERGE_EVIDENCE_CONTRADICTION",
-        reviewReason: assessment.issues.join(" | ").slice(0, 2000),
+        reviewReason: mergeEvidence.reviewReason,
       },
       db,
     );

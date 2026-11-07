@@ -393,3 +393,102 @@ export function adaptReadyToFreezeContract(
     }),
   };
 }
+
+// ── 8.4 R2: the rebuilt contract must equal the frozen one ─────────────────
+
+export type FrozenContractComparison =
+  | { readonly equal: true }
+  | { readonly equal: false; readonly field: string; readonly detail: string };
+
+/**
+ * The §8.4 pre-dispatch parity check: a contract rebuilt from FRESH
+ * evidence (evaluator + adapter, run again immediately before T3) must be
+ * byte-identical to the columns the freeze wrote. The rebuilt value is
+ * never stored and never sent — a single differing field reports it and
+ * nothing proceeds.
+ *
+ * Compared in order, first mismatch wins: both document pins, both
+ * contract-version stamps (mutationVersion), the four
+ * financial columns, the canonical wire variables, then the wire hash. A
+ * NULL or absent frozen value never satisfies the comparison — the check
+ * fails closed like every other frozen-column rule.
+ */
+export function compareRebuiltToFrozen(
+  rebuilt: {
+    readonly contract: FrozenWireContract;
+    readonly financialColumns: {
+      readonly currencyCode: string;
+      readonly plannedShippingMinor: string;
+      readonly parentTransactionId: string;
+      readonly gateway: string;
+    };
+  },
+  frozen: {
+    readonly documentSha256: string | null;
+    readonly mutationVersion: string | null;
+    readonly wireHash: string | null;
+    readonly wireVariables: unknown;
+    readonly currencyCode: string | null;
+    readonly plannedShippingMinor: string | null;
+    readonly parentTransactionId: string | null;
+    readonly gateway: string | null;
+  },
+): FrozenContractComparison {
+  const mismatch = (field: string, detail: string): FrozenContractComparison => ({
+    equal: false,
+    field,
+    detail,
+  });
+  if (rebuilt.contract.documentSha256 !== REFUND_DOCUMENT_SHA256) {
+    return mismatch("documentSha256", "the rebuilt contract's document differs from this build's pin");
+  }
+  if (frozen.documentSha256 !== REFUND_DOCUMENT_SHA256) {
+    return mismatch(
+      "documentSha256",
+      `frozen documentSha256 ${JSON.stringify(frozen.documentSha256)} differs from this build's pin`,
+    );
+  }
+  if (rebuilt.contract.mutationVersion !== REFUND_MUTATION_VERSION) {
+    return mismatch("mutationVersion", "the rebuilt contract's version differs from this build's constant");
+  }
+  if (frozen.mutationVersion !== REFUND_MUTATION_VERSION) {
+    return mismatch(
+      "mutationVersion",
+      `frozen mutationVersion ${JSON.stringify(frozen.mutationVersion)} differs from this build's constant`,
+    );
+  }
+  if (rebuilt.financialColumns.currencyCode !== frozen.currencyCode) {
+    return mismatch(
+      "currencyCode",
+      `rebuilt ${rebuilt.financialColumns.currencyCode} differs from frozen ${JSON.stringify(frozen.currencyCode)}`,
+    );
+  }
+  if (rebuilt.financialColumns.plannedShippingMinor !== frozen.plannedShippingMinor) {
+    return mismatch(
+      "plannedShippingMinor",
+      `rebuilt ${rebuilt.financialColumns.plannedShippingMinor} differs from frozen ${JSON.stringify(frozen.plannedShippingMinor)}`,
+    );
+  }
+  if (rebuilt.financialColumns.parentTransactionId !== frozen.parentTransactionId) {
+    return mismatch(
+      "parentTransactionId",
+      `rebuilt ${rebuilt.financialColumns.parentTransactionId} differs from frozen ${JSON.stringify(frozen.parentTransactionId)}`,
+    );
+  }
+  if (rebuilt.financialColumns.gateway !== frozen.gateway) {
+    return mismatch(
+      "gateway",
+      `rebuilt ${rebuilt.financialColumns.gateway} differs from frozen ${JSON.stringify(frozen.gateway)}`,
+    );
+  }
+  if (canonicalJson(rebuilt.contract.wireVariables) !== canonicalJson(frozen.wireVariables)) {
+    return mismatch("wireVariables", "the rebuilt wire request differs from the frozen variables");
+  }
+  if (rebuilt.contract.wireHash !== frozen.wireHash) {
+    return mismatch(
+      "wireHash",
+      `rebuilt ${rebuilt.contract.wireHash} differs from frozen ${JSON.stringify(frozen.wireHash)}`,
+    );
+  }
+  return { equal: true };
+}
