@@ -1,6 +1,8 @@
 // S2 operational worker (sections 9, 3.4, 19.5): drives due PREPARED rows
-// through the capacity precheck, the R2 recheck, T3, the single send and
-// T4 — in-process, behind MERGESHIP_SHIPPING_REFUNDS=enabled only, never
+// through the capacity precheck, the §8.4 R2 pre-dispatch recheck (frozen
+// integrity, merge evidence, the §8.2.5 baseline, the R1 evaluator and the
+// rebuilt-vs-frozen contract parity), T3, the single send and T4 —
+// in-process, behind MERGESHIP_SHIPPING_REFUNDS=enabled only, never
 // refreshing tokens (N12/I22) and never resending anything (I7).
 //
 // QUEUED-row claim/evaluation/freeze stays with the admission scan (S1's
@@ -11,8 +13,14 @@ import type { PrismaClient } from "@prisma/client";
 import defaultDb from "../db.server";
 import { OwnershipLostError } from "./ownership.server";
 import type { AdminClient } from "./graphql.server";
-import { dryRunSessionUsable, readOnlyAdmin } from "./shipping-shadow.server";
-import { runShippingRefundAdmissionScan } from "./shipping-refund-admission.server";
+import { dryRunSessionUsable, evaluateShadowSource, readOnlyAdmin } from "./shipping-shadow.server";
+import { reassessMergeEvidence, runShippingRefundAdmissionScan } from "./shipping-refund-admission.server";
+import { adaptReadyToFreezeContract, compareRebuiltToFrozen } from "./shipping-refund-freeze-contract";
+import {
+  computeWireHash,
+  REFUND_DOCUMENT_SHA256,
+  type ShippingRefundWireVariables,
+} from "./shipping-refund-contract";
 import { runShippingRefundReconcileCycle } from "./shipping-refund-reconcile.server";
 import { POST_DISPATCH_ENTRY_STATUS } from "./shipping-refund-gate";
 import {
@@ -82,7 +90,9 @@ async function freshBaselineRead(
     const nodes = ((body as { data: { nodes: (Record<string, unknown> | null)[] } }).data.nodes ?? []);
     for (const n of nodes) {
       if (!n || typeof n.id !== "string") return null;
-      const tot = parseShopMoney(n.totalRefundedSet);
+      const tot = parseShopMoney(
+        (n.totalRefundedSet as { presentmentMoney?: unknown } | null)?.presentmentMoney,
+      );
       if (tot === null) return null;
       refunds.push({
         id: n.id,
@@ -99,14 +109,116 @@ async function freshBaselineRead(
   return { refunds, refundNotes };
 }
 
+/** The one R2 row read (8.4): every frozen column the pre-dispatch recheck
+ *  needs, loaded once after the capacity precheck. */
+interface PreparedFrozenRow {
+  readonly id: string;
+  readonly shop: string;
+  readonly status: string;
+  readonly mergeOperationId: string;
+  readonly sourceOrderId: string;
+  readonly primaryOrderId: string;
+  readonly primaryOrderName: string;
+  readonly marker: string;
+  readonly idempotencyKey: string;
+  readonly lane: string;
+  readonly policyKind: string;
+  readonly wireVariables: unknown;
+  readonly wireHash: string | null;
+  readonly documentSha256: string | null;
+  readonly mutationVersion: string | null;
+  readonly currencyCode: string | null;
+  readonly plannedShippingMinor: string | null;
+  readonly parentTransactionId: string | null;
+  readonly gateway: string | null;
+  readonly preEvidence: unknown;
+}
+
+const PREPARED_FROZEN_SQL = `
+  SELECT "id", "shop", "status", "mergeOperationId", "sourceOrderId",
+         "primaryOrderId", "primaryOrderName", "marker", "idempotencyKey",
+         "lane", "policyKind", "wireVariables", "wireHash", "documentSha256",
+         "mutationVersion", "currencyCode", "plannedShippingMinor",
+         "parentTransactionId", "gateway", "preEvidence"
+  FROM "ShippingRefund"`;
+
+/**
+ * The R2 frozen-integrity check (8.4): proves the row's frozen columns
+ * still describe this build's contract — the same tests T3 repeats at the
+ * gate (9.2.3) plus the key/policy identity the freeze bound. Pure, no
+ * I/O: it runs before any Shopify read is spent and never writes. Exported
+ * narrowly so the cases the database CHECKs make physically uninsertable
+ * (a wire key differing from the row key, a non-REFUND_ALL policyKind) can
+ * still be driven through it in tests.
+ */
+export function checkFrozenWireIntegrity(row: {
+  readonly documentSha256: string | null;
+  readonly wireHash: string | null;
+  readonly wireVariables: unknown;
+  readonly idempotencyKey: string;
+  readonly policyKind: string;
+}):
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reasonCode: string; readonly detail: string } {
+  if (row.documentSha256 !== REFUND_DOCUMENT_SHA256) {
+    return {
+      ok: false,
+      reasonCode: "DOCUMENT_CHANGED",
+      detail: `documentSha256 ${row.documentSha256} != this build's pin`,
+    };
+  }
+  let recomputed: string;
+  try {
+    recomputed = computeWireHash(
+      REFUND_DOCUMENT_SHA256,
+      row.wireVariables as ShippingRefundWireVariables,
+    );
+  } catch (e) {
+    return {
+      ok: false,
+      reasonCode: "WIRE_HASH_MISMATCH",
+      detail: `wireVariables invalid: ${(e as Error).message}`,
+    };
+  }
+  if (recomputed !== row.wireHash) {
+    return {
+      ok: false,
+      reasonCode: "WIRE_HASH_MISMATCH",
+      detail: "recomputed wireHash != stored wireHash",
+    };
+  }
+  const wireKey = (row.wireVariables as { idempotencyKey?: unknown } | null)?.idempotencyKey;
+  if (wireKey !== row.idempotencyKey) {
+    return {
+      ok: false,
+      reasonCode: "WIRE_HASH_MISMATCH",
+      detail: "wireVariables.idempotencyKey differs from the row idempotencyKey",
+    };
+  }
+  if (row.policyKind !== "REFUND_ALL") {
+    return {
+      ok: false,
+      reasonCode: "POLICY_CHANGED",
+      detail: `policyKind is ${row.policyKind}`,
+    };
+  }
+  return { ok: true };
+}
+
 /** One leased PREPARED row: precheck → R2 → T3 → send → T4. Every write is
  *  the helper's own; a thrown OwnershipLostError ends work on this row
- *  without writing. Returns a tag for the report. */
+ *  without writing. Returns a tag for the report.
+ *
+ *  R2 (8.4) re-proves everything the freeze relied on, in this order:
+ *  frozen-contract integrity and the merge-evidence re-assessment (both
+ *  database-only, so a contradiction never spends a Shopify read), then
+ *  the §8.2.5 baseline recheck — which deliberately precedes the evaluator
+ *  so a new or own-marker refund classifies specifically — then the R1
+ *  evaluator, and finally the rebuilt contract, which must equal the
+ *  frozen request exactly or the row aborts DRIFT_BEFORE_DISPATCH. The
+ *  rebuilt value is only compared — never stored, never sent. */
 async function processPreparedRow(
   rowId: string,
-  shop: string,
-  sourceOrderId: string,
-  primaryOrderId: string,
   admin: AdminClient,
   deps: ShippingRefundDispatchCycleDeps & { db: PrismaClient },
 ): Promise<string> {
@@ -126,20 +238,46 @@ async function processPreparedRow(
     return `WAIT:${pc.reason}`;
   }
 
-  // 2. R2 (8.2.5): fresh read-only evidence vs the frozen baseline. Read
-  //    failures are transient waits; drift is abort/review.
+  // 2. R2 (8.4): the frozen row, in one SELECT. A row that left PREPARED
+  //    under the lease needs no write — report and stop.
+  const [row] = await db.$queryRawUnsafe<PreparedFrozenRow[]>(
+    `${PREPARED_FROZEN_SQL} WHERE "id" = $1`,
+    rowId,
+  );
+  if (!row || row.status !== "PREPARED") return "NOT_PREPARED";
+
+  // 2a. Frozen integrity — before any Shopify read is spent.
+  const integrity = checkFrozenWireIntegrity(row);
+  if (!integrity.ok) {
+    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: integrity.reasonCode, reviewReason: integrity.detail }, db);
+    return `ABORTED:${integrity.reasonCode}`;
+  }
+
+  // 2b. Merge evidence re-assessment (7.4/8.4): the same R1 machinery —
+  //     a contradiction parks the row before any Shopify call is spent.
+  const mergeEvidence = await reassessMergeEvidence(
+    { shop: row.shop, mergeOperationId: row.mergeOperationId, sourceOrderId: row.sourceOrderId },
+    db,
+  );
+  if (!mergeEvidence.ok) {
+    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "REVIEW_REQUIRED", reasonCode: "MERGE_EVIDENCE_CONTRADICTION", reviewReason: mergeEvidence.reviewReason }, db);
+    return "REVIEW_REQUIRED:MERGE_EVIDENCE_CONTRADICTION";
+  }
+
+  // 2c. §8.2.5 baseline recheck: fresh read-only evidence vs the frozen
+  //     baseline. Read failures are transient waits; drift is abort/review.
   const ro = readOnlyAdmin(admin);
   let recheckBody: unknown;
   try {
     recheckBody = await readBody(ro, Q_RECHECK.document, {
-      source: sourceOrderId,
-      primary: primaryOrderId,
+      source: row.sourceOrderId,
+      primary: row.primaryOrderId,
     });
   } catch (e) {
     await releaseLeaseWithBackoff(rowId, leaseToken, undefined, db);
     return `WAIT:RECHECK_TRANSPORT`;
   }
-  const analysis = analyzeExecRecheck(recheckBody, { sourceOrderId, primaryOrderId });
+  const analysis = analyzeExecRecheck(recheckBody, { sourceOrderId: row.sourceOrderId, primaryOrderId: row.primaryOrderId });
   if (!analysis.ok) {
     if (analysis.reasonCode === "BASELINE_UNVERIFIED") {
       await releaseLeaseWithBackoff(rowId, leaseToken, undefined, db);
@@ -154,7 +292,7 @@ async function processPreparedRow(
   if (evidence.refundIds.length > 0) {
     await renewPreparedShippingRefundLease(rowId, leaseToken, db);
     try {
-      fresh = await freshBaselineRead(ro, sourceOrderId, evidence.refundIds);
+      fresh = await freshBaselineRead(ro, row.sourceOrderId, evidence.refundIds);
     } catch {
       fresh = null;
     }
@@ -164,9 +302,7 @@ async function processPreparedRow(
     return "WAIT:DETAIL_READ_INCOMPLETE";
   }
 
-  const [head] = await db.$queryRaw<{ preEvidence: unknown }[]>`
-    SELECT "preEvidence" FROM "ShippingRefund" WHERE "id" = ${rowId}`;
-  const stored = (head?.preEvidence as { baseline?: RefundBaseline } | null)?.baseline;
+  const stored = (row.preEvidence as { baseline?: RefundBaseline } | null)?.baseline;
   if (!stored) {
     await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "REVIEW_REQUIRED", reasonCode: "BASELINE_MISSING", reviewReason: "preEvidence.baseline absent on a PREPARED row" }, db);
     return "REVIEW_REQUIRED:BASELINE_MISSING";
@@ -185,6 +321,55 @@ async function processPreparedRow(
     }
     await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: cmp.kind === "BASELINE_CHANGED" ? "BASELINE_CHANGED" : "REFUND_APPEARED", reviewReason: cmp.detail }, db);
     return `ABORTED:${cmp.kind}`;
+  }
+
+  // 2d. The R1 evaluator over fresh evidence (8.4). The lease is renewed
+  //     between Shopify reads (9.1); a transport/top-level failure is a
+  //     transient wait — never an abort and never an attempt consumed.
+  await renewPreparedShippingRefundLease(rowId, leaseToken, db);
+  let evalOutcome: Awaited<ReturnType<typeof evaluateShadowSource>>;
+  try {
+    evalOutcome = await evaluateShadowSource(ro, {
+      sourceOrderId: row.sourceOrderId,
+      policy: { kind: "REFUND_ALL" },
+      marker: row.marker,
+      primaryOrderName: row.primaryOrderName,
+    });
+  } catch {
+    await releaseLeaseWithBackoff(rowId, leaseToken, undefined, db);
+    return "WAIT:EVALUATOR_TRANSPORT";
+  }
+  if (evalOutcome.kind === "SKIP") {
+    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: evalOutcome.reasonCode, reviewReason: evalOutcome.reason.slice(0, 2000) }, db);
+    return `ABORTED:${evalOutcome.reasonCode}`;
+  }
+  if (evalOutcome.kind === "REVIEW") {
+    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: "EVALUATOR_REVIEW", reviewReason: evalOutcome.reason.slice(0, 2000) }, db);
+    return "ABORTED:EVALUATOR_REVIEW";
+  }
+
+  // 2e. Rebuild the contract the fresh evidence would freeze today and
+  //     require it to equal the frozen request byte for byte — the §8.4
+  //     parity gate. The rebuilt value is only compared: nothing writes
+  //     it, and T3 still sends the database-frozen variables.
+  const rebuilt = adaptReadyToFreezeContract(evalOutcome, {
+    sourceOrderId: row.sourceOrderId,
+    parentTransactionId: evidence.capture.id,
+    gateway: evidence.capture.gateway,
+    currencyCode: evidence.currencyCode,
+    marker: row.marker,
+    idempotencyKey: row.idempotencyKey,
+    primaryOrderName: row.primaryOrderName,
+    plannedShippingMinor: evalOutcome.plannedRefundMinor,
+  });
+  if (!rebuilt.ok) {
+    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: "DRIFT_BEFORE_DISPATCH", reviewReason: rebuilt.reason.slice(0, 2000) }, db);
+    return "ABORTED:DRIFT_BEFORE_DISPATCH";
+  }
+  const same = compareRebuiltToFrozen(rebuilt, row);
+  if (!same.equal) {
+    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: "DRIFT_BEFORE_DISPATCH", reviewReason: `${same.field}: ${same.detail}`.slice(0, 2000) }, db);
+    return "ABORTED:DRIFT_BEFORE_DISPATCH";
   }
 
   // 3. T3 — the write-ahead gate. Any throw is a no-decision: NO SEND.
@@ -259,7 +444,7 @@ export async function runShippingRefundDispatchCycle(
     }
     for (const row of rows) {
       try {
-        const tag = await processPreparedRow(row.id, shop, row.sourceOrderId, row.primaryOrderId, admin, { ...deps, db });
+        const tag = await processPreparedRow(row.id, admin, { ...deps, db });
         bump(outcomes, tag);
       } catch (e) {
         if (e instanceof OwnershipLostError) bump(outcomes, "LEASE_LOST");

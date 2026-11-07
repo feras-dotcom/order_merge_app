@@ -32,6 +32,11 @@ import {
 } from "../app/lib/shipping-refund-contract";
 import { recordApprovedWireHash } from "../app/lib/shipping-refund-store.server";
 import { SHIPPING_REFUND_TRIGGER_MANIFEST } from "../app/lib/shipping-refund-trigger-manifest";
+import {
+  r2HappyAdmin,
+  seedPreparedR2Row,
+  seedShippingR2MergeOp,
+} from "./helpers/shipping-refund-r2-fixture";
 
 const TEST_URL = process.env.MERGESHIP_TEST_DATABASE_URL;
 const oid = (n: number) => `gid://shopify/Order/${n}`;
@@ -379,44 +384,30 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
 
   it("worker end-to-end: env flag + session guard + dispatch", async () => {
     const s = shop(); await seedGate(s);
-    const r = await seedPrepared(s, { approvedHash: true });
-    // Release the seed lease so the worker can lease the row itself.
-    await db.$executeRaw`UPDATE "ShippingRefund" SET "leaseToken"=NULL,"leasedUntil"=NULL,"nextCheckAt"=NULL WHERE "id"=${r.id}`;
+    // §8.4 R2 re-runs merge evidence and the R1 evaluator before T3, so the
+    // happy path needs a real MergeOperation and the full evaluator fixture
+    // set — the shared R2 helper seeds the row through the real pipeline.
+    const sourceOrderId = oid(++seq), primaryOrderId = oid(++seq),
+      captureTxnId = txnGid(++seq), authTxnId = txnGid(++seq);
+    const opId = await seedShippingR2MergeOp(db, {
+      shop: s, primaryId: primaryOrderId, secondaryId: sourceOrderId,
+    });
+    const r = await seedPreparedR2Row(db, {
+      shop: s,
+      mergeOperationId: opId,
+      evidence: { sourceOrderId, primaryOrderId, captureTxnId, authTxnId },
+      approvedHash: true,
+    });
     const rid = refundGid(++seq);
-    let calls = 0;
-    const admin = {
-      graphql: async (doc: string) => {
-        calls += 1;
-        if (doc === shippingRefundMutationDocument()) {
-          return { json: async () => accept(rid) };
-        }
-        // Q-RECHECK: a valid empty-baseline source + untouched primary.
-        return { json: async () => ({
-          data: {
-            source: {
-              id: r.sourceOrderId, cancelledAt: "2030-01-06T00:00:00Z", closed: true,
-              displayFinancialStatus: "PAID", currencyCode: "USD",
-              totalRefundedSet: { presentmentMoney: { amount: "0.00", currencyCode: "USD" } },
-              totalRefundedShippingSet: { presentmentMoney: { amount: "0.00", currencyCode: "USD" } },
-              refunds: [],
-              transactions: [{
-                id: r.parentId, kind: "CAPTURE", status: "SUCCESS", gateway: "bogus",
-                test: true, amountSet: { presentmentMoney: { amount: "4.00", currencyCode: "USD" } },
-                parentTransaction: null,
-              }],
-            },
-            primary: { id: r.primaryOrderId, cancelledAt: null, displayFinancialStatus: "PAID", currencyCode: "USD" },
-          },
-        }) };
-      },
-    } as never;
+    const fixture = r2HappyAdmin(r.evidence, rid);
     const report = await runShippingRefundDispatchCycle({
       db,
-      adminFactory: async () => admin,
+      adminFactory: async () => fixture.admin,
       sessionLoader: async () => ({ expires: new Date("2030-01-10T00:00:00Z") }),
     });
     expect(report.enabled).toBe(true);
-    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(fixture.mutationCalls()).toBe(1);
+    expect(fixture.sentVariables[0]).toEqual(r.wireVariables);
     expect((await rowStatus(r.id)).status).toBe("REFUND_RECORDED");
     cleanupEnv();
   });
