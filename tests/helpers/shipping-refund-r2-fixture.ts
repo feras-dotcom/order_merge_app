@@ -503,6 +503,9 @@ export async function seedPreparedR2Row(
       parentTransactionId?: string;
       gateway?: string;
       preEvidence?: unknown;
+      /** Backdates preparedAt at the write-once point (NULL -> value), for
+       *  capacity-wait ageing scenarios. ISO instant. */
+      preparedAt?: string;
     };
   },
 ): Promise<SeedR2RowResult> {
@@ -578,7 +581,8 @@ export async function seedPreparedR2Row(
   const ov = seed.preparedOverrides ?? {};
   await db.$executeRaw`
     UPDATE "ShippingRefund" SET
-      "status" = 'PREPARED', "preparedAt" = clock_timestamp() AT TIME ZONE 'UTC',
+      "status" = 'PREPARED',
+      "preparedAt" = ${ov.preparedAt !== undefined ? naive(ov.preparedAt) : Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`},
       "wireVariables" = ${JSON.stringify(adapted.contract.wireVariables)}::jsonb,
       "wireHash" = ${ov.wireHash ?? adapted.contract.wireHash},
       "documentSha256" = ${ov.documentSha256 ?? adapted.contract.documentSha256},
