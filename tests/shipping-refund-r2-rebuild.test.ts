@@ -65,6 +65,7 @@ const rebuiltBase = {
 };
 const frozenBase = {
   documentSha256: REFUND_DOCUMENT_SHA256 as string | null,
+  mutationVersion: REFUND_MUTATION_VERSION as string | null,
   wireHash: rebuiltBase.contract.wireHash as string | null,
   wireVariables: rebuiltBase.contract.wireVariables as unknown,
   currencyCode: "USD" as string | null,
@@ -96,6 +97,29 @@ describe("compareRebuiltToFrozen (8.4 R2 parity)", () => {
     expect(
       compareRebuiltToFrozen(rebuiltBase, { ...frozenBase, documentSha256: null }),
     ).toMatchObject({ equal: false, field: "documentSha256" });
+  });
+
+  it("mismatches on a rebuilt contract version that is not this build's constant", () => {
+    const rebuilt = {
+      ...rebuiltBase,
+      contract: { ...rebuiltBase.contract, mutationVersion: "MergeShipShippingRefund@1999-01" },
+    };
+    expect(compareRebuiltToFrozen(rebuilt, frozenBase)).toMatchObject({
+      equal: false,
+      field: "mutationVersion",
+    });
+  });
+
+  it("mismatches on a frozen mutationVersion that is not this build's constant, and on a NULL one", () => {
+    expect(
+      compareRebuiltToFrozen(rebuiltBase, {
+        ...frozenBase,
+        mutationVersion: "MergeShipShippingRefund@1999-01",
+      }),
+    ).toMatchObject({ equal: false, field: "mutationVersion" });
+    expect(
+      compareRebuiltToFrozen(rebuiltBase, { ...frozenBase, mutationVersion: null }),
+    ).toMatchObject({ equal: false, field: "mutationVersion" });
   });
 
   it("mismatches on currencyCode, plannedShippingMinor, parentTransactionId and gateway", () => {
@@ -148,6 +172,17 @@ describe("compareRebuiltToFrozen (8.4 R2 parity)", () => {
   });
 
   it("reports the FIRST mismatch in the documented order", () => {
+    // mutationVersion sits between the document pins and the financial
+    // columns: with the pin intact and currencyCode ALSO wrong, the
+    // version is reported first.
+    expect(
+      compareRebuiltToFrozen(rebuiltBase, {
+        ...frozenBase,
+        mutationVersion: "MergeShipShippingRefund@1999-01",
+        currencyCode: "EUR",
+        wireHash: OTHER_64HEX,
+      }),
+    ).toMatchObject({ equal: false, field: "mutationVersion" });
     expect(
       compareRebuiltToFrozen(rebuiltBase, {
         ...frozenBase,
@@ -159,6 +194,7 @@ describe("compareRebuiltToFrozen (8.4 R2 parity)", () => {
     expect(
       compareRebuiltToFrozen(rebuiltBase, {
         documentSha256: null,
+        mutationVersion: null,
         currencyCode: null,
         plannedShippingMinor: null,
         parentTransactionId: null,
@@ -177,6 +213,7 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
     const badVars = buildWireVariables("00000000-0000-4000-8000-000000000001", input);
     expect(
       checkFrozenWireIntegrity({
+        mutationVersion: REFUND_MUTATION_VERSION,
         documentSha256: REFUND_DOCUMENT_SHA256,
         wireHash: computeWireHash(REFUND_DOCUMENT_SHA256, badVars),
         wireVariables: badVars,
@@ -189,6 +226,7 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
   it("refuses a non-REFUND_ALL policyKind and a foreign document pin", () => {
     expect(
       checkFrozenWireIntegrity({
+        mutationVersion: REFUND_MUTATION_VERSION,
         documentSha256: REFUND_DOCUMENT_SHA256,
         wireHash: rebuiltBase.contract.wireHash,
         wireVariables,
@@ -198,6 +236,7 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
     ).toMatchObject({ ok: false, reasonCode: "POLICY_CHANGED" });
     expect(
       checkFrozenWireIntegrity({
+        mutationVersion: REFUND_MUTATION_VERSION,
         documentSha256: OTHER_64HEX,
         wireHash: rebuiltBase.contract.wireHash,
         wireVariables,
@@ -207,6 +246,7 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
     ).toMatchObject({ ok: false, reasonCode: "DOCUMENT_CHANGED" });
     expect(
       checkFrozenWireIntegrity({
+        mutationVersion: REFUND_MUTATION_VERSION,
         documentSha256: null,
         wireHash: rebuiltBase.contract.wireHash,
         wireVariables,
@@ -216,9 +256,29 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
     ).toMatchObject({ ok: false, reasonCode: "DOCUMENT_CHANGED" });
   });
 
+  it("refuses a foreign mutationVersion and a NULL one, naming the column", () => {
+    for (const mutationVersion of ["MergeShipShippingRefund@1999-01", null]) {
+      expect(
+        checkFrozenWireIntegrity({
+          mutationVersion,
+          documentSha256: REFUND_DOCUMENT_SHA256,
+          wireHash: rebuiltBase.contract.wireHash,
+          wireVariables,
+          idempotencyKey: KEY,
+          policyKind: "REFUND_ALL",
+        }),
+      ).toMatchObject({
+        ok: false,
+        reasonCode: "DOCUMENT_CHANGED",
+        detail: expect.stringContaining("mutationVersion"),
+      });
+    }
+  });
+
   it("refuses malformed wire variables and a wrong wireHash", () => {
     expect(
       checkFrozenWireIntegrity({
+        mutationVersion: REFUND_MUTATION_VERSION,
         documentSha256: REFUND_DOCUMENT_SHA256,
         wireHash: rebuiltBase.contract.wireHash,
         wireVariables: { idempotencyKey: KEY, input: { bogus: true } },
@@ -228,6 +288,7 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
     ).toMatchObject({ ok: false, reasonCode: "WIRE_HASH_MISMATCH" });
     expect(
       checkFrozenWireIntegrity({
+        mutationVersion: REFUND_MUTATION_VERSION,
         documentSha256: REFUND_DOCUMENT_SHA256,
         wireHash: OTHER_64HEX,
         wireVariables,
@@ -240,6 +301,7 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
   it("accepts the intact frozen row shape", () => {
     expect(
       checkFrozenWireIntegrity({
+        mutationVersion: REFUND_MUTATION_VERSION,
         documentSha256: REFUND_DOCUMENT_SHA256,
         wireHash: rebuiltBase.contract.wireHash,
         wireVariables,
@@ -260,7 +322,9 @@ describe("checkFrozenWireIntegrity (8.4; the cases the SQL CHECKs cannot contain
 // `shopMoney` money shape is NOT what the pinned documents request
 // (`presentmentMoney`), so the evaluator responses here are synthetic
 // fixtures built from those archived real values — the archive holds no
-// raw ShippingShadowSource/ShippingShadowPreview responses.
+// raw ShippingShadowSource/ShippingShadowPreview responses. The frozen-wire
+// evidence is REAL; the evaluator responses are SYNTHETIC — this is not a
+// replay of archived Shopify responses.
 
 const RUN3 = JSON.parse(
   readFileSync(
@@ -275,7 +339,10 @@ const RUN3 = JSON.parse(
 
 const RUN3_IDS = {
   sourceOrderId: "gid://shopify/Order/8143926624503", // order #1138
-  primaryOrderId: "gid://shopify/Order/8143926591735",
+  // The REAL primary recorded on the run-3 PREPARED row
+  // (x-02-preflight-row-reread.json, order #1137) — documentary here:
+  // nothing in this suite reads it, but it must name the archived order.
+  primaryOrderId: "gid://shopify/Order/8143923609847",
   captureTxnId: "gid://shopify/OrderTransaction/10262841229559",
   authTxnId: "gid://shopify/OrderTransaction/10262841098487",
 };
@@ -404,6 +471,7 @@ async function run3Adapt(o: Run3Opts = {}) {
 
 const run3Frozen = () => ({
   documentSha256: REFUND_DOCUMENT_SHA256 as string | null,
+  mutationVersion: REFUND_MUTATION_VERSION,
   wireHash: RUN3.wireHash as string | null,
   wireVariables: RUN3.wireVariables,
   currencyCode: "USD" as string | null,

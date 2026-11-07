@@ -249,10 +249,22 @@ type RowOutcome = string;
  * wherever it runs; database errors propagate to the caller's boundary.
  */
 export async function reassessMergeEvidence(
-  row: { shop: string; mergeOperationId: string; sourceOrderId: string },
+  row: { shop: string; mergeOperationId: string; sourceOrderId: string; primaryOrderId: string },
   db: PrismaClient,
 ): Promise<{ ok: true } | { ok: false; reviewReason: string }> {
   const op = await loadScanOperation(row.shop, row.mergeOperationId, db);
+  if (
+    op !== null &&
+    (typeof op.primaryOrderId !== "string" ||
+      !ORDER_GID_RE.test(op.primaryOrderId) ||
+      !ORDER_GID_RE.test(row.primaryOrderId) ||
+      op.primaryOrderId !== row.primaryOrderId)
+  ) {
+    return {
+      ok: false,
+      reviewReason: "the merge operation's primary order does not match the refund row's primary order",
+    };
+  }
   const secondary =
     op === null ? undefined : candidateSecondaryElements(op).find((s) => s.id === row.sourceOrderId);
   if (op === null || secondary === undefined) {

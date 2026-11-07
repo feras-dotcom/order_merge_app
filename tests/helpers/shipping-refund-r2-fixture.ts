@@ -497,7 +497,7 @@ export async function seedPreparedR2Row(
     preparedOverrides?: {
       documentSha256?: string;
       wireHash?: string;
-      mutationVersion?: string;
+      mutationVersion?: string | null;
       currencyCode?: string;
       plannedShippingMinor?: string;
       parentTransactionId?: string;
@@ -582,7 +582,7 @@ export async function seedPreparedR2Row(
       "wireVariables" = ${JSON.stringify(adapted.contract.wireVariables)}::jsonb,
       "wireHash" = ${ov.wireHash ?? adapted.contract.wireHash},
       "documentSha256" = ${ov.documentSha256 ?? adapted.contract.documentSha256},
-      "mutationVersion" = ${ov.mutationVersion ?? REFUND_MUTATION_VERSION},
+      "mutationVersion" = ${"mutationVersion" in ov ? ov.mutationVersion : REFUND_MUTATION_VERSION},
       "currencyCode" = ${ov.currencyCode ?? adapted.financialColumns.currencyCode},
       "plannedShippingMinor" = ${ov.plannedShippingMinor ?? adapted.financialColumns.plannedShippingMinor},
       "parentTransactionId" = ${ov.parentTransactionId ?? adapted.financialColumns.parentTransactionId},

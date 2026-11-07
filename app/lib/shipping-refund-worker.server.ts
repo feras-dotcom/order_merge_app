@@ -19,6 +19,7 @@ import { adaptReadyToFreezeContract, compareRebuiltToFrozen } from "./shipping-r
 import {
   computeWireHash,
   REFUND_DOCUMENT_SHA256,
+  REFUND_MUTATION_VERSION,
   type ShippingRefundWireVariables,
 } from "./shipping-refund-contract";
 import { runShippingRefundReconcileCycle } from "./shipping-refund-reconcile.server";
@@ -153,6 +154,7 @@ const PREPARED_FROZEN_SQL = `
  */
 export function checkFrozenWireIntegrity(row: {
   readonly documentSha256: string | null;
+  readonly mutationVersion: string | null;
   readonly wireHash: string | null;
   readonly wireVariables: unknown;
   readonly idempotencyKey: string;
@@ -165,6 +167,13 @@ export function checkFrozenWireIntegrity(row: {
       ok: false,
       reasonCode: "DOCUMENT_CHANGED",
       detail: `documentSha256 ${row.documentSha256} != this build's pin`,
+    };
+  }
+  if (row.mutationVersion !== REFUND_MUTATION_VERSION) {
+    return {
+      ok: false,
+      reasonCode: "DOCUMENT_CHANGED",
+      detail: `mutationVersion ${JSON.stringify(row.mutationVersion)} != this build's contract version`,
     };
   }
   let recomputed: string;
@@ -256,7 +265,7 @@ async function processPreparedRow(
   // 2b. Merge evidence re-assessment (7.4/8.4): the same R1 machinery —
   //     a contradiction parks the row before any Shopify call is spent.
   const mergeEvidence = await reassessMergeEvidence(
-    { shop: row.shop, mergeOperationId: row.mergeOperationId, sourceOrderId: row.sourceOrderId },
+    { shop: row.shop, mergeOperationId: row.mergeOperationId, sourceOrderId: row.sourceOrderId, primaryOrderId: row.primaryOrderId },
     db,
   );
   if (!mergeEvidence.ok) {

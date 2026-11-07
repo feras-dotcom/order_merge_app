@@ -33,6 +33,7 @@ import {
   computeWireHash,
   REFUND_DOCUMENT_SHA256,
   REFUND_GID_PATTERN,
+  REFUND_MUTATION_VERSION,
   shippingRefundMutationDocument,
   type ShippingRefundWireVariables,
 } from "./shipping-refund-contract";
@@ -279,6 +280,7 @@ interface PreparedHead {
   readonly wireHash: string | null;
   readonly wireVariables: unknown;
   readonly documentSha256: string | null;
+  readonly mutationVersion: string | null;
   readonly currencyCode: string | null;
   readonly plannedShippingMinor: string | null;
   readonly approvedWireHash: string | null;
@@ -303,7 +305,7 @@ interface PreparedHead {
 
 const PREPARED_HEAD_SQL = `
   SELECT "id", "shop", "status", "lane", "wireHash", "wireVariables",
-         "documentSha256", "currencyCode", "plannedShippingMinor",
+         "documentSha256", "mutationVersion", "currencyCode", "plannedShippingMinor",
          "approvedWireHash", "sourceCancelledAt", "operationCreatedAt",
          "leaseToken", "leasedUntil", "dispatchedAt", "dispatchToken", "refundId",
          "merchantEpochAt", "rolloutEpochAt", "switchEpochAt",
@@ -681,6 +683,13 @@ export async function openDispatchGate(
     // §9.2.3: the frozen contract must still be this build's contract.
     if (h.documentSha256 !== REFUND_DOCUMENT_SHA256) {
       await abort("DOCUMENT_CHANGED", `documentSha256 ${h.documentSha256} != this build's pin`);
+      return { kind: "ABORTED", reasonCode: "DOCUMENT_CHANGED" };
+    }
+    if (h.mutationVersion !== REFUND_MUTATION_VERSION) {
+      await abort(
+        "DOCUMENT_CHANGED",
+        `mutationVersion ${JSON.stringify(h.mutationVersion)} != this build's contract version`,
+      );
       return { kind: "ABORTED", reasonCode: "DOCUMENT_CHANGED" };
     }
     let recomputed: string;

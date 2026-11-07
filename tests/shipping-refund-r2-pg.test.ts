@@ -16,8 +16,13 @@ import {
   runShippingRefundDispatchCycle,
 } from "../app/lib/shipping-refund-worker.server";
 import {
+  leasePreparedShippingRefund,
+  openDispatchGate,
+} from "../app/lib/shipping-refund-dispatch.server";
+import {
   computeWireHash,
   REFUND_DOCUMENT_SHA256,
+  REFUND_MUTATION_VERSION,
   buildWireVariables,
   type ShippingRefundInput,
 } from "../app/lib/shipping-refund-contract";
@@ -98,7 +103,7 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
       approvedHash?: boolean;
       preparedOverrides?: Parameters<typeof seedPreparedR2Row>[1]["preparedOverrides"];
       opId?: string;
-      opSeed?: { secondaries?: unknown; phase?: string | null; status?: string };
+      opSeed?: { primaryId?: string; secondaries?: unknown; phase?: string | null; status?: string };
     } = {},
   ): Promise<Seeded> {
     await seedShippingR2Gate(db, s, o.gate);
@@ -143,6 +148,7 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
           idempotencyKey: string;
           marker: string;
           documentSha256: string | null;
+          mutationVersion: string | null;
           plannedShippingMinor: string | null;
           parentTransactionId: string | null;
           gateway: string | null;
@@ -151,7 +157,7 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
       >`SELECT "status","reasonCode","reviewReason","attempts","nextCheckAt",
                "dispatchedAt","dispatchToken","refundId",
                "wireVariables"::text AS "wireVariables","wireHash","idempotencyKey",
-               "marker","documentSha256","plannedShippingMinor","parentTransactionId",
+               "marker","documentSha256","mutationVersion","plannedShippingMinor","parentTransactionId",
                "gateway","currencyCode"
         FROM "ShippingRefund" WHERE "id" = ${id}`
     )[0];
@@ -170,6 +176,7 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
     "idempotencyKey",
     "marker",
     "documentSha256",
+    "mutationVersion",
     "plannedShippingMinor",
     "parentTransactionId",
     "gateway",
@@ -224,6 +231,8 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
     expect(after.status).toBe("REFUND_RECORDED");
     expect(after.refundId).toBe(rid);
     expect(after.dispatchedAt).not.toBeNull();
+    // The stored contract version survives the whole R2 -> T3 -> send path.
+    expect(after.mutationVersion).toBe(REFUND_MUTATION_VERSION);
     expect(attemptsAfter).toBe(attemptsBefore);
     expect(report.outcomes["DISPATCHED:ACCEPTED"]).toBe(1);
   });
@@ -431,6 +440,48 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
     expect(after.reviewReason).toContain("not COMPLETED");
   });
 
+  it("a merge operation on a different primary parks REVIEW_REQUIRED with zero Shopify reads", async () => {
+    const s = shop();
+    // The op's MergeRecord, attempts and involvedOrderIds all follow the
+    // OP's own (different) primary — internally consistent, so only the
+    // primary-identity binding to the refund row can catch it.
+    const seeded = await seedScenario(s, { opSeed: { primaryId: oid(++seq) } });
+    const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+    const { before, after, report, attemptsBefore, attemptsAfter } = await drive(seeded, admin);
+    expect(admin.allCalls()).toBe(0); // the reassessment precedes every read
+    expect(admin.mutationCalls()).toBe(0);
+    expect(after.status).toBe("REVIEW_REQUIRED");
+    expect(after.reasonCode).toBe("MERGE_EVIDENCE_CONTRADICTION");
+    expect(after.reviewReason).toBe(
+      "the merge operation's primary order does not match the refund row's primary order",
+    );
+    expect(report.outcomes["REVIEW_REQUIRED:MERGE_EVIDENCE_CONTRADICTION"]).toBe(1);
+    expect(attemptsAfter).toBe(attemptsBefore);
+    expectUntouched(before, after);
+  });
+
+  it.each(["not-a-gid", ""])(
+    "a malformed merge-operation primary (%j) parks REVIEW_REQUIRED with zero Shopify reads",
+    async (primaryId) => {
+      const s = shop();
+      // MergeOperation.primaryOrderId is TEXT NOT NULL with no format
+      // CHECK, so both values insert; the row-side primary is already
+      // CHECK-bound to the GID format and cannot carry the malformed side.
+      const seeded = await seedScenario(s, { opSeed: { primaryId } });
+      const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+      const { before, after, attemptsBefore, attemptsAfter } = await drive(seeded, admin);
+      expect(admin.allCalls()).toBe(0);
+      expect(admin.mutationCalls()).toBe(0);
+      expect(after.status).toBe("REVIEW_REQUIRED");
+      expect(after.reasonCode).toBe("MERGE_EVIDENCE_CONTRADICTION");
+      expect(after.reviewReason).toBe(
+        "the merge operation's primary order does not match the refund row's primary order",
+      );
+      expect(attemptsAfter).toBe(attemptsBefore);
+      expectUntouched(before, after);
+    },
+  );
+
   // ── 8–9. Baseline-class refusals ─────────────────────────────────────
 
   it("a new external refund id aborts REFUND_APPEARED with no send", async () => {
@@ -581,6 +632,45 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
     expectUntouched(before, after);
   });
 
+  it("a foreign mutationVersion aborts DOCUMENT_CHANGED with zero reads", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, {
+      preparedOverrides: { mutationVersion: "MergeShipShippingRefund@1999-01" },
+    });
+    const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+    const { before, after, report, attemptsBefore, attemptsAfter } = await drive(seeded, admin);
+    expect(admin.allCalls()).toBe(0);
+    expect(admin.mutationCalls()).toBe(0);
+    expect(after.status).toBe("ABORTED");
+    expect(after.reasonCode).toBe("DOCUMENT_CHANGED");
+    expect(after.reviewReason).toContain("mutationVersion");
+    expect(report.outcomes["ABORTED:DOCUMENT_CHANGED"]).toBe(1);
+    expect(attemptsAfter).toBe(attemptsBefore);
+    expect(after.dispatchedAt).toBeNull();
+    expect(after.dispatchToken).toBeNull();
+    expectUntouched(before, after);
+  });
+
+  it("a NULL mutationVersion aborts DOCUMENT_CHANGED with zero reads", async () => {
+    const s = shop();
+    // mutationVersion is the one frozen column no CHECK binds to non-NULL
+    // (ShippingRefund_dispatch_path_state names only the wire trio), so the
+    // NULL row is insertable and must still fail closed.
+    const seeded = await seedScenario(s, { preparedOverrides: { mutationVersion: null } });
+    const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+    const { before, after, report, attemptsBefore, attemptsAfter } = await drive(seeded, admin);
+    expect(admin.allCalls()).toBe(0);
+    expect(admin.mutationCalls()).toBe(0);
+    expect(after.status).toBe("ABORTED");
+    expect(after.reasonCode).toBe("DOCUMENT_CHANGED");
+    expect(after.reviewReason).toContain("mutationVersion");
+    expect(report.outcomes["ABORTED:DOCUMENT_CHANGED"]).toBe(1);
+    expect(attemptsAfter).toBe(attemptsBefore);
+    expect(after.dispatchedAt).toBeNull();
+    expect(after.dispatchToken).toBeNull();
+    expectUntouched(before, after);
+  });
+
   it("a wireHash inconsistent with the variables aborts WIRE_HASH_MISMATCH with zero reads", async () => {
     const s = shop();
     const seeded = await seedScenario(s, {
@@ -606,6 +696,7 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
     expect(
       checkFrozenWireIntegrity({
         documentSha256: REFUND_DOCUMENT_SHA256,
+        mutationVersion: REFUND_MUTATION_VERSION,
         wireHash: computeWireHash(REFUND_DOCUMENT_SHA256, validVars.badKeyVars),
         wireVariables: validVars.badKeyVars,
         idempotencyKey: validVars.key,
@@ -615,6 +706,7 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
     expect(
       checkFrozenWireIntegrity({
         documentSha256: REFUND_DOCUMENT_SHA256,
+        mutationVersion: REFUND_MUTATION_VERSION,
         wireHash: validVars.hash,
         wireVariables: validVars.vars,
         idempotencyKey: validVars.key,
@@ -654,6 +746,39 @@ describe.skipIf(!TEST_URL)("shipping-refund R2 pre-dispatch parity (real disposa
   }
 
   // ── 12. Lease / capacity / T3 invariants under the new R2 ────────────
+
+  it("T3 refuses a foreign mutationVersion even when R2 is bypassed", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, {
+      preparedOverrides: { mutationVersion: "MergeShipShippingRefund@1999-01" },
+    });
+    // Lease and open the gate directly: the §9.2.3 contract-version check
+    // must fire inside the gate itself, not only in the R2 pre-pass.
+    const lease = await leasePreparedShippingRefund(seeded.row.id, {}, db);
+    if (!lease.leased) throw new Error(`seed lease failed: ${lease.reason}`);
+    const t3 = await openDispatchGate(seeded.row.id, lease.leaseToken, {}, db);
+    expect(t3).toEqual({ kind: "ABORTED", reasonCode: "DOCUMENT_CHANGED" });
+    const after = await rowSnapshot(seeded.row.id);
+    expect(after.status).toBe("ABORTED");
+    expect(after.reasonCode).toBe("DOCUMENT_CHANGED");
+    expect(after.reviewReason).toContain("mutationVersion");
+    expect(after.dispatchedAt).toBeNull();
+    expect(after.dispatchToken).toBeNull();
+  });
+
+  it("T3 refuses a NULL mutationVersion even when R2 is bypassed", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, { preparedOverrides: { mutationVersion: null } });
+    const lease = await leasePreparedShippingRefund(seeded.row.id, {}, db);
+    if (!lease.leased) throw new Error(`seed lease failed: ${lease.reason}`);
+    const t3 = await openDispatchGate(seeded.row.id, lease.leaseToken, {}, db);
+    expect(t3).toEqual({ kind: "ABORTED", reasonCode: "DOCUMENT_CHANGED" });
+    const after = await rowSnapshot(seeded.row.id);
+    expect(after.status).toBe("ABORTED");
+    expect(after.reasonCode).toBe("DOCUMENT_CHANGED");
+    expect(after.dispatchedAt).toBeNull();
+    expect(after.dispatchToken).toBeNull();
+  });
 
   it("a lease stolen mid-R2 ends the row without a send (LEASE_LOST)", async () => {
     const s = shop();

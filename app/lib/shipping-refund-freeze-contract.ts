@@ -407,7 +407,8 @@ export type FrozenContractComparison =
  * never stored and never sent — a single differing field reports it and
  * nothing proceeds.
  *
- * Compared in order, first mismatch wins: both document pins, the four
+ * Compared in order, first mismatch wins: both document pins, both
+ * contract-version stamps (mutationVersion), the four
  * financial columns, the canonical wire variables, then the wire hash. A
  * NULL or absent frozen value never satisfies the comparison — the check
  * fails closed like every other frozen-column rule.
@@ -424,6 +425,7 @@ export function compareRebuiltToFrozen(
   },
   frozen: {
     readonly documentSha256: string | null;
+    readonly mutationVersion: string | null;
     readonly wireHash: string | null;
     readonly wireVariables: unknown;
     readonly currencyCode: string | null;
@@ -444,6 +446,15 @@ export function compareRebuiltToFrozen(
     return mismatch(
       "documentSha256",
       `frozen documentSha256 ${JSON.stringify(frozen.documentSha256)} differs from this build's pin`,
+    );
+  }
+  if (rebuilt.contract.mutationVersion !== REFUND_MUTATION_VERSION) {
+    return mismatch("mutationVersion", "the rebuilt contract's version differs from this build's constant");
+  }
+  if (frozen.mutationVersion !== REFUND_MUTATION_VERSION) {
+    return mismatch(
+      "mutationVersion",
+      `frozen mutationVersion ${JSON.stringify(frozen.mutationVersion)} differs from this build's constant`,
     );
   }
   if (rebuilt.financialColumns.currencyCode !== frozen.currencyCode) {
