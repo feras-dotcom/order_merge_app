@@ -575,6 +575,8 @@ describe.skipIf(!TEST_URL)("shipping-refund T3 gate-input matrix (real disposabl
 
   // ── 7. Trigger-catalog integrity at T3 (scratch DB only) ─────────────
 
+  // Scratch-database migrations exceed Vitest's 5 s default on Windows:
+  // explicit per-test timeout (third arg), no CLI flags needed.
   it("a broken trigger catalog is a thrown T3 no-decision: no permit, row unchanged, cycle T3_NO_DECISION", async () => {
     await withScratchDatabase(preflighted, async (scratchUrl) => {
       execSync("npx prisma migrate deploy", {
@@ -630,7 +632,7 @@ describe.skipIf(!TEST_URL)("shipping-refund T3 gate-input matrix (real disposabl
         await scratch.$disconnect();
       }
     });
-  });
+  }, 120_000);
 
   // ── 8. The point of no return (§4.8, §9.3): post-commit state changes
   //       cannot unsend what T3 already committed ────────────────────────

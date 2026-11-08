@@ -334,29 +334,88 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
     await expectWait(seeded, "CURRENCY_MISMATCH");
   });
 
-  it("every malformed approval-cap candidate is rejected by the column CHECK — APPROVAL_MALFORMED_CAP is unreachable", async () => {
+  it("a NULL plannedShippingMinor on a legal PREPARED row waits APPROVAL_MALFORMED_CAP at precheck, T3 and in the cycle", async () => {
+    const s = shop();
+    // The column is NULL-able by design (ShippingRefund_plannedShippingMinor_format
+    // is `IS NULL OR ~ '...'`), so a PREPARED row may legitimately carry
+    // NULL — the §4.6.1 format check then classifies it malformed, a WAIT.
+    const seeded = await seedScenario(s, {
+      gate: { autoApprove: true, dailyCap: 1_000_000, globalCap: 1_000_000 },
+      preparedOverrides: { plannedShippingMinor: null },
+    });
+    const before = await rowSnapshot(seeded.row.id);
+    expect(before.plannedShippingMinor).toBeNull();
+    // (a) preparedCapacityPrecheck: every earlier gate satisfied
+    // (no breaker, high caps, autoApprove hash, matching currency) — the
+    // asserted reason can ONLY be the malformed-cap guard.
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toEqual({
+      wait: true,
+      reason: "APPROVAL_MALFORMED_CAP",
+    });
+    // (b) direct T3 under a real lease: same WAIT, no permit, nothing written.
+    const leaseToken = await lease(seeded.row.id);
+    const t3 = await openDispatchGate(seeded.row.id, leaseToken, {}, db);
+    expect(t3).toEqual({ kind: "WAIT", reason: "APPROVAL_MALFORMED_CAP" });
+    let after = await rowSnapshot(seeded.row.id);
+    expect(after.status).toBe("PREPARED");
+    expectUntouched(before, after);
+    // (c) the whole worker cycle: the capacity precheck precedes every
+    // Shopify read — zero reads, zero mutations, row still PREPARED.
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "leaseToken"=NULL,"leasedUntil"=NULL WHERE "id"=${seeded.row.id}`;
+    const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+    const report = await runCycle(admin.admin);
+    expect(report.outcomes["WAIT:APPROVAL_MALFORMED_CAP"]).toBe(1);
+    expect(admin.allCalls()).toBe(0);
+    expect(admin.mutationCalls()).toBe(0);
+    after = await rowSnapshot(seeded.row.id);
+    expect(after.status).toBe("PREPARED");
+    expect(after.plannedShippingMinor).toBeNull(); // NULL before AND after
+    expectUntouched(before, after);
+    // Positive control: the identical row with a valid amount permits.
+    const ok = await seedScenario(shop(), { gate: { autoApprove: true } });
+    const lt = await lease(ok.row.id);
+    expect((await openDispatchGate(ok.row.id, lt, {}, db)).kind).toBe("PERMIT");
+    await resolveInflightDispatches();
+  });
+
+  it("malformed minor-unit values are rejected by the named format CHECKs — and a write-once update is trigger rejection, not a CHECK", async () => {
     const s = shop();
     await seedScenario(s, { gate: { autoApprove: true } });
-    // ShippingExecuteApproval_maxRefundMinor_format and
-    // ShippingRefund_plannedShippingMinor_format bind BOTH sides of the
-    // §4.6.1 comparison at the column, so a malformed value can never be
-    // stored and the WAIT branch is defense-in-depth only.
+    // Mutable approval columns: the format CHECK fires directly and the
+    // error names the constraint, proving WHICH guard rejected the write.
     for (const bad of ["4.00", "-1", "", "01", "abc", "9".repeat(41)]) {
       await expect(
         db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "maxRefundMinor"=${bad} WHERE "shop"=${s}`,
         `maxRefundMinor ${JSON.stringify(bad)}`,
-      ).rejects.toThrow();
+      ).rejects.toThrow(/ShippingExecuteApproval_maxRefundMinor_format/);
     }
-    for (const bad of ["4.00", "-1", "0", "", "01", "abc"]) {
-      const row = await seedScenario(shop(), { gate: { autoApprove: true } });
-      await expect(
-        db.$executeRaw`UPDATE "ShippingRefund" SET "plannedShippingMinor"=${bad} WHERE "id"=${row.row.id}`,
-        `plannedShippingMinor ${JSON.stringify(bad)}`,
-      ).rejects.toThrow();
-    }
+    await expect(
+      db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "dailyCap"=-1 WHERE "shop"=${s}`,
+    ).rejects.toThrow(/ShippingExecuteApproval_dailyCap/);
+    // The row side reaches the CHECK only through a legal NULL -> value
+    // write-once transition: a NULL-planned PREPARED row accepts the
+    // column write (the frozen trigger permits NULL -> value) and the
+    // format CHECK then names itself on a malformed value.
+    const nullSeeded = await seedScenario(shop(), {
+      gate: { autoApprove: true },
+      preparedOverrides: { plannedShippingMinor: null },
+    });
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET "plannedShippingMinor"='4.00' WHERE "id"=${nullSeeded.row.id}`,
+    ).rejects.toThrow(/ShippingRefund_plannedShippingMinor_format/);
+    // On an already-populated row the same UPDATE is rejected by the
+    // write-once TRIGGER instead — "write-once column changed", never the
+    // CHECK name — so a bare rejects.toThrow() alone would not prove the
+    // format guard fired.
+    const normal = await seedScenario(shop(), { gate: { autoApprove: true } });
+    await expect(
+      db.$executeRaw`UPDATE "ShippingRefund" SET "plannedShippingMinor"='4.00' WHERE "id"=${normal.row.id}`,
+    ).rejects.toThrow(/write-once column changed/);
+    // A malformed maxRefundMinor can never be stored (CHECK-bound), so
+    // APPROVAL_MALFORMED_CAP is reachable only via the row's
+    // plannedShippingMinor — which is NULL-able by design.
   });
-  it.todo("APPROVAL_MALFORMED_CAP wait — both cap columns are CHECK-bound; no legal write stores a malformed value");
-  it.todo("trailing-24h cap ageing boundary — dispatchedAt is write-once and cannot be legally backdated");
+  it.todo("trailing-24h cap ageing boundary (untested time boundary): dispatchedAt is write-once so it cannot be backdated — the window only ages with real elapsed time; covering it needs a controllable database clock or a >24 h wait. Deliberately NOT adding a production clock hook for this test-only change");
 
   // ── 3. Operator hash approval (4.6) ──────────────────────────────────
 
@@ -371,15 +430,20 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
     await expectWait(seeded, "HASH_APPROVAL_MISSING");
   });
 
-  // CANDIDATE DEFECT (reported, not adapted to): the design intends a
-  // missing approval row to classify HASH_APPROVAL_MISSING — the code
-  // even carries `if (!ap) return { wait: true, reason: "HASH_APPROVAL_MISSING" }`
-  // — but the earlier shop-cap check reads `ap?.dailyCap ?? 0` = 0 and
-  // `count >= 0` is always true, so SHOP_CAP_REACHED fires first and the
-  // dedicated branch is unreachable. The row still waits (correct class,
-  // no send) but the operator-facing reason points at the cap, not the
-  // missing approval. it.fails documents the designed verdict as a live
-  // tripwire.
+  // CANDIDATE DEFECT (reviewer-confirmed; do NOT fix here): the design
+  // intends a missing approval row to classify HASH_APPROVAL_MISSING —
+  // the code even carries `if (!ap) return { wait: true, reason:
+  // "HASH_APPROVAL_MISSING" }` — but the earlier shop-cap check reads
+  // `ap?.dailyCap ?? 0` = 0 and `count >= 0` is always true, so
+  // SHOP_CAP_REACHED fires first at BOTH prechecks AND inside T3's wait
+  // path: the dedicated branch is unreachable and the worker's capacity
+  // precheck reports the WAIT before the GATE_CLOSED-on-approval gate-
+  // recheck abort can ever be reached — so the designed gate-change
+  // abort can be delayed until the seven-day horizon expires the row.
+  // No unauthorized-refund bypass was demonstrated (every path still
+  // waits with zero sends); the wrong classification needs a separate
+  // production fix and independent review. it.fails documents the
+  // designed verdict as a live tripwire.
   it.fails("a deleted approval row should wait HASH_APPROVAL_MISSING (currently reports SHOP_CAP_REACHED)", async () => {
     const s = shop();
     const seeded = await seedScenario(s, { gate: { autoApprove: true } });
@@ -524,14 +588,15 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
 
   // ── 7. Waiting rows (§8.4 N5): waits never abort, never consume attempts ──
 
-  it("a PREPARED row waiting >24h under a tripped breaker stays PREPARED across cycles, attempts untouched", async () => {
+  it("a PREPARED row waiting >24h under a tripped breaker stays PREPARED across cycles, then resumes on the same row", async () => {
     const s = shop();
     const blockerId = await dispatchedBlocker(shop(), "DISPATCHING");
     // The row has been PREPARED for more than a day (preparedAt is
     // write-once: it can only be backdated at the freeze update itself).
+    const backdated = new Date(Date.now() - 25 * 3_600_000).toISOString();
     const seeded = await seedScenario(s, {
       gate: { autoApprove: true },
-      preparedOverrides: { preparedAt: new Date(Date.now() - 25 * 3_600_000).toISOString() },
+      preparedOverrides: { preparedAt: backdated },
       evidence: { cancelledAt: new Date(Date.now() - 2 * 86_400_000).toISOString() },
     });
     const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
@@ -550,20 +615,42 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
       // Force the row due again to simulate the next sweep.
       await db.$executeRaw`UPDATE "ShippingRefund" SET "nextCheckAt"=NULL,"leaseToken"=NULL,"leasedUntil"=NULL WHERE "id"=${seeded.row.id}`;
     }
+    // Clear the blocker through the legal transitions, make the SAME row
+    // due, and it resumes: fresh R2 reads, exactly one mutation.
     await db.$executeRaw`UPDATE "ShippingRefund" SET "status"='IN_DOUBT',"responseKind"='TRANSPORT',"updatedAt"=clock_timestamp() AT TIME ZONE 'UTC' WHERE "id"=${blockerId}`;
     await db.$executeRaw`UPDATE "ShippingRefund" SET "status"='REVIEW_REQUIRED',"reasonCode"='TEST',"updatedAt"=clock_timestamp() AT TIME ZONE 'UTC' WHERE "id"=${blockerId}`;
     await db.$executeRaw`UPDATE "ShippingRefund" SET "status"='RESOLVED',"resolvedBy"='t',"resolvedAt"=clock_timestamp() AT TIME ZONE 'UTC',"resolution"='x',"resolutionNote"='x',"updatedAt"=clock_timestamp() AT TIME ZONE 'UTC' WHERE "id"=${blockerId}`;
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "nextCheckAt"=NULL,"leaseToken"=NULL,"leasedUntil"=NULL WHERE "id"=${seeded.row.id}`;
+    const before = await rowSnapshot(seeded.row.id);
+    const report = await runCycle(admin.admin);
+    expect(report.outcomes["DISPATCHED:ACCEPTED"]).toBe(1);
+    expect(admin.mutationCalls()).toBe(1);
+    expect(admin.allCalls()).toBeGreaterThan(0); // fresh R2 recheck + evaluator reads
+    const docs = admin.calls.map((c) => c.doc);
+    expect(docs.some((d) => d.includes("source") || d.includes("Recheck"))).toBe(true);
+    expect(docs.some((d) => d.includes("Shadow"))).toBe(true);
+    const after = await rowSnapshot(seeded.row.id);
+    expect(after.status).toBe("REFUND_RECORDED");
+    expect(after.attempts).toBe(before.attempts); // the resume consumed no extra attempt
+    // The row really was >24 h old when it dispatched — preparedAt kept
+    // the backdated write-once value.
+    const [{ ageOk }] = await db.$queryRaw<{ ageOk: boolean }[]>`
+      SELECT "preparedAt" < (clock_timestamp() AT TIME ZONE 'UTC' - interval '24 hours') AS "ageOk"
+      FROM "ShippingRefund" WHERE "id"=${seeded.row.id}`;
+    expect(ageOk).toBe(true);
+    for (const k of FROZEN_KEYS) expect(after[k], `frozen column ${k}`).toEqual(before[k]);
   });
 
   it("a QUEUED EXECUTE row waiting under a tripped breaker is released with backoff and never evaluated", async () => {
     const s = shop();
     await seedShippingR2Gate(db, s, { autoApprove: true });
     // A due, unleased QUEUED EXECUTE row — what the scan's Part A selects.
-    const opId = await seedShippingR2MergeOp(db, {
-      shop: s,
-      primaryId: oid(++seq),
-      secondaryId: oid(++seq),
-    });
+    // Its mergeOperationId/sourceOrderId/primaryOrderId mirror the seeded
+    // operation's own secondary/primary so the fixture is internally
+    // consistent (no merge-evidence issue unrelated to the breaker wait).
+    const primaryId = oid(++seq);
+    const secondaryId = oid(++seq);
+    const opId = await seedShippingR2MergeOp(db, { shop: s, primaryId, secondaryId });
     const rowId = `sr_${randomUUID().replace(/-/g, "")}`;
     const key = randomUUID();
     await db.$executeRaw`
@@ -575,7 +662,7 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
         "approvalApprovedAt","approvalOptInEpoch","approvalAckVersion",
         "policyKind","idempotencyKey","marker"
       ) VALUES (
-        ${rowId}, ${s}, ${opId}, ${oid(++seq)}, ${oid(++seq)}, '#P1',
+        ${rowId}, ${s}, ${opId}, ${secondaryId}, ${primaryId}, '#P1',
         ${naive("2030-01-06T00:00:00Z")}, ${naive(new Date(Date.now() - 2 * 86_400_000).toISOString())},
         'EXECUTE', 'QUEUED',
         ${naive("2030-01-01T00:00:00Z")}, ${naive("2030-01-02T00:00:00Z")},
@@ -607,6 +694,12 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
     ).toBe(1);
     expect(reports[0].outcomes["WAIT:BREAKER_TRIPPED"]).toBe(1);
     expect(admin.allCalls()).toBe(0);
+    // The QUEUED row's fixture is internally consistent (real seeded
+    // MergeOperation/MergeRecord for its sourceOrderId/primaryOrderId):
+    // the scan surfaces no malformed-operation entries and no
+    // merge-evidence outcome — the only refusal is the breaker wait.
+    expect(reports[0].malformed).toEqual([]);
+    expect(Object.keys(reports[0].outcomes).filter((k) => k.includes("EVIDENCE"))).toEqual([]);
     const [row] = await db.$queryRaw<{ status: string; attempts: number; nextCheckAt: Date | null }[]>`
       SELECT "status","attempts","nextCheckAt" FROM "ShippingRefund" WHERE "id"=${rowId}`;
     expect(row.status).toBe("QUEUED");

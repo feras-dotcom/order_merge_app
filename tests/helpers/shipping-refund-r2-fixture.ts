@@ -499,7 +499,7 @@ export async function seedPreparedR2Row(
       wireHash?: string;
       mutationVersion?: string | null;
       currencyCode?: string;
-      plannedShippingMinor?: string;
+      plannedShippingMinor?: string | null;
       parentTransactionId?: string;
       gateway?: string;
       preEvidence?: unknown;
@@ -588,7 +588,7 @@ export async function seedPreparedR2Row(
       "documentSha256" = ${ov.documentSha256 ?? adapted.contract.documentSha256},
       "mutationVersion" = ${"mutationVersion" in ov ? ov.mutationVersion : REFUND_MUTATION_VERSION},
       "currencyCode" = ${ov.currencyCode ?? adapted.financialColumns.currencyCode},
-      "plannedShippingMinor" = ${ov.plannedShippingMinor ?? adapted.financialColumns.plannedShippingMinor},
+      "plannedShippingMinor" = ${"plannedShippingMinor" in ov ? ov.plannedShippingMinor : adapted.financialColumns.plannedShippingMinor},
       "parentTransactionId" = ${ov.parentTransactionId ?? adapted.financialColumns.parentTransactionId},
       "gateway" = ${ov.gateway ?? adapted.financialColumns.gateway},
       "preEvidence" = ${JSON.stringify(ov.preEvidence ?? preEvidence)}::jsonb
