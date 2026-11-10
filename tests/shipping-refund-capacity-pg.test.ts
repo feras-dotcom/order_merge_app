@@ -16,16 +16,16 @@
 // is global and checked first), and a resolved row's dispatchedAt still
 // counts toward the trailing-24h caps.
 //
-// NOT CONSTRUCTIBLE (DB-enforced, reported as coverage gaps):
-//   - malformed maxRefundMinor on the approval and malformed
-//     plannedShippingMinor on the row: both are CHECK-bound at the column,
-//     so APPROVAL_MALFORMED_CAP is unreachable through legal writes —
-//     verified here by asserting the CHECK rejects every candidate.
-//   - a dispatchedAt older than 24h for the ageing boundary: the
-//     evidence-integrity trigger forbids stamping dispatch evidence
-//     outside PREPARED->DISPATCHING and dispatchedAt is write-once.
-//   - a WAIT-class refusal INSIDE T3 for a bad lane: lane is immutable
-//     and dispatch-path statuses require EXECUTE.
+// COVERAGE NOTES:
+//   - Malformed non-NULL maxRefundMinor and plannedShippingMinor values are
+//     format-CHECK-bound; updates to populated frozen columns are also
+//     write-once-trigger-bound. A legally NULL plannedShippingMinor on a
+//     PREPARED row DOES reach WAIT:APPROVAL_MALFORMED_CAP, tested below.
+//   - Trailing-24h dispatch cap ageing is a real but untested time boundary.
+//     dispatchedAt is write-once, so immediate test backdating is forbidden;
+//     the row can still age out of the count through elapsed time.
+//   - A T3 bad-lane refusal is not constructible through valid database
+//     states: lane is immutable and dispatch-path statuses require EXECUTE.
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
