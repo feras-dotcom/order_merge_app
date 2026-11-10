@@ -499,10 +499,13 @@ export async function seedPreparedR2Row(
       wireHash?: string;
       mutationVersion?: string | null;
       currencyCode?: string;
-      plannedShippingMinor?: string;
+      plannedShippingMinor?: string | null;
       parentTransactionId?: string;
       gateway?: string;
       preEvidence?: unknown;
+      /** Backdates preparedAt at the write-once point (NULL -> value), for
+       *  capacity-wait ageing scenarios. ISO instant. */
+      preparedAt?: string;
     };
   },
 ): Promise<SeedR2RowResult> {
@@ -578,13 +581,14 @@ export async function seedPreparedR2Row(
   const ov = seed.preparedOverrides ?? {};
   await db.$executeRaw`
     UPDATE "ShippingRefund" SET
-      "status" = 'PREPARED', "preparedAt" = clock_timestamp() AT TIME ZONE 'UTC',
+      "status" = 'PREPARED',
+      "preparedAt" = ${ov.preparedAt !== undefined ? naive(ov.preparedAt) : Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`},
       "wireVariables" = ${JSON.stringify(adapted.contract.wireVariables)}::jsonb,
       "wireHash" = ${ov.wireHash ?? adapted.contract.wireHash},
       "documentSha256" = ${ov.documentSha256 ?? adapted.contract.documentSha256},
       "mutationVersion" = ${"mutationVersion" in ov ? ov.mutationVersion : REFUND_MUTATION_VERSION},
       "currencyCode" = ${ov.currencyCode ?? adapted.financialColumns.currencyCode},
-      "plannedShippingMinor" = ${ov.plannedShippingMinor ?? adapted.financialColumns.plannedShippingMinor},
+      "plannedShippingMinor" = ${"plannedShippingMinor" in ov ? ov.plannedShippingMinor : adapted.financialColumns.plannedShippingMinor},
       "parentTransactionId" = ${ov.parentTransactionId ?? adapted.financialColumns.parentTransactionId},
       "gateway" = ${ov.gateway ?? adapted.financialColumns.gateway},
       "preEvidence" = ${JSON.stringify(ov.preEvidence ?? preEvidence)}::jsonb

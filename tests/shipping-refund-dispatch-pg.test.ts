@@ -332,7 +332,7 @@ describe.skipIf(!TEST_URL)("shipping-refund S2 dispatch (real disposable databas
     cleanupEnv();
   });
 
-  it("T3 aborts on a changed gate and on a tampered wire hash", async () => {
+  it("T3 aborts GATE_CHANGED on a restamped approval (changed gate)", async () => {
     const s = shop(); await seedGate(s);
     const r = await seedPrepared(s);
     await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "approvedAt" = clock_timestamp() AT TIME ZONE 'UTC' WHERE "shop" = ${s}`;
