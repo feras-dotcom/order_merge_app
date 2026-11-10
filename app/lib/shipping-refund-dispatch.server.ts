@@ -218,7 +218,11 @@ export type CapacityWait =
 export type CapacityPrecheckResult =
   | { readonly proceed: true }
   | { readonly wait: true; readonly reason: CapacityWait }
-  | { readonly abort: true; readonly reason: "HORIZON_EXPIRED" };
+  | {
+      readonly abort: true;
+      readonly reason: "HORIZON_EXPIRED" | "GATE_CHANGED";
+      readonly detail: string;
+    };
 
 /** Trailing-24h dispatch count (a dispatch is a row whose dispatchedAt is
  *  set — the write-ahead record, not a completed refund). */
@@ -251,18 +255,22 @@ const breakerTripped = async (tx: Prisma.TransactionClient): Promise<boolean> =>
 
 /** The pre-freeze precheck (8.4): an EXECUTE-lane QUEUED row may wait on
  *  ONLY the breaker and the per-shop and global daily caps — never the
- *  hash approval and never the per-refund cap (they cannot exist yet). */
+ *  hash approval and never the per-refund cap (they cannot exist yet).
+ *  A missing or revoked approval is no capacity condition: there is no
+ *  cap to apply, so the row proceeds — the freeze's lease-fenced gate
+ *  recheck is the fail-closed authority that settles it ABORTED(GATE_CHANGED). */
 export async function prefreezeCapacityPrecheck(
   shop: string,
   db: PrismaClient = defaultDb,
 ): Promise<CapacityPrecheckResult> {
   return db.$transaction(async (tx) => {
+    const [ap] = await tx.$queryRaw<{ dailyCap: number; revokedAt: Date | null }[]>`
+      SELECT "dailyCap", "revokedAt" FROM "ShippingExecuteApproval" WHERE "shop" = ${shop}`;
+    if (ap === undefined || ap.revokedAt !== null) return { proceed: true };
     const [ctl] = await tx.$queryRaw<{ globalDailyCap: number }[]>`
       SELECT "globalDailyCap" FROM "ShippingExecuteControl" WHERE "id" = 'control'`;
-    const [ap] = await tx.$queryRaw<{ dailyCap: number }[]>`
-      SELECT "dailyCap" FROM "ShippingExecuteApproval" WHERE "shop" = ${shop}`;
     if (await breakerTripped(tx)) return { wait: true, reason: "BREAKER_TRIPPED" };
-    if ((await countDispatches24h(tx, shop)) >= (ap?.dailyCap ?? 0)) {
+    if ((await countDispatches24h(tx, shop)) >= ap.dailyCap) {
       return { wait: true, reason: "SHOP_CAP_REACHED" };
     }
     if ((await countDispatches24h(tx, null)) >= (ctl?.globalDailyCap ?? 0)) {
@@ -323,12 +331,78 @@ export function loadPreparedHead(rowId: string, db: PrismaClient = defaultDb) {
 const MINOR_FORMAT = /^[1-9][0-9]{0,39}$/;
 const CAP_FORMAT = /^(0|[1-9][0-9]{0,39})$/;
 
+interface ApprovalGateRow {
+  readonly approvedAt: Date;
+  readonly revokedAt: Date | null;
+  readonly merchantOptInEpoch: Date;
+  readonly ackVersion: string;
+  readonly dailyCap: number;
+  readonly currencyCode: string;
+  readonly maxRefundMinor: string;
+  readonly autoApprove: boolean;
+}
+
+/** The row's stored snapshot fields the closure compares (4.4). */
+interface ApprovalGateSnapshot {
+  readonly approvalApprovedAt: Date;
+  readonly approvalOptInEpoch: Date;
+  readonly approvalAckVersion: string;
+}
+
+const MISSING_APPROVAL_DETAIL = "the shop's execution approval row is missing";
+
+const safeIso = (d: Date): string =>
+  Number.isFinite(d.getTime()) ? d.toISOString() : "invalid";
+
+/** §4.4 approval-validity gate closure: a non-null detail exactly when the
+ *  live approval state guarantees T3's gate recheck aborts GATE_CHANGED —
+ *  a missing, revoked, restamped (new approvedAt) or re-scoped
+ *  (opt-in epoch / ackVersion) approval, or a Settings opt-in epoch the
+ *  approval no longer matches. Every condition is monotonic — a recreated
+ *  approval carries a fresh approvedAt and still fails the snapshot — so
+ *  this unlocked read needs no lock. Instants compare by millisecond;
+ *  every detail names "approval" and stays far under the 2000-char
+ *  reviewReason bound. Exported for the pure unit tests. */
+export function approvalGateClosure(
+  approval: ApprovalGateRow | null | undefined,
+  snapshot: ApprovalGateSnapshot,
+  settingsEpoch: Date | null | undefined,
+): string | null {
+  if (approval == null) return MISSING_APPROVAL_DETAIL;
+  if (approval.revokedAt !== null) {
+    return "the shop's execution approval is revoked (revokedAt is set)";
+  }
+  if (approval.approvedAt.getTime() !== snapshot.approvalApprovedAt.getTime()) {
+    return `approval restamped: approvedAt ${safeIso(approval.approvedAt)} differs from the snapshot ${safeIso(snapshot.approvalApprovedAt)}`;
+  }
+  if (approval.merchantOptInEpoch.getTime() !== snapshot.approvalOptInEpoch.getTime()) {
+    return `approval merchantOptInEpoch ${safeIso(approval.merchantOptInEpoch)} differs from the snapshot ${safeIso(snapshot.approvalOptInEpoch)}`;
+  }
+  if (approval.ackVersion !== snapshot.approvalAckVersion) {
+    return `approval ackVersion ${JSON.stringify(approval.ackVersion)} differs from the snapshot ${JSON.stringify(snapshot.approvalAckVersion)}`;
+  }
+  if (approval.ackVersion !== REQUIRED_ACK_VERSION) {
+    return `approval ackVersion ${JSON.stringify(approval.ackVersion)} does not equal REQUIRED_ACK_VERSION ${JSON.stringify(REQUIRED_ACK_VERSION)}`;
+  }
+  if (
+    !(settingsEpoch instanceof Date) ||
+    settingsEpoch.getTime() !== approval.merchantOptInEpoch.getTime()
+  ) {
+    return `approval merchantOptInEpoch ${safeIso(approval.merchantOptInEpoch)} differs from the live Settings opt-in epoch ${settingsEpoch instanceof Date ? safeIso(settingsEpoch) : "missing"}`;
+  }
+  return null;
+}
+
 /** The post-freeze capacity precheck (9.1): DB reads only — horizon,
- *  breaker, shop and global caps, per-refund cap, currency pin and the
- *  recorded hash approval. Returns WAIT for every capacity condition (the
- *  row waits, never aborts, never consumes attempts) and ABORT only for
- *  the seven-day horizon. Approval-row validity itself is a gate matter
- *  re-checked inside T3; a missing row or missing hash waits. */
+ *  approval-validity gate closure, breaker, shop and global caps,
+ *  per-refund cap, currency pin and the recorded hash approval. Returns
+ *  WAIT for every capacity condition (the row waits, never aborts, never
+ *  consumes attempts) and ABORT for the seven-day horizon or an approval
+ *  state whose gate recheck T3 guarantees to abort GATE_CHANGED — the
+ *  approval check runs before the capacity checks so no capacity WAIT
+ *  (e.g. dailyCap 0 on a missing row) can mask the abort until the
+ *  horizon. An existing, unchanged approval without a hash approval still
+ *  waits HASH_APPROVAL_MISSING. */
 export async function preparedCapacityPrecheck(
   rowId: string,
   db: PrismaClient = defaultDb,
@@ -341,21 +415,36 @@ export async function preparedCapacityPrecheck(
       SELECT ("sourceCancelledAt" IS NULL
               OR ${HORIZON_EXPIRED_PREDICATE(DB_WALL)}) AS "expired"
       FROM "ShippingRefund" WHERE "id" = ${rowId}`;
-    if (hz.expired) return { abort: true, reason: "HORIZON_EXPIRED" };
+    if (hz.expired) {
+      return {
+        abort: true,
+        reason: "HORIZON_EXPIRED",
+        detail: "seven-day horizon passed at the capacity precheck",
+      };
+    }
+    const [ap] = await tx.$queryRaw<ApprovalGateRow[]>`
+      SELECT "approvedAt", "revokedAt", "merchantOptInEpoch", "ackVersion",
+             "dailyCap", "currencyCode", "maxRefundMinor", "autoApprove"
+      FROM "ShippingExecuteApproval" WHERE "shop" = ${h.shop}`;
+    const [st] = await tx.$queryRaw<{ shippingAdjustmentEnabledAt: Date | null }[]>`
+      SELECT "shippingAdjustmentEnabledAt" FROM "Settings" WHERE "shop" = ${h.shop}`;
+    const closure = approvalGateClosure(ap, h, st?.shippingAdjustmentEnabledAt ?? null);
+    if (closure !== null || !ap) {
+      return {
+        abort: true,
+        reason: "GATE_CHANGED",
+        detail: closure ?? MISSING_APPROVAL_DETAIL,
+      };
+    }
     const [ctl] = await tx.$queryRaw<{ globalDailyCap: number }[]>`
       SELECT "globalDailyCap" FROM "ShippingExecuteControl" WHERE "id" = 'control'`;
-    const [ap] = await tx.$queryRaw<
-      { dailyCap: number; currencyCode: string; maxRefundMinor: string; autoApprove: boolean }[]
-    >`SELECT "dailyCap", "currencyCode", "maxRefundMinor", "autoApprove"
-      FROM "ShippingExecuteApproval" WHERE "shop" = ${h.shop}`;
     if (await breakerTripped(tx)) return { wait: true, reason: "BREAKER_TRIPPED" };
-    if ((await countDispatches24h(tx, h.shop)) >= (ap?.dailyCap ?? 0)) {
+    if ((await countDispatches24h(tx, h.shop)) >= ap.dailyCap) {
       return { wait: true, reason: "SHOP_CAP_REACHED" };
     }
     if ((await countDispatches24h(tx, null)) >= (ctl?.globalDailyCap ?? 0)) {
       return { wait: true, reason: "GLOBAL_CAP_REACHED" };
     }
-    if (!ap) return { wait: true, reason: "HASH_APPROVAL_MISSING" };
     if (!ap.autoApprove && h.approvedWireHash !== h.wireHash) {
       return { wait: true, reason: "HASH_APPROVAL_MISSING" };
     }

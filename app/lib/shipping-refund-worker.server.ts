@@ -236,11 +236,12 @@ async function processPreparedRow(
   if (!lease.leased) return `LEASE_${lease.reason}`;
   const leaseToken = lease.leaseToken;
 
-  // 1. Capacity precheck (DB only): horizon abort; every capacity reason waits.
+  // 1. Capacity precheck (DB only): horizon and approval-gate-closure
+  //    aborts; every capacity reason waits.
   const pc = await preparedCapacityPrecheck(rowId, db);
   if ("abort" in pc && pc.abort) {
-    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: "HORIZON_EXPIRED", reviewReason: "seven-day horizon passed at the capacity precheck" }, db);
-    return "ABORTED:HORIZON_EXPIRED";
+    await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: pc.reason, reviewReason: pc.detail }, db);
+    return `ABORTED:${pc.reason}`;
   }
   if ("wait" in pc && pc.wait) {
     await releaseLeaseWithBackoff(rowId, leaseToken, undefined, db);
