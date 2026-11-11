@@ -18,9 +18,12 @@
 // approval -> currency -> cap formats -> per-refund cap. The approval
 // check precedes every capacity check so no WAIT (e.g. dailyCap 0 on a
 // missing row) can mask the abort until the seven-day horizon.
-// prefreezeCapacityPrecheck consults only the breaker and the daily caps;
-// a missing/revoked approval proceeds — there is no cap to apply and the
-// freeze's lease-fenced gate recheck is the fail-closed abort authority.
+// prefreezeCapacityPrecheck consults only the breaker and the daily caps —
+// approval presence/revocation is never read there; a missing approval
+// waits SHOP_CAP_REACHED (dailyCap defaults to 0), reachable only inside
+// the post-advisory-gate race window since the scanner's E4 check stops
+// the shop first, and the freeze's lease-fenced gate recheck is the
+// fail-closed abort authority.
 // Every wait needs prior dispatched rows RESOLVED first (the breaker is
 // global and checked first), and a resolved row's dispatchedAt still
 // counts toward the trailing-24h caps.
@@ -562,19 +565,32 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
     // pre-freeze precheck must NOT consult. With a high dailyCap and no
     // breaker it still proceeds.
     expect(await prefreezeCapacityPrecheck(s, db)).toEqual({ proceed: true });
-    // A missing approval row is no capacity condition — there is no cap to
-    // apply — so it proceeds; the freeze's lease-fenced gate recheck is the
-    // fail-closed authority that settles the row ABORTED(GATE_CHANGED).
+    // No approval row at all means dailyCap defaults to 0 (§4.6): the
+    // shop-cap check legitimately waits — approval presence itself is a
+    // post-freeze/gate matter, not consulted here. This path is reachable
+    // only in the sub-second race between the admission scan's advisory
+    // gate read and Part A's freeze: with no approval the scanner's E4
+    // check stops the shop first (§7.3 step 1 "write nothing"), so in
+    // practice the row simply waits and its lease is released unwritten.
     await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop"=${s}`;
-    expect(await prefreezeCapacityPrecheck(s, db)).toEqual({ proceed: true });
-    // A revoked approval proceeds identically — even under a tripped
-    // breaker, which a missing/revoked authority never reaches.
+    expect(await prefreezeCapacityPrecheck(s, db)).toEqual({
+      wait: true,
+      reason: "SHOP_CAP_REACHED",
+    });
+    // A revoked approval is likewise only a gate matter at this stage: the
+    // precheck consults dailyCap alone, so a high-cap revoked row still
+    // proceeds and a tripped breaker still waits — the freeze's
+    // lease-fenced gate recheck is the fail-closed authority that settles
+    // it ABORTED(GATE_CHANGED).
     await seedShippingR2Gate(db, s, { autoApprove: true, dailyCap: 1_000_000 });
     await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "revokedAt"=${naive("2030-01-07T00:00:00Z")} WHERE "shop"=${s}`;
     expect(await prefreezeCapacityPrecheck(s, db)).toEqual({ proceed: true });
     const blockerId = await dispatchedBlocker(shop(), "DISPATCHING");
     try {
-      expect(await prefreezeCapacityPrecheck(s, db)).toEqual({ proceed: true });
+      expect(await prefreezeCapacityPrecheck(s, db)).toEqual({
+        wait: true,
+        reason: "BREAKER_TRIPPED",
+      });
     } finally {
       await resolveInflightDispatches();
     }
@@ -620,8 +636,9 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
   // §4.4/§9.1: a missing, revoked, restamped or re-scoped approval is a
   // gate closure T3's recheck guarantees to abort GATE_CHANGED — so the
   // precheck aborts it BEFORE any capacity check can mask it as a WAIT.
-  // The worker then settles the row through the lease-fenced R2 writer
-  // with zero Shopify calls.
+  // The worker then settles the row through abortPreparedOnApprovalClosure
+  // — which re-decides under the §4.10 locks in the same transaction as
+  // the abort write — with zero Shopify calls.
 
   const mutateApproval = {
     deleted: (s: string) =>

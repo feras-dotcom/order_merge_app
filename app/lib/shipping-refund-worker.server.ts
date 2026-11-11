@@ -31,8 +31,8 @@ import {
 import { analyzeExecRecheck, compareBaselineAtR2, type BaselineRefundFingerprint, type RefundBaseline } from "./shipping-refund-baseline";
 import { parseShopMoney } from "./money";
 import {
-  classifyDispatchResponse, leasePreparedShippingRefund, listDuePreparedShippingRefunds,
-  openDispatchGate, preparedCapacityPrecheck, recordDispatchOutcome,
+  abortPreparedOnApprovalClosure, classifyDispatchResponse, leasePreparedShippingRefund,
+  listDuePreparedShippingRefunds, openDispatchGate, preparedCapacityPrecheck, recordDispatchOutcome,
   releaseLeaseWithBackoff, renewPreparedShippingRefundLease, sendRefund,
   shippingRefundsDispatchEnabled,
   type DispatchOutcome,
@@ -236,9 +236,24 @@ async function processPreparedRow(
   if (!lease.leased) return `LEASE_${lease.reason}`;
   const leaseToken = lease.leaseToken;
 
-  // 1. Capacity precheck (DB only): horizon and approval-gate-closure
-  //    aborts; every capacity reason waits.
-  const pc = await preparedCapacityPrecheck(rowId, db);
+  // 1. Capacity precheck (DB only): horizon aborts and every capacity
+  //    reason waits. A GATE_CHANGED abort is only a preliminary,
+  //    non-durable observation — it is settled under the §4.10 locks by
+  //    abortPreparedOnApprovalClosure, which re-decides in the same
+  //    transaction as the write, so a snapshot-equal approval restored
+  //    after the precheck keeps the row alive.
+  let pc = await preparedCapacityPrecheck(rowId, db);
+  if ("abort" in pc && pc.abort && pc.reason === "GATE_CHANGED") {
+    const settled = await abortPreparedOnApprovalClosure(rowId, leaseToken, db);
+    if (settled.aborted) return "ABORTED:GATE_CHANGED";
+    pc = await preparedCapacityPrecheck(rowId, db);
+    if ("abort" in pc && pc.abort && pc.reason === "GATE_CHANGED") {
+      // Still unsettled between the unlocked read and the locked decision:
+      // never decide on stale evidence — release and re-observe next cycle.
+      await releaseLeaseWithBackoff(rowId, leaseToken, undefined, db);
+      return "WAIT:APPROVAL_STATE_UNSETTLED";
+    }
+  }
   if ("abort" in pc && pc.abort) {
     await writePreparedR2Outcome(rowId, leaseToken, { toStatus: "ABORTED", reasonCode: pc.reason, reviewReason: pc.detail }, db);
     return `ABORTED:${pc.reason}`;

@@ -21,7 +21,7 @@
 
 import { execSync } from "child_process";
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Prisma, PrismaClient } from "@prisma/client";
 import {
   claimShippingRefund,
@@ -1644,5 +1644,153 @@ describe.skipIf(!TEST_URL)(
         }
       });
     }, 240_000);
+
+    // ── QUEUED rows behind a closed shop gate (§7.3 step 1) ────────────
+    // The advisory E4 gate is evaluated BEFORE Part A and writes nothing
+    // ("if closed, stop"): a due QUEUED row whose approval is missing or
+    // revoked is never even examined — it stays byte-identical and no
+    // Shopify call is spent. These tests pin that posture, plus what the
+    // next scan does once the gate is restored (exact → freeze; restamped
+    // → GATE_CHANGED abort at the lease-fenced freeze recheck; expired
+    // horizon → ABORTED at the QUEUED lease, §7.4).
+    describe("QUEUED rows behind a closed shop gate", () => {
+      afterEach(async () => {
+        // seedGate writes the shared globalDailyCap — restore the seeded
+        // default so no residue leaks into later suites.
+        await db.$executeRaw`
+          UPDATE "ShippingExecuteControl" SET "globalDailyCap" = 0 WHERE "id" = 'control'`;
+      });
+
+      /** A genuine QUEUED EXECUTE-lane row (claim-written gate snapshot
+       *  equal to the live gate), with the claim's own lease released so
+       *  the row is due and unowned. */
+      const claimQueuedRow = async (shopName: string, cancelledAt?: string) => {
+        const seeded = await seedOp({ shop: shopName, cancelledAt });
+        const [op] = await db.$queryRaw<any[]>`
+          SELECT * FROM "MergeOperation" WHERE "id" = ${seeded.opId}`;
+        const claim = await claimShippingRefund(
+          { operation: op, secondary: { id: seeded.secondaryId, cancelledAt: seeded.cancelledAt } },
+          db,
+          () => {},
+        );
+        if (!claim.claimed) throw new Error(`claim rejected: ${JSON.stringify(claim)}`);
+        await db.$executeRaw`
+          UPDATE "ShippingRefund" SET "leaseToken" = NULL, "leasedUntil" = NULL,
+            "nextCheckAt" = NULL
+          WHERE "id" = ${claim.rowId}`;
+        return { rowId: claim.rowId, ...seeded };
+      };
+
+      const closedGateTest = (mode: "missing" | "revoked") =>
+        it(`approval ${mode}: the scan stops at the advisory gate — the due QUEUED row is byte-identical and no Shopify call is spent`, async () => {
+          const s = uniqueShop();
+          await seedGate(s, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
+          const q = await claimQueuedRow(s);
+          const admin = fakeAdmin({}, { srcId: q.secondaryId, priId: q.primaryId, cancelledAt: q.cancelledAt });
+          const before = await refundRow(s, q.secondaryId);
+          const eventsBefore = await eventsFor(q.rowId);
+          const countBefore = (await refundRows(s)).length;
+          if (mode === "missing") {
+            await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop" = ${s}`;
+          } else {
+            await db.$executeRaw`
+              UPDATE "ShippingExecuteApproval" SET "revokedAt" = clock_timestamp() AT TIME ZONE 'UTC'
+              WHERE "shop" = ${s}`;
+          }
+          const reports = await scan([s], { adminFactory: async () => admin as any, sessionLoader: usableSession });
+          expect(reports[0].gateOpen).toBe(false);
+          expect(reports[0].stoppedBy).toBe(mode === "missing" ? "gate:APPROVAL_MISSING" : "gate:APPROVAL_REVOKED");
+          expect(reports[0].dueRowsExamined).toBe(0);
+          expect(reports[0].claimed).toBe(0);
+          expect(await refundRow(s, q.secondaryId)).toEqual(before);
+          expect(await eventsFor(q.rowId)).toEqual(eventsBefore);
+          expect((await refundRows(s)).length).toBe(countBefore);
+          expect(admin.calls.length).toBe(0);
+        });
+      for (const mode of ["missing", "revoked"] as const) closedGateTest(mode);
+
+      it("gate restored with a restamped approval: the scan leases the row and the freeze recheck settles it ABORTED(GATE_CHANGED)", async () => {
+        const s = uniqueShop();
+        await seedGate(s, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
+        const q = await claimQueuedRow(s);
+        // The approval vanishes then returns RESTAMPED — §4.3 requires a
+        // re-approval to write a fresh approvedAt.
+        await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop" = ${s}`;
+        await seedGate(s, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
+        await db.$executeRaw`
+          UPDATE "ShippingExecuteApproval" SET "approvedAt" = ${naive("2031-03-03T00:00:00Z")}
+          WHERE "shop" = ${s}`;
+        const admin = fakeAdmin({}, { srcId: q.secondaryId, priId: q.primaryId, cancelledAt: q.cancelledAt });
+        const reports = await scan([s], { adminFactory: async () => admin as any, sessionLoader: usableSession });
+        expect(reports[0].dueRowsExamined).toBe(1);
+        const row = await refundRow(s, q.secondaryId);
+        expect(row.status).toBe("ABORTED");
+        expect(row.reasonCode).toBe("GATE_CHANGED");
+        expect(String(row.reviewReason).toLowerCase()).toMatch(/approval|gate/);
+        // The evaluation's Shopify READS are spent before the lease-fenced
+        // freeze gate recheck aborts — that ordering is the existing design
+        // (the recheck is the fail-closed authority at write time). Zero
+        // mutations, and the row never reached PREPARED: no frozen columns,
+        // no dispatch fields, no DISPATCHING event.
+        expect(admin.calls.length).toBeGreaterThan(0);
+        expect(admin.calls.every((c) => !/\bmutation\b/.test(c.query))).toBe(true);
+        expect(row.wireHash).toBeNull();
+        expect(row.dispatchedAt).toBeNull();
+        expect(row.dispatchToken).toBeNull();
+        expect(row.refundId).toBeNull();
+        const ev = await eventsFor(q.rowId);
+        expect(ev.map((e) => `${e.fromStatus}->${e.toStatus}`)).toEqual([
+          "null->QUEUED",
+          "QUEUED->ABORTED",
+        ]);
+      });
+
+      it("gate restored with the EXACT original approval: the row proceeds normally (no false terminalisation)", async () => {
+        const s = uniqueShop();
+        await seedGate(s, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
+        const q = await claimQueuedRow(s);
+        const admin = fakeAdmin({}, { srcId: q.secondaryId, priId: q.primaryId, cancelledAt: q.cancelledAt });
+        await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop" = ${s}`;
+        const closed = await scan([s], { adminFactory: async () => admin as any, sessionLoader: usableSession });
+        expect(closed[0].stoppedBy).toBe("gate:APPROVAL_MISSING");
+        // Restore the identical stamp/epoch/ack — the gate reopens and the
+        // row's snapshot still equals the live gate.
+        await seedGate(s, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
+        const reports = await scan([s], { adminFactory: async () => admin as any, sessionLoader: usableSession });
+        expect(reports[0].gateOpen).toBe(true);
+        const row = await refundRow(s, q.secondaryId);
+        expect(row.status).toBe("PREPARED");
+        expect(row.wireHash).toMatch(/^[0-9a-f]{64}$/);
+        const ev = await eventsFor(q.rowId);
+        expect(ev.map((e) => `${e.fromStatus}->${e.toStatus}`)).toEqual([
+          "null->QUEUED",
+          "QUEUED->PREPARED",
+        ]);
+      });
+
+      it("a QUEUED row past the seven-day horizon is untouched while the gate is closed, then aborts at the next scan's lease", async () => {
+        const s = uniqueShop();
+        await seedGate(s, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
+        const wall = await dbWall();
+        const q = await claimQueuedRow(s, new Date(wall.getTime() - 8 * 24 * 3600e3).toISOString());
+        const admin = fakeAdmin({}, { srcId: q.secondaryId, priId: q.primaryId, cancelledAt: q.cancelledAt });
+        await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop" = ${s}`;
+        const closed = await scan([s], { adminFactory: async () => admin as any, sessionLoader: usableSession });
+        expect(closed[0].stoppedBy).toBe("gate:APPROVAL_MISSING");
+        // §7.3/§7.6 stated behaviour — and a documented liveness
+        // limitation, not a safety defect: while the gate stays closed the
+        // expired-horizon row is never even leased, so it sits QUEUED past
+        // its horizon until the gate reopens.
+        expect((await refundRow(s, q.secondaryId)).status).toBe("QUEUED");
+        await seedGate(s, { dispatchEnabled: true, dispatchEnabledAt: EPOCH });
+        const reports = await scan([s], { adminFactory: async () => admin as any, sessionLoader: usableSession });
+        expect(reports[0].dueRowsExamined).toBe(1);
+        expect(reports[0].outcomes["LEASE:HORIZON_EXPIRED"]).toBe(1);
+        const row = await refundRow(s, q.secondaryId);
+        expect(row.status).toBe("ABORTED");
+        expect(row.reasonCode).toBe("HORIZON_EXPIRED");
+        expect(admin.calls.length).toBe(0); // the lease abort is DB-only
+      });
+    });
   },
 );
