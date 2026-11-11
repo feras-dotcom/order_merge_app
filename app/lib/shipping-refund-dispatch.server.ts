@@ -355,15 +355,21 @@ const MISSING_APPROVAL_DETAIL = "the shop's execution approval row is missing";
 const safeIso = (d: Date): string =>
   Number.isFinite(d.getTime()) ? d.toISOString() : "invalid";
 
-/** §4.4 approval-validity gate closure: a non-null detail exactly when the
- *  live approval state guarantees T3's gate recheck aborts GATE_CHANGED —
- *  a missing, revoked, restamped (new approvedAt) or re-scoped
- *  (opt-in epoch / ackVersion) approval, or a Settings opt-in epoch the
- *  approval no longer matches. Every condition is monotonic — a recreated
- *  approval carries a fresh approvedAt and still fails the snapshot — so
- *  this unlocked read needs no lock. Instants compare by millisecond;
- *  every detail names "approval" and stays far under the 2000-char
- *  reviewReason bound. Exported for the pure unit tests. */
+/** §4.4 approval-validity gate closure: a pure classifier of the approval
+ *  and Settings state PASSED TO IT. It returns a non-null detail when that
+ *  state is a gate closure — a missing, revoked, restamped (approvedAt
+ *  differs from the row snapshot) or re-scoped (opt-in epoch / ackVersion)
+ *  approval, or a Settings opt-in epoch the approval no longer matches —
+ *  and null otherwise. It says nothing about whether that state is still
+ *  current: a closure observed on an unlocked read is only preliminary,
+ *  because the approval can later be restored to the row's exact snapshot
+ *  (which a fresh T3 would accept). Only the result computed inside
+ *  abortPreparedOnApprovalClosure, under its locks and in the same
+ *  transaction as the abort write, may authorize a durable abort; a
+ *  preliminary result must never independently terminalize a row.
+ *  Instants compare by millisecond; every detail names "approval" and
+ *  stays far under the 2000-char reviewReason bound. Exported for the pure
+ *  unit tests. */
 export function approvalGateClosure(
   approval: ApprovalGateState | null | undefined,
   snapshot: ApprovalGateSnapshot,
@@ -398,12 +404,12 @@ export function approvalGateClosure(
  *  approval-validity gate closure, breaker, shop and global caps,
  *  per-refund cap, currency pin and the recorded hash approval. Returns
  *  WAIT for every capacity condition (the row waits, never aborts, never
- *  consumes attempts) and ABORT for the seven-day horizon or an approval
- *  state whose gate recheck T3 guarantees to abort GATE_CHANGED — the
- *  approval check runs before the capacity checks so no capacity WAIT
- *  (e.g. dailyCap 0 on a missing row) can mask the abort until the
- *  horizon. An existing, unchanged approval without a hash approval still
- *  waits HASH_APPROVAL_MISSING.
+ *  consumes attempts) and ABORT for the seven-day horizon, or a
+ *  preliminary GATE_CHANGED when the approval state it reads is a gate
+ *  closure — the approval check runs before the capacity checks so no
+ *  capacity WAIT (e.g. dailyCap 0 on a missing row) can mask the closure
+ *  until the horizon. An existing, unchanged approval without a hash
+ *  approval still waits HASH_APPROVAL_MISSING.
  *
  *  The GATE_CHANGED abort is a preliminary, non-durable observation made
  *  on an unlocked read: between this transaction and the abort write the
