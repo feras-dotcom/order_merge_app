@@ -218,7 +218,11 @@ export type CapacityWait =
 export type CapacityPrecheckResult =
   | { readonly proceed: true }
   | { readonly wait: true; readonly reason: CapacityWait }
-  | { readonly abort: true; readonly reason: "HORIZON_EXPIRED" };
+  | {
+      readonly abort: true;
+      readonly reason: "HORIZON_EXPIRED" | "GATE_CHANGED";
+      readonly detail: string;
+    };
 
 /** Trailing-24h dispatch count (a dispatch is a row whose dispatchedAt is
  *  set — the write-ahead record, not a completed refund). */
@@ -323,12 +327,96 @@ export function loadPreparedHead(rowId: string, db: PrismaClient = defaultDb) {
 const MINOR_FORMAT = /^[1-9][0-9]{0,39}$/;
 const CAP_FORMAT = /^(0|[1-9][0-9]{0,39})$/;
 
+/** The approval fields the closure decision reads (4.4): everything else
+ *  (caps, currency, autoApprove) is capacity data, not validity. */
+interface ApprovalGateState {
+  readonly approvedAt: Date;
+  readonly revokedAt: Date | null;
+  readonly merchantOptInEpoch: Date;
+  readonly ackVersion: string;
+}
+
+interface ApprovalGateRow extends ApprovalGateState {
+  readonly dailyCap: number;
+  readonly currencyCode: string;
+  readonly maxRefundMinor: string;
+  readonly autoApprove: boolean;
+}
+
+/** The row's stored snapshot fields the closure compares (4.4). */
+interface ApprovalGateSnapshot {
+  readonly approvalApprovedAt: Date;
+  readonly approvalOptInEpoch: Date;
+  readonly approvalAckVersion: string;
+}
+
+const MISSING_APPROVAL_DETAIL = "the shop's execution approval row is missing";
+
+const safeIso = (d: Date): string =>
+  Number.isFinite(d.getTime()) ? d.toISOString() : "invalid";
+
+/** §4.4 approval-validity gate closure: a pure classifier of the approval
+ *  and Settings state PASSED TO IT. It returns a non-null detail when that
+ *  state is a gate closure — a missing, revoked, restamped (approvedAt
+ *  differs from the row snapshot) or re-scoped (opt-in epoch / ackVersion)
+ *  approval, or a Settings opt-in epoch the approval no longer matches —
+ *  and null otherwise. It says nothing about whether that state is still
+ *  current: a closure observed on an unlocked read is only preliminary,
+ *  because the approval can later be restored to the row's exact snapshot
+ *  (which a fresh T3 would accept). Only the result computed inside
+ *  abortPreparedOnApprovalClosure, under its locks and in the same
+ *  transaction as the abort write, may authorize a durable abort; a
+ *  preliminary result must never independently terminalize a row.
+ *  Instants compare by millisecond; every detail names "approval" and
+ *  stays far under the 2000-char reviewReason bound. Exported for the pure
+ *  unit tests. */
+export function approvalGateClosure(
+  approval: ApprovalGateState | null | undefined,
+  snapshot: ApprovalGateSnapshot,
+  settingsEpoch: Date | null | undefined,
+): string | null {
+  if (approval == null) return MISSING_APPROVAL_DETAIL;
+  if (approval.revokedAt !== null) {
+    return "the shop's execution approval is revoked (revokedAt is set)";
+  }
+  if (approval.approvedAt.getTime() !== snapshot.approvalApprovedAt.getTime()) {
+    return `approval restamped: approvedAt ${safeIso(approval.approvedAt)} differs from the snapshot ${safeIso(snapshot.approvalApprovedAt)}`;
+  }
+  if (approval.merchantOptInEpoch.getTime() !== snapshot.approvalOptInEpoch.getTime()) {
+    return `approval merchantOptInEpoch ${safeIso(approval.merchantOptInEpoch)} differs from the snapshot ${safeIso(snapshot.approvalOptInEpoch)}`;
+  }
+  if (approval.ackVersion !== snapshot.approvalAckVersion) {
+    return `approval ackVersion ${JSON.stringify(approval.ackVersion)} differs from the snapshot ${JSON.stringify(snapshot.approvalAckVersion)}`;
+  }
+  if (approval.ackVersion !== REQUIRED_ACK_VERSION) {
+    return `approval ackVersion ${JSON.stringify(approval.ackVersion)} does not equal REQUIRED_ACK_VERSION ${JSON.stringify(REQUIRED_ACK_VERSION)}`;
+  }
+  if (
+    !(settingsEpoch instanceof Date) ||
+    settingsEpoch.getTime() !== approval.merchantOptInEpoch.getTime()
+  ) {
+    return `approval merchantOptInEpoch ${safeIso(approval.merchantOptInEpoch)} differs from the live Settings opt-in epoch ${settingsEpoch instanceof Date ? safeIso(settingsEpoch) : "missing"}`;
+  }
+  return null;
+}
+
 /** The post-freeze capacity precheck (9.1): DB reads only — horizon,
- *  breaker, shop and global caps, per-refund cap, currency pin and the
- *  recorded hash approval. Returns WAIT for every capacity condition (the
- *  row waits, never aborts, never consumes attempts) and ABORT only for
- *  the seven-day horizon. Approval-row validity itself is a gate matter
- *  re-checked inside T3; a missing row or missing hash waits. */
+ *  approval-validity gate closure, breaker, shop and global caps,
+ *  per-refund cap, currency pin and the recorded hash approval. Returns
+ *  WAIT for every capacity condition (the row waits, never aborts, never
+ *  consumes attempts) and ABORT for the seven-day horizon, or a
+ *  preliminary GATE_CHANGED when the approval state it reads is a gate
+ *  closure — the approval check runs before the capacity checks so no
+ *  capacity WAIT (e.g. dailyCap 0 on a missing row) can mask the closure
+ *  until the horizon. An existing, unchanged approval without a hash
+ *  approval still waits HASH_APPROVAL_MISSING.
+ *
+ *  The GATE_CHANGED abort is a preliminary, non-durable observation made
+ *  on an unlocked read: between this transaction and the abort write the
+ *  approval could be restored to the row's exact snapshot, making a fresh
+ *  T3 accept the row. The worker must therefore settle it through
+ *  abortPreparedOnApprovalClosure, which re-decides under the §4.10 locks
+ *  in the same transaction as the abort write. */
 export async function preparedCapacityPrecheck(
   rowId: string,
   db: PrismaClient = defaultDb,
@@ -341,21 +429,36 @@ export async function preparedCapacityPrecheck(
       SELECT ("sourceCancelledAt" IS NULL
               OR ${HORIZON_EXPIRED_PREDICATE(DB_WALL)}) AS "expired"
       FROM "ShippingRefund" WHERE "id" = ${rowId}`;
-    if (hz.expired) return { abort: true, reason: "HORIZON_EXPIRED" };
+    if (hz.expired) {
+      return {
+        abort: true,
+        reason: "HORIZON_EXPIRED",
+        detail: "seven-day horizon passed at the capacity precheck",
+      };
+    }
+    const [ap] = await tx.$queryRaw<ApprovalGateRow[]>`
+      SELECT "approvedAt", "revokedAt", "merchantOptInEpoch", "ackVersion",
+             "dailyCap", "currencyCode", "maxRefundMinor", "autoApprove"
+      FROM "ShippingExecuteApproval" WHERE "shop" = ${h.shop}`;
+    const [st] = await tx.$queryRaw<{ shippingAdjustmentEnabledAt: Date | null }[]>`
+      SELECT "shippingAdjustmentEnabledAt" FROM "Settings" WHERE "shop" = ${h.shop}`;
+    const closure = approvalGateClosure(ap, h, st?.shippingAdjustmentEnabledAt ?? null);
+    if (closure !== null || !ap) {
+      return {
+        abort: true,
+        reason: "GATE_CHANGED",
+        detail: closure ?? MISSING_APPROVAL_DETAIL,
+      };
+    }
     const [ctl] = await tx.$queryRaw<{ globalDailyCap: number }[]>`
       SELECT "globalDailyCap" FROM "ShippingExecuteControl" WHERE "id" = 'control'`;
-    const [ap] = await tx.$queryRaw<
-      { dailyCap: number; currencyCode: string; maxRefundMinor: string; autoApprove: boolean }[]
-    >`SELECT "dailyCap", "currencyCode", "maxRefundMinor", "autoApprove"
-      FROM "ShippingExecuteApproval" WHERE "shop" = ${h.shop}`;
     if (await breakerTripped(tx)) return { wait: true, reason: "BREAKER_TRIPPED" };
-    if ((await countDispatches24h(tx, h.shop)) >= (ap?.dailyCap ?? 0)) {
+    if ((await countDispatches24h(tx, h.shop)) >= ap.dailyCap) {
       return { wait: true, reason: "SHOP_CAP_REACHED" };
     }
     if ((await countDispatches24h(tx, null)) >= (ctl?.globalDailyCap ?? 0)) {
       return { wait: true, reason: "GLOBAL_CAP_REACHED" };
     }
-    if (!ap) return { wait: true, reason: "HASH_APPROVAL_MISSING" };
     if (!ap.autoApprove && h.approvedWireHash !== h.wireHash) {
       return { wait: true, reason: "HASH_APPROVAL_MISSING" };
     }
@@ -375,6 +478,75 @@ export async function preparedCapacityPrecheck(
       return { wait: true, reason: "PER_REFUND_CAP" };
     }
     return { proceed: true };
+  });
+}
+
+/** The authoritative settle for a preliminary GATE_CHANGED precheck abort
+ *  (9.1/4.4): re-decides the approval-validity closure and performs the
+ *  ABORTED write in ONE withOwnershipTx transaction, so a snapshot-equal
+ *  approval restored between the precheck's unlocked read and this call
+ *  wins — { aborted: false }, no write, the row continues normally. Lock
+ *  order is a subsequence of §4.10: row FOR UPDATE → Settings FOR SHARE →
+ *  control FOR UPDATE (serializes against T3's control FOR UPDATE, the
+ *  approval setter's control FOR SHARE and admission claims) →
+ *  LOCK TABLE "ShippingExecuteApproval" IN SHARE ROW EXCLUSIVE MODE. The
+ *  table lock is REQUIRED: a row lock cannot protect an ABSENT row from a
+ *  recreating INSERT, and operator/admin tooling writes the approval
+ *  outside the control lock. SHARE ROW EXCLUSIVE conflicts with every
+ *  INSERT/UPDATE/DELETE (ROW EXCLUSIVE) and with itself, but not with the
+ *  FOR SHARE reads T3/claim/freeze take — and it is requested only after
+ *  control FOR UPDATE is held, while every other approval writer takes at
+ *  most control FOR SHARE before it, so there is no new deadlock edge.
+ *  Ownership is validated before any decision: a stale or foreign lease
+ *  throws OwnershipLostError and writes nothing even when the approval is
+ *  provably closed. No Shopify call happens here — DB only. */
+export async function abortPreparedOnApprovalClosure(
+  rowId: string,
+  leaseToken: string,
+  db: PrismaClient = defaultDb,
+): Promise<{ aborted: true; detail: string } | { aborted: false }> {
+  return withOwnershipTx(db, async (tx) => {
+    await setActor(tx);
+    const [h] = await tx.$queryRawUnsafe<PreparedHead[]>(
+      `${PREPARED_HEAD_SQL} WHERE "id" = $1 FOR UPDATE`, rowId);
+    const [own] = await tx.$queryRaw<{ ok: boolean }[]>`
+      SELECT ("status" = 'PREPARED'
+              AND "dispatchedAt" IS NULL
+              AND "leaseToken" = ${leaseToken}
+              AND "leasedUntil" > ${DB_WALL}) AS "ok"
+      FROM "ShippingRefund" WHERE "id" = ${rowId}`;
+    if (!h || own?.ok !== true) {
+      throw new OwnershipLostError(`shipping-refund lease lost for row ${rowId}`);
+    }
+    await tx.$queryRaw<{ shop: string }[]>`
+      SELECT "shop" FROM "Settings" WHERE "shop" = ${h.shop} FOR SHARE`;
+    await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "ShippingExecuteControl" WHERE "id" = 'control' FOR UPDATE`;
+    await tx.$executeRaw`LOCK TABLE "ShippingExecuteApproval" IN SHARE ROW EXCLUSIVE MODE`;
+    // Locked section: every statement re-reads under READ COMMITTED, so the
+    // approval and Settings values seen are as-of the locks held above.
+    const [ap] = await tx.$queryRaw<ApprovalGateState[]>`
+      SELECT "approvedAt", "revokedAt", "merchantOptInEpoch", "ackVersion"
+      FROM "ShippingExecuteApproval" WHERE "shop" = ${h.shop}`;
+    const [st] = await tx.$queryRaw<{ shippingAdjustmentEnabledAt: Date | null }[]>`
+      SELECT "shippingAdjustmentEnabledAt" FROM "Settings" WHERE "shop" = ${h.shop}`;
+    const detail = approvalGateClosure(ap, h, st?.shippingAdjustmentEnabledAt ?? null);
+    if (detail === null) return { aborted: false } as const;
+    const written = await tx.$executeRaw`
+      UPDATE "ShippingRefund" SET
+        "status" = 'ABORTED', "reasonCode" = 'GATE_CHANGED',
+        "reviewReason" = ${detail.slice(0, 2000)},
+        "leaseToken" = NULL, "leasedUntil" = NULL, "nextCheckAt" = NULL,
+        "updatedAt" = ${DB_WALL}
+      WHERE "id" = ${rowId}
+        AND "status" = 'PREPARED'
+        AND "dispatchedAt" IS NULL
+        AND "leaseToken" = ${leaseToken}
+        AND "leasedUntil" > ${DB_WALL}`;
+    if (written !== 1) {
+      throw new OwnershipLostError(`shipping-refund lease lost for row ${rowId}`);
+    }
+    return { aborted: true, detail } as const;
   });
 }
 

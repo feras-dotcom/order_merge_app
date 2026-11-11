@@ -10,10 +10,22 @@
 //   MERGESHIP_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:PORT/mergeship_test_x \
 //   MERGESHIP_SHADOW_TOKEN=<token> npx vitest run tests/shipping-refund-capacity-pg.test.ts
 //
-// Wait ordering (both prechecks): breaker -> shop 24h cap -> global 24h
-// cap -> approval presence/hash -> currency -> cap formats -> per-refund
-// cap. Every wait needs prior dispatched rows RESOLVED first (the breaker
-// is global and checked first), and a resolved row's dispatchedAt still
+// Ordering (preparedCapacityPrecheck): horizon abort -> approval-validity
+// gate-closure abort (§4.4: a missing, revoked, restamped or re-scoped
+// approval, or a Settings opt-in epoch the approval no longer matches —
+// every condition under which T3's gate recheck is guaranteed to abort
+// GATE_CHANGED) -> breaker -> shop 24h cap -> global 24h cap -> hash
+// approval -> currency -> cap formats -> per-refund cap. The approval
+// check precedes every capacity check so no WAIT (e.g. dailyCap 0 on a
+// missing row) can mask the abort until the seven-day horizon.
+// prefreezeCapacityPrecheck consults only the breaker and the daily caps —
+// approval presence/revocation is never read there; a missing approval
+// waits SHOP_CAP_REACHED (dailyCap defaults to 0), reachable only inside
+// the post-advisory-gate race window since the scanner's E4 check stops
+// the shop first, and the freeze's lease-fenced gate recheck is the
+// fail-closed abort authority.
+// Every wait needs prior dispatched rows RESOLVED first (the breaker is
+// global and checked first), and a resolved row's dispatchedAt still
 // counts toward the trailing-24h caps.
 //
 // COVERAGE NOTES:
@@ -39,6 +51,8 @@ import {
 } from "../app/lib/shipping-refund-dispatch.server";
 import { runShippingRefundDispatchCycle } from "../app/lib/shipping-refund-worker.server";
 import { runShippingRefundAdmissionScan } from "../app/lib/shipping-refund-admission.server";
+import { writePreparedR2Outcome } from "../app/lib/shipping-refund-store.server";
+import { OwnershipLostError } from "../app/lib/ownership.server";
 import {
   r2HappyAdmin,
   r2RoutingAdmin,
@@ -149,6 +163,8 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
           reviewReason: string | null;
           attempts: number;
           nextCheckAt: Date | null;
+          leaseToken: string | null;
+          leasedUntil: Date | null;
           dispatchedAt: Date | null;
           dispatchToken: string | null;
           refundId: string | null;
@@ -162,6 +178,7 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
           currencyCode: string | null;
         }[]
       >`SELECT "status","reasonCode","reviewReason","attempts","nextCheckAt",
+               "leaseToken","leasedUntil",
                "dispatchedAt","dispatchToken","refundId",
                "wireVariables"::text AS "wireVariables","wireHash","idempotencyKey",
                "marker","documentSha256","mutationVersion","plannedShippingMinor",
@@ -430,39 +447,25 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
     await expectWait(seeded, "HASH_APPROVAL_MISSING");
   });
 
-  // CANDIDATE DEFECT (reviewer-confirmed; do NOT fix here): the design
-  // intends a missing approval row to classify HASH_APPROVAL_MISSING —
-  // the code even carries `if (!ap) return { wait: true, reason:
-  // "HASH_APPROVAL_MISSING" }` — but the earlier shop-cap check reads
-  // `ap?.dailyCap ?? 0` = 0 and `count >= 0` is always true, so
-  // SHOP_CAP_REACHED fires first at BOTH prechecks AND inside T3's wait
-  // path: the dedicated branch is unreachable and the worker's capacity
-  // precheck reports the WAIT before the GATE_CLOSED-on-approval gate-
-  // recheck abort can ever be reached — so the designed gate-change
-  // abort can be delayed until the seven-day horizon expires the row.
-  // No unauthorized-refund bypass was demonstrated (every path still
-  // waits with zero sends); the wrong classification needs a separate
-  // production fix and independent review. it.fails documents the
-  // designed verdict as a live tripwire.
-  it.fails("a deleted approval row should wait HASH_APPROVAL_MISSING (currently reports SHOP_CAP_REACHED)", async () => {
-    const s = shop();
-    const seeded = await seedScenario(s, { gate: { autoApprove: true } });
-    await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop"=${s}`;
-    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toEqual({
-      wait: true,
-      reason: "HASH_APPROVAL_MISSING",
-    });
-  });
-
-  it("a deleted approval row still waits (never sends) — SHOP_CAP_REACHED is the observed reason today", async () => {
+  // §4.4/§9.1: a deleted approval row is a gate closure, not a capacity
+  // condition. The precheck's approval-validity check runs BEFORE the
+  // shop-cap check — whose `dailyCap ?? 0` fallback would otherwise read
+  // 0 and mask the abort as SHOP_CAP_REACHED until the horizon — and
+  // aborts GATE_CHANGED. T3's own gate recheck reaches the identical
+  // verdict, so the precheck abort never outruns what T3 would accept.
+  it("a deleted approval row aborts GATE_CHANGED at the precheck — and T3 agrees", async () => {
     const s = shop();
     const seeded = await seedScenario(s, { gate: { autoApprove: true } });
     const leaseToken = await lease(seeded.row.id);
     const before = await rowSnapshot(seeded.row.id);
     await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop"=${s}`;
-    // The precheck waits (SHOP_CAP_REACHED — see the it.fails defect
-    // marker above); inside T3 the missing approval is a gate closure.
-    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({ wait: true });
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({
+      abort: true,
+      reason: "GATE_CHANGED",
+      detail: expect.stringContaining("approval"),
+    });
+    // The precheck itself writes nothing; the still-PREPARED row under the
+    // live lease proves the same verdict inside T3's gate recheck.
     const t3 = await openDispatchGate(seeded.row.id, leaseToken, {}, db);
     expect(t3).toEqual({ kind: "ABORTED", reasonCode: "GATE_CHANGED" });
     const after = await rowSnapshot(seeded.row.id);
@@ -556,14 +559,57 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
       approvalCurrency: "EUR",
       dailyCap: 1_000_000,
     });
-    // autoApprove=false, maxRefundMinor='0', currency mismatch — all
-    // post-freeze concerns the pre-freeze precheck must NOT consult. With
-    // a high dailyCap and no breaker it still proceeds.
+    // autoApprove=false (and no approvedWireHash — a valid approval WITHOUT
+    // a hash approval still proceeds: a QUEUED row never needs a hash),
+    // maxRefundMinor='0', currency mismatch — all post-freeze concerns the
+    // pre-freeze precheck must NOT consult. With a high dailyCap and no
+    // breaker it still proceeds.
     expect(await prefreezeCapacityPrecheck(s, db)).toEqual({ proceed: true });
     // No approval row at all means dailyCap defaults to 0 (§4.6): the
     // shop-cap check legitimately waits — approval presence itself is a
-    // post-freeze/gate matter, not consulted here.
+    // post-freeze/gate matter, not consulted here. This path is reachable
+    // only in the sub-second race between the admission scan's advisory
+    // gate read and Part A's freeze: with no approval the scanner's E4
+    // check stops the shop first (§7.3 step 1 "write nothing"), so in
+    // practice the row simply waits and its lease is released unwritten.
     await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop"=${s}`;
+    expect(await prefreezeCapacityPrecheck(s, db)).toEqual({
+      wait: true,
+      reason: "SHOP_CAP_REACHED",
+    });
+    // A revoked approval is likewise only a gate matter at this stage: the
+    // precheck consults dailyCap alone, so a high-cap revoked row still
+    // proceeds and a tripped breaker still waits — the freeze's
+    // lease-fenced gate recheck is the fail-closed authority that settles
+    // it ABORTED(GATE_CHANGED).
+    await seedShippingR2Gate(db, s, { autoApprove: true, dailyCap: 1_000_000 });
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "revokedAt"=${naive("2030-01-07T00:00:00Z")} WHERE "shop"=${s}`;
+    expect(await prefreezeCapacityPrecheck(s, db)).toEqual({ proceed: true });
+    const blockerId = await dispatchedBlocker(shop(), "DISPATCHING");
+    try {
+      expect(await prefreezeCapacityPrecheck(s, db)).toEqual({
+        wait: true,
+        reason: "BREAKER_TRIPPED",
+      });
+    } finally {
+      await resolveInflightDispatches();
+    }
+    expect(blockerId).toBeTruthy();
+    // With a live, unrevoked approval the breaker and caps apply normally:
+    // valid approval + tripped breaker waits BREAKER_TRIPPED…
+    await seedShippingR2Gate(db, s, { autoApprove: true, dailyCap: 1_000_000 });
+    const blocker2 = await dispatchedBlocker(shop(), "DISPATCHING");
+    try {
+      expect(await prefreezeCapacityPrecheck(s, db)).toEqual({
+        wait: true,
+        reason: "BREAKER_TRIPPED",
+      });
+    } finally {
+      await resolveInflightDispatches();
+    }
+    expect(blocker2).toBeTruthy();
+    // …and a valid approval with dailyCap 0 waits SHOP_CAP_REACHED.
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "dailyCap"=0 WHERE "shop"=${s}`;
     expect(await prefreezeCapacityPrecheck(s, db)).toEqual({
       wait: true,
       reason: "SHOP_CAP_REACHED",
@@ -584,6 +630,255 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
       wait: true,
       reason: "GLOBAL_CAP_REACHED",
     });
+  });
+
+  // ── 6b. Approval-validity gate closures at the capacity precheck ─────
+  // §4.4/§9.1: a missing, revoked, restamped or re-scoped approval is a
+  // gate closure T3's recheck guarantees to abort GATE_CHANGED — so the
+  // precheck aborts it BEFORE any capacity check can mask it as a WAIT.
+  // The worker then settles the row through abortPreparedOnApprovalClosure
+  // — which re-decides under the §4.10 locks in the same transaction as
+  // the abort write — with zero Shopify calls.
+
+  const mutateApproval = {
+    deleted: (s: string) =>
+      db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop"=${s}`,
+    revoked: (s: string) =>
+      db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "revokedAt"=${naive("2030-01-07T00:00:00Z")} WHERE "shop"=${s}`,
+    restamped: (s: string) =>
+      db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "approvedAt"=${naive("2030-01-07T00:00:00Z")} WHERE "shop"=${s}`,
+  } as const;
+
+  /** The durable ABORTED(GATE_CHANGED) state after a precheck-driven
+   *  abort: reason/review detail recorded, lease and schedule cleared,
+   *  frozen columns and attempts untouched, zero dispatch evidence and
+   *  zero DISPATCHING events for the row. */
+  const expectGateChangedAbort = async (
+    id: string,
+    before: Awaited<ReturnType<typeof rowSnapshot>>,
+  ) => {
+    const after = await rowSnapshot(id);
+    expect(after.status).toBe("ABORTED");
+    expect(after.reasonCode).toBe("GATE_CHANGED");
+    expect(after.reviewReason).toContain("approval");
+    expect(after.leaseToken).toBeNull();
+    expect(after.leasedUntil).toBeNull();
+    expect(after.nextCheckAt).toBeNull();
+    expectUntouched(before, after);
+    const events = await db.$queryRaw<{ toStatus: string }[]>`
+      SELECT "toStatus" FROM "ShippingRefundEvent" WHERE "shippingRefundId"=${id}`;
+    expect(events.map((e) => e.toStatus)).not.toContain("DISPATCHING");
+    return after;
+  };
+
+  it.each(["deleted", "revoked", "restamped"] as const)(
+    "an approval %s after PREPARED aborts GATE_CHANGED at the precheck and in the cycle — zero Shopify calls",
+    async (kind) => {
+      const s = shop();
+      const seeded = await seedScenario(s, { gate: { autoApprove: true } });
+      const before = await rowSnapshot(seeded.row.id);
+      await mutateApproval[kind](s);
+      expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({
+        abort: true,
+        reason: "GATE_CHANGED",
+        detail: expect.stringContaining("approval"),
+      });
+      const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+      const report = await runCycle(admin.admin);
+      expect(report.outcomes["ABORTED:GATE_CHANGED"]).toBe(1);
+      expect(admin.allCalls()).toBe(0);
+      expect(admin.mutationCalls()).toBe(0);
+      await expectGateChangedAbort(seeded.row.id, before);
+    },
+  );
+
+  it.each(["deleted", "revoked", "restamped"] as const)(
+    "an approval %s after PREPARED is not masked by a zero shop cap",
+    async (kind) => {
+      const s = shop();
+      const seeded = await seedScenario(s, {
+        gate: { autoApprove: true, dailyCap: 1_000_000 },
+      });
+      const before = await rowSnapshot(seeded.row.id);
+      await mutateApproval[kind](s);
+      // The capacity blocker the old ordering would have reported first
+      // (`ap?.dailyCap ?? 0` — always true at cap 0).
+      await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "dailyCap"=0 WHERE "shop"=${s}`;
+      expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({
+        abort: true,
+        reason: "GATE_CHANGED",
+      });
+      const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+      const report = await runCycle(admin.admin);
+      expect(report.outcomes["ABORTED:GATE_CHANGED"]).toBe(1);
+      expect(admin.allCalls()).toBe(0);
+      await expectGateChangedAbort(seeded.row.id, before);
+    },
+  );
+
+  it.each(["deleted", "revoked", "restamped"] as const)(
+    "an approval %s after PREPARED is not masked by a tripped breaker",
+    async (kind) => {
+      const s = shop();
+      const seeded = await seedScenario(s, { gate: { autoApprove: true } });
+      const blockerId = await dispatchedBlocker(shop(), "DISPATCHING");
+      try {
+        const before = await rowSnapshot(seeded.row.id);
+        await mutateApproval[kind](s);
+        expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({
+          abort: true,
+          reason: "GATE_CHANGED",
+        });
+        const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+        const report = await runCycle(admin.admin);
+        expect(report.outcomes["ABORTED:GATE_CHANGED"]).toBe(1);
+        expect(admin.allCalls()).toBe(0);
+        await expectGateChangedAbort(seeded.row.id, before);
+      } finally {
+        await resolveInflightDispatches();
+      }
+      expect(blockerId).toBeTruthy();
+    },
+  );
+
+  it("a changed approval ackVersion aborts GATE_CHANGED at the precheck and in the cycle", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, { gate: { autoApprove: true } });
+    const before = await rowSnapshot(seeded.row.id);
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "ackVersion"='v2' WHERE "shop"=${s}`;
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({
+      abort: true,
+      reason: "GATE_CHANGED",
+      detail: expect.stringContaining("approval"),
+    });
+    const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+    const report = await runCycle(admin.admin);
+    expect(report.outcomes["ABORTED:GATE_CHANGED"]).toBe(1);
+    expect(admin.allCalls()).toBe(0);
+    await expectGateChangedAbort(seeded.row.id, before);
+  });
+
+  it("an approval merchantOptInEpoch that no longer matches the Settings epoch aborts GATE_CHANGED", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, { gate: { autoApprove: true } });
+    const before = await rowSnapshot(seeded.row.id);
+    // The approval still names the epoch it was granted under; the live
+    // Settings epoch is E1 — a re-scoped approval is a gate closure.
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "merchantOptInEpoch"=${naive("2030-01-02T00:00:00Z")} WHERE "shop"=${s}`;
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({
+      abort: true,
+      reason: "GATE_CHANGED",
+      detail: expect.stringContaining("approval"),
+    });
+    const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+    const report = await runCycle(admin.admin);
+    expect(report.outcomes["ABORTED:GATE_CHANGED"]).toBe(1);
+    expect(admin.allCalls()).toBe(0);
+    await expectGateChangedAbort(seeded.row.id, before);
+  });
+
+  it("a Settings opt-in epoch the approval no longer matches aborts GATE_CHANGED", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, { gate: { autoApprove: true } });
+    const before = await rowSnapshot(seeded.row.id);
+    await db.$executeRaw`UPDATE "Settings" SET "shippingAdjustmentEnabledAt"=${naive("2030-01-02T00:00:00Z")} WHERE "shop"=${s}`;
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toMatchObject({
+      abort: true,
+      reason: "GATE_CHANGED",
+      detail: expect.stringContaining("approval"),
+    });
+    const admin = r2HappyAdmin(seeded.ev, refundGid(++seq));
+    const report = await runCycle(admin.admin);
+    expect(report.outcomes["ABORTED:GATE_CHANGED"]).toBe(1);
+    expect(admin.allCalls()).toBe(0);
+    await expectGateChangedAbort(seeded.row.id, before);
+  });
+
+  it("the GATE_CHANGED abort write is lease-fenced — a stolen or expired lease writes nothing", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, { gate: { autoApprove: true } });
+    const leaseToken = await lease(seeded.row.id);
+    const before = await rowSnapshot(seeded.row.id);
+    await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop"=${s}`;
+    const outcome = {
+      toStatus: "ABORTED" as const,
+      reasonCode: "GATE_CHANGED",
+      reviewReason: "the shop's execution approval row is missing",
+    };
+    // A foreign token's abort write is refused.
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "leaseToken"='stolen',"leasedUntil"=clock_timestamp() AT TIME ZONE 'UTC' + interval '1 hour' WHERE "id"=${seeded.row.id}`;
+    await expect(
+      writePreparedR2Outcome(seeded.row.id, leaseToken, outcome, db),
+    ).rejects.toBeInstanceOf(OwnershipLostError);
+    // And an expired lease under the real token is refused too.
+    await db.$executeRaw`UPDATE "ShippingRefund" SET "leaseToken"=${leaseToken},"leasedUntil"=${naive("2020-01-01T00:00:00Z")} WHERE "id"=${seeded.row.id}`;
+    await expect(
+      writePreparedR2Outcome(seeded.row.id, leaseToken, outcome, db),
+    ).rejects.toBeInstanceOf(OwnershipLostError);
+    const after = await rowSnapshot(seeded.row.id);
+    expect(after.status).toBe("PREPARED");
+    expectUntouched(before, after);
+  });
+
+  it("a cap-only approval edit (no restamp) stays a capacity decision — never an abort", async () => {
+    const s = shop();
+    const seeded = await seedScenario(s, {
+      gate: { autoApprove: true, dailyCap: 1_000_000 },
+    });
+    // Cap edits alone never trip the approval-validity closure.
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "dailyCap"=0 WHERE "shop"=${s}`;
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toEqual({
+      wait: true,
+      reason: "SHOP_CAP_REACHED",
+    });
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "dailyCap"=1000000,"autoApprove"=false WHERE "shop"=${s}`;
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toEqual({
+      wait: true,
+      reason: "HASH_APPROVAL_MISSING",
+    });
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "autoApprove"=true,"currencyCode"='EUR' WHERE "shop"=${s}`;
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toEqual({
+      wait: true,
+      reason: "CURRENCY_MISMATCH",
+    });
+    await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "currencyCode"='USD',"maxRefundMinor"='399' WHERE "shop"=${s}`;
+    expect(await preparedCapacityPrecheck(seeded.row.id, db)).toEqual({
+      wait: true,
+      reason: "PER_REFUND_CAP",
+    });
+  });
+
+  it("the admission scan claims nothing for a shop with a missing or revoked approval — zero Shopify calls", async () => {
+    for (const setup of ["missing", "revoked"] as const) {
+      const s = shop();
+      await seedShippingR2Gate(db, s, { autoApprove: true });
+      const primaryId = oid(++seq);
+      const secondaryId = oid(++seq);
+      await seedShippingR2MergeOp(db, { shop: s, primaryId, secondaryId });
+      if (setup === "missing") {
+        await db.$executeRaw`DELETE FROM "ShippingExecuteApproval" WHERE "shop"=${s}`;
+      } else {
+        await db.$executeRaw`UPDATE "ShippingExecuteApproval" SET "revokedAt"=${naive("2030-01-07T00:00:00Z")} WHERE "shop"=${s}`;
+      }
+      const admin = r2RoutingAdmin({});
+      const reports = await runShippingRefundAdmissionScan(
+        [s],
+        {
+          adminFactory: async () => admin.admin,
+          sessionLoader: async () => ({ expires: new Date("2030-01-10T00:00:00Z") }),
+        },
+        db,
+      );
+      expect(reports[0].gateOpen).toBe(false);
+      expect(reports[0].stoppedBy).toBe(
+        setup === "missing" ? "gate:APPROVAL_MISSING" : "gate:APPROVAL_REVOKED",
+      );
+      expect(reports[0].claimed).toBe(0);
+      expect(admin.allCalls()).toBe(0);
+      const rows = await db.$queryRaw<{ status: string }[]>`
+        SELECT "status" FROM "ShippingRefund" WHERE "shop"=${s}`;
+      expect(rows).toEqual([]);
+    }
   });
 
   // ── 7. Waiting rows (§8.4 N5): waits never abort, never consume attempts ──
@@ -809,6 +1104,7 @@ describe.skipIf(!TEST_URL)("shipping-refund capacity & waiting (real disposable 
     expect(await preparedCapacityPrecheck(seeded2.row.id, db)).toEqual({
       abort: true,
       reason: "HORIZON_EXPIRED",
+      detail: "seven-day horizon passed at the capacity precheck",
     });
     // And inside T3 with a lease stamped directly (a lease acquired
     // before the boundary passed).
