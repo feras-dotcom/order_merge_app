@@ -1,0 +1,9 @@
+query EligibilityProjectionRead($ownerId: ID!) {
+  customer(id: $ownerId) {
+    metafield(namespace: "$app", key: "ship_elig") {
+      id
+      jsonValue
+      compareDigest
+    }
+  }
+}

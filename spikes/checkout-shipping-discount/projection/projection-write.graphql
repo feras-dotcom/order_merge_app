@@ -1,0 +1,6 @@
+mutation EligibilityProjectionWrite($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields { id }
+    userErrors { code field message elementIndex }
+  }
+}
