@@ -6,10 +6,10 @@ import { detectShippingDiscountGrant } from "../projection/grant";
 
 const Q_ORDER = `query O($id: ID!) { order(id: $id) {
   id name createdAt processedAt displayFinancialStatus
-  shippingLines { title originalPriceSet { shopMoney { amount currencyCode } }
+  shippingLines(first: 10) { nodes { title originalPriceSet { shopMoney { amount currencyCode } }
     discountedPriceSet { shopMoney { amount } }
-    discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { __typename targetType title } } }
-  discountApplications(first: 20) { nodes { __typename targetType title value { __typename ... on PricingPercentageValue { percentage } } } }
+    discountAllocations { allocatedAmountSet { shopMoney { amount } } discountApplication { __typename targetType ... on AutomaticDiscountApplication { title } } } } }
+  discountApplications(first: 20) { nodes { __typename targetType ... on AutomaticDiscountApplication { title } ... on DiscountCodeApplication { code } value { __typename ... on PricingPercentageValue { percentage } } } }
   customer { id }
 } }`;
 
@@ -30,9 +30,9 @@ async function main() {
 
   // adapt real JSON to detector facts
   const minor = (s: { shopMoney?: { amount?: string } } | undefined, cur: string) =>
-    BigInt(Math.round(parseFloat(s?.shopMoney?.amount ?? "0") * 100));
+    String(BigInt(Math.round(parseFloat(s?.shopMoney?.amount ?? "0") * 100)));
   const facts = {
-    shippingLines: ((order.shippingLines as unknown[]) ?? []).map((l) => {
+    shippingLines: (((order.shippingLines as { nodes?: unknown[] })?.nodes) ?? []).map((l) => {
       const line = l as { title?: unknown; originalPriceSet?: { shopMoney?: { amount?: string } }; discountedPriceSet?: { shopMoney?: { amount?: string } }; discountAllocations?: unknown[] };
       return {
         title: String(line.title ?? ""),
@@ -49,7 +49,7 @@ async function main() {
       return { targetType: ap.targetType ?? "", title: ap.title ?? null };
     }),
   };
-  const verdict = detectShippingDiscountGrant(facts as never, { titleToken: "MergeShip spike" });
+  const verdict = detectShippingDiscountGrant(facts as never, { titleToken: process.env.SPIKE_TITLE_TOKEN ?? "MergeShip spike: shipping discount" });
   saveEvidence("e6-order.json", { order, facts, verdict });
   console.log(JSON.stringify({ facts, verdict }, null, 1));
 }

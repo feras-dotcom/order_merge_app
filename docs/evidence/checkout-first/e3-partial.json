@@ -1,0 +1,59 @@
+{
+  "ts": "2026-11-12T14:51:34.321Z",
+  "steps": [
+    {
+      "step": "saved-address-collapsed",
+      "discounted": true
+    },
+    {
+      "step": "form-inputs",
+      "inputs": [
+        "shipping_methods|",
+        "shipping_methods|",
+        "marketing_opt_in|",
+        "billingAddress|",
+        "shop_pay_approval_id|off",
+        "reductions|on",
+        "firstName|shipping given-name",
+        "lastName|shipping family-name",
+        "address1|shipping address-line1",
+        "address2|shipping address-line2",
+        "city|shipping address-level2",
+        "postalCode|shipping postal-code",
+        "phone|shipping tel-national",
+        "default_address|",
+        "firstName|shipping given-name",
+        "lastName|shipping family-name",
+        "address1|shipping address-line1",
+        "address2|shipping address-line2",
+        "city|shipping address-level2",
+        "country|shipping country",
+        "zone|shipping address-level1",
+        "address-level1|shipping address-level1",
+        "province|shipping address-level1",
+        "postalCode|shipping postal-code",
+        "autofill_phone_capture|shipping tel-national"
+      ]
+    },
+    {
+      "step": "names-only",
+      "discounted": true
+    },
+    {
+      "step": "+address1",
+      "discounted": true
+    },
+    {
+      "step": "+address2+city",
+      "discounted": true
+    },
+    {
+      "step": "+province",
+      "discounted": true
+    },
+    {
+      "step": "+zip (key complete)",
+      "discounted": true
+    }
+  ]
+}

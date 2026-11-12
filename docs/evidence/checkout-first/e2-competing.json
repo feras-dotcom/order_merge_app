@@ -1,0 +1,20 @@
+{
+  "ts": "2026-11-12T14:45:22.118Z",
+  "tab1": {
+    "first": true,
+    "reload": true,
+    "lines": [
+      "Mon, Nov 16–Tue, Nov 17\n\n$15.00",
+      "Pay now\n$629.95"
+    ]
+  },
+  "tab2": {
+    "first": true,
+    "reload": true,
+    "lines": [
+      "Mon, Nov 16–Tue, Nov 17\n\n$15.00",
+      "Pay now\n$629.95"
+    ]
+  },
+  "bothShowed": true
+}

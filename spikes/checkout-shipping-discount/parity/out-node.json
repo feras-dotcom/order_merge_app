@@ -1,0 +1,540 @@
+{
+  "happy": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "guest-unauthenticated": {
+    "operations": []
+  },
+  "no-metafield": {
+    "operations": []
+  },
+  "metafield-garbage-string": {
+    "operations": []
+  },
+  "metafield-garbage-number": {
+    "operations": []
+  },
+  "metafield-garbage-array": {
+    "operations": []
+  },
+  "metafield-garbage-v2": {
+    "operations": []
+  },
+  "metafield-garbage-recs-not-array": {
+    "operations": []
+  },
+  "metafield-garbage-bad-rec": {
+    "operations": []
+  },
+  "metafield-garbage-json-string": {
+    "operations": []
+  },
+  "out-of-window": {
+    "operations": []
+  },
+  "exp-equals-date": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "exp-before-date": {
+    "operations": []
+  },
+  "left-zero": {
+    "operations": []
+  },
+  "win-mismatch": {
+    "operations": []
+  },
+  "currency-mismatch": {
+    "operations": []
+  },
+  "dest-zip-mismatch": {
+    "operations": []
+  },
+  "dest-city-mismatch": {
+    "operations": []
+  },
+  "dest-country-mismatch": {
+    "operations": []
+  },
+  "dest-street-mismatch": {
+    "operations": []
+  },
+  "dest-unit-mismatch": {
+    "operations": []
+  },
+  "dest-name-mismatch": {
+    "operations": []
+  },
+  "dest-company-mismatch": {
+    "operations": []
+  },
+  "street-punct-equal": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "norm-diacritics-sao-paulo": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "partial-addr-no-zip": {
+    "operations": []
+  },
+  "partial-addr-no-city": {
+    "operations": []
+  },
+  "partial-addr-no-country": {
+    "operations": []
+  },
+  "partial-addr-no-address1": {
+    "operations": []
+  },
+  "missing-province-ok": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "missing-province-wrong-slot": {
+    "operations": []
+  },
+  "method-mismatch-only": {
+    "operations": []
+  },
+  "method-match-among-others": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std2"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "pickup-same-title": {
+    "operations": []
+  },
+  "two-delivery-groups": {
+    "operations": []
+  },
+  "two-valid-recs-earliest-exp": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "h_a"
+                  }
+                },
+                {
+                  "deliveryOption": {
+                    "handle": "h_b"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "no-shipping-class": {
+    "operations": []
+  },
+  "bad-percentage-pct-0": {
+    "operations": []
+  },
+  "bad-percentage-pct-101": {
+    "operations": []
+  },
+  "bad-percentage-pct-abc": {
+    "operations": []
+  },
+  "bad-percentage-pct-neg": {
+    "operations": []
+  },
+  "bad-percentage-pct-num": {
+    "operations": []
+  },
+  "bad-percentage-pct-missing": {
+    "operations": []
+  },
+  "bad-config-v2": {
+    "operations": []
+  },
+  "missing-config": {
+    "operations": []
+  },
+  "probe-sao-paulo-nfc": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-sao-paulo-nfd": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-zurich": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-istanbul": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-cjk-tokyo": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-arabic-riyadh": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-cyrillic-moscow": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-emoji-city": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "probe-combining-only": {
+    "operations": []
+  },
+  "probe-long-city": {
+    "operations": [
+      {
+        "deliveryDiscountsAdd": {
+          "selectionStrategy": "ALL",
+          "candidates": [
+            {
+              "targets": [
+                {
+                  "deliveryOption": {
+                    "handle": "opt_std"
+                  }
+                }
+              ],
+              "value": {
+                "percentage": {
+                  "value": "100.0"
+                }
+              },
+              "message": "Free shipping — welcome back"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

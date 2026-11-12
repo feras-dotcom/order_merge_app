@@ -37,7 +37,7 @@ async function seedFor(email: string, addr: typeof TEST_ADDRESS, method: string,
 }
 
 async function clearFor(email: string) {
-  const find = await admin.graphql(`query F($q: String!) { customers(first: 1, query: $q) { nodes { id } } }`, { variables: { q: `email:${email}` } });
+  const find = await admin.graphql(`query F($q: String!) { customers(first: 1, query: $q) { nodes { id } } }`, { variables: { q: email.startsWith("gid://") ? `id:${email.split("/").pop()}` : `email:${email}` } });
   const cid = (find as { data: { customers: { nodes: { id: string }[] } } }).data.customers.nodes[0]?.id;
   if (cid) await writeProjection(admin, cid, () => ({ serialized: JSON.stringify({ recs: [], v: 1 }) }), { sleep: (ms) => new Promise((r) => setTimeout(r, ms)) });
 }

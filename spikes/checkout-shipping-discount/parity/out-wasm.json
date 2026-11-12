@@ -1,0 +1,705 @@
+{
+  "happy": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "guest-unauthenticated": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "no-metafield": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "metafield-garbage-string": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "metafield-garbage-number": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "metafield-garbage-array": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "metafield-garbage-v2": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "metafield-garbage-recs-not-array": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "metafield-garbage-bad-rec": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "metafield-garbage-json-string": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "out-of-window": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "exp-equals-date": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "exp-before-date": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "left-zero": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "win-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "currency-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "dest-zip-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "dest-city-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "dest-country-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "dest-street-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "dest-unit-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "dest-name-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "dest-company-mismatch": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "street-punct-equal": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "norm-diacritics-sao-paulo": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "partial-addr-no-zip": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "partial-addr-no-city": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "partial-addr-no-country": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "partial-addr-no-address1": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "missing-province-ok": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "missing-province-wrong-slot": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "method-mismatch-only": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "method-match-among-others": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std2"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "pickup-same-title": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "two-delivery-groups": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "two-valid-recs-earliest-exp": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "h_a"
+                    }
+                  },
+                  {
+                    "deliveryOption": {
+                      "handle": "h_b"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "no-shipping-class": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "bad-percentage-pct-0": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "bad-percentage-pct-101": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "bad-percentage-pct-abc": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "bad-percentage-pct-neg": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "bad-percentage-pct-num": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "bad-percentage-pct-missing": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "bad-config-v2": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "missing-config": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "probe-sao-paulo-nfc": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-sao-paulo-nfd": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-zurich": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-istanbul": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-cjk-tokyo": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-arabic-riyadh": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-cyrillic-moscow": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-emoji-city": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  },
+  "probe-combining-only": {
+    "output": {
+      "operations": []
+    },
+    "success": true
+  },
+  "probe-long-city": {
+    "output": {
+      "operations": [
+        {
+          "deliveryDiscountsAdd": {
+            "selectionStrategy": "ALL",
+            "candidates": [
+              {
+                "targets": [
+                  {
+                    "deliveryOption": {
+                      "handle": "opt_std"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": "100.0"
+                  }
+                },
+                "message": "Free shipping — welcome back"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "success": true
+  }
+}

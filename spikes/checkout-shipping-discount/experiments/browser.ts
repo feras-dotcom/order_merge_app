@@ -14,7 +14,7 @@ const { chromium } = req("playwright-core") as {
 };
 
 export const SHOP_ORIGIN = "https://ms-checkout-spike-1111.myshopify.com";
-export const VARIANT_NUMERIC = "68100323574127"; // $9.95 shippable ski wax
+export const VARIANT_NUMERIC = "68100324327791"; // $629.95 Multi-managed Snowboard, qty 100 (ski wax stock exhausted by test orders)
 export const PROFILE_DIR = join(workspaceDir, "browser-profile");
 export const SHOTS_DIR = join(workspaceDir, "evidence-shots");
 
@@ -23,7 +23,7 @@ export const SHOTS_DIR = join(workspaceDir, "evidence-shots");
 export const TEST_ADDRESS = {
   firstName: "Spike",
   lastName: "Test",
-  company: "Spike Co",
+  company: "",
   address1: "100 Test Street",
   address2: "Unit 5",
   city: "New York",
@@ -34,6 +34,7 @@ export const TEST_ADDRESS = {
 };
 
 export interface BrowserPage {
+  selectOption(sel: string, v: { label: string }): Promise<unknown>;
   goto(url: string, opts?: Record<string, unknown>): Promise<unknown>;
   url(): string;
   title(): Promise<string>;
@@ -43,7 +44,8 @@ export interface BrowserPage {
   waitForSelector(sel: string, opts?: Record<string, unknown>): Promise<unknown>;
   waitForTimeout(ms: number): Promise<void>;
   screenshot(opts: { path: string; fullPage?: boolean }): Promise<unknown>;
-  evaluate<T>(fn: () => T | Promise<T>): Promise<T>;
+  evaluate<T, A = undefined>(fn: (arg: A) => T | Promise<T>, arg?: A): Promise<T>;
+  frameLocator?(sel: string): { locator(s: string): { fill(v: string): Promise<void>; click(): Promise<void> } };
   locator(sel: string): { count(): Promise<number>; allInnerTexts(): Promise<string[]> };
   newPage?(): Promise<BrowserPage>;
   close(): Promise<void>;
@@ -112,7 +114,7 @@ export async function fillAddress(page: BrowserPage, addr: typeof TEST_ADDRESS):
   await tryFill(["input[name=address1]", "input[autocomplete='address-line1']"], addr.address1);
   await tryFill(["input[name=address2]", "input[autocomplete='address-line2']"], addr.address2);
   await tryFill(["input[name=city]", "input[autocomplete='address-level2']"], addr.city);
-  await tryFill(["select[name=zone]", "select[autocomplete='address-level1']"], addr.province);
+  try { await page.selectOption("select[name=zone]", { label: addr.province }); } catch { try { await page.selectOption("select[autocomplete='address-level1']", { label: addr.province }); } catch { /* noop */ } }
   await tryFill(["input[name=postalCode]", "input[autocomplete='postal-code']"], addr.zip);
   await page.waitForTimeout(2500); // let delivery options recompute + Function run
 }

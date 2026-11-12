@@ -123,7 +123,7 @@ function run(input: unknown): { operations: unknown[] } {
     operations: [
       {
         deliveryDiscountsAdd: {
-          selectionStrategy: "FIRST",
+          selectionStrategy: "ALL",
           candidates: [
             {
               targets: best.handles.map((handle) => ({ deliveryOption: { handle } })),

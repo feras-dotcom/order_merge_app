@@ -1,0 +1,1 @@
+mutation { discountAutomaticFreeShippingCreate(freeShippingAutomaticDiscount: { title: "x", startsAt: "2026-11-11T00:00:00Z" }) { automaticDiscountNode { id } userErrors { field message } } }

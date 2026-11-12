@@ -95,13 +95,13 @@ const withAddr = (input: any, addr: unknown) => {
 const runFn = cartDeliveryOptionsDiscountsGenerateRun as (i: unknown) => { operations: any[] };
 
 describe("checkout shipping-discount Function", () => {
-  it("happy path emits exactly ONE deliveryDiscountsAdd/FIRST/one candidate targeting the matching handle with the percentage string", () => {
+  it("happy path emits exactly ONE deliveryDiscountsAdd/ALL/one candidate targeting the matching handle with the percentage string", () => {
     const out = runFn(makeInput());
     expect(out).toEqual({
       operations: [
         {
           deliveryDiscountsAdd: {
-            selectionStrategy: "FIRST",
+            selectionStrategy: "ALL",
             candidates: [
               {
                 targets: [{ deliveryOption: { handle: "opt_std" } }],
@@ -570,6 +570,32 @@ describe("detectShippingDiscountGrant", () => {
       ],
     }), { titleToken: MSG });
     expect(r).toEqual({ granted: true, grantedMinor: "400", evidence: "PRICE_DELTA", ambiguous: true });
+  });
+
+  // Sanitized facts read back from real dev-store orders placed through the
+  // live Function (ms-checkout-spike-1111, orders #1001 100% and #1002 50%).
+  // The live application title is the $app:config message, not the discount
+  // node title — the token must match it exactly.
+  const LIVE_TITLE = "MergeShip spike: shipping discount";
+  it("live 100% order (#1001): $8.00 -> FREE, single titled shipping app ⇒ ALLOCATION 800", () => {
+    const r = detectShippingDiscountGrant({
+      shippingLines: [{
+        title: "Standard", originalMinor: "800", discountedMinor: "0",
+        discountAllocations: [{ amountMinor: "800", applicationTitle: LIVE_TITLE }],
+      }],
+      discountApplications: [{ targetType: "SHIPPING_LINE", title: LIVE_TITLE }],
+    }, { titleToken: LIVE_TITLE });
+    expect(r).toEqual({ granted: true, grantedMinor: "800", evidence: "ALLOCATION", ambiguous: false });
+  });
+  it("live 50% order (#1002): $8.00 -> $4.00, allocation 400 leaves remainder refundable", () => {
+    const r = detectShippingDiscountGrant({
+      shippingLines: [{
+        title: "Standard", originalMinor: "800", discountedMinor: "400",
+        discountAllocations: [{ amountMinor: "400", applicationTitle: LIVE_TITLE }],
+      }],
+      discountApplications: [{ targetType: "SHIPPING_LINE", title: LIVE_TITLE }],
+    }, { titleToken: LIVE_TITLE });
+    expect(r).toEqual({ granted: true, grantedMinor: "400", evidence: "ALLOCATION", ambiguous: false });
   });
 });
 

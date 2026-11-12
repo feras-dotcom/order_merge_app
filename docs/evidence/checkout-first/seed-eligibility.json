@@ -1,0 +1,29 @@
+{
+  "customerId": "gid://shopify/Customer/31443516522863",
+  "record": {
+    "id": "9495108386",
+    "win": "w1",
+    "dest": "spike\u001ftest\u001f\u001f100 test street\u001funit 5\u001fnew york\u001fny\u001f10001\u001fus",
+    "method": "standard shipping",
+    "cur": "USD",
+    "left": 1,
+    "exp": "2026-11-15"
+  },
+  "result": {
+    "written": true,
+    "attempts": 1
+  },
+  "readback": {
+    "data": {
+      "customer": {
+        "metafield": {
+          "jsonValue": {
+            "recs": [],
+            "v": 1
+          },
+          "compareDigest": "fd10b37865e2c389c499d00cd65fcb06bac65c9b2f21ed05c5f32bbfc1925857"
+        }
+      }
+    }
+  }
+}

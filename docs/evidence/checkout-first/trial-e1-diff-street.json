@@ -1,0 +1,33 @@
+{
+  "ts": "2026-11-12T12:56:49.042Z",
+  "scenario": "e1-diff-street",
+  "address": {
+    "firstName": "Spike",
+    "lastName": "Test",
+    "company": "",
+    "address1": "100 Test Street",
+    "address2": "Unit 5",
+    "city": "New York",
+    "province": "New York",
+    "provinceCode": "NY",
+    "zip": "10001",
+    "countryCode": "US",
+    "email": "[signed-in]"
+  },
+  "scraped": {
+    "optionLines": [
+      "Wed, Nov 18–Fri, Nov 20\n\n$8.00",
+      "Mon, Nov 16–Tue, Nov 17\n\n$15.00",
+      "Pay now\n$17.95"
+    ],
+    "discounts": [
+      "Add discount",
+      "Discount code or gift card",
+      "Discount code or gift card"
+    ],
+    "total": null,
+    "shipping": null,
+    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/cn/hWNJ3uv9p84oWQbzkeEtMEiX/en-us?_r=AQABkKm2g4GKbx5o7aIF6fjNCBCV7-WLpRk2KzFtW7KW3q9-oHSK"
+  },
+  "shot": "C:\\Users\\feero\\Desktop\\mergeship-checkout-spike\\evidence-shots\\e1-diff-street-1794488208643.png"
+}

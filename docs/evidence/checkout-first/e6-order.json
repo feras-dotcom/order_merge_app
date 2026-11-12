@@ -1,0 +1,84 @@
+{
+  "order": {
+    "id": "gid://shopify/Order/19017509929327",
+    "name": "#1002",
+    "createdAt": "2026-11-12T13:03:46Z",
+    "processedAt": "2026-11-12T13:03:45Z",
+    "displayFinancialStatus": "PAID",
+    "shippingLines": {
+      "nodes": [
+        {
+          "title": "Standard",
+          "originalPriceSet": {
+            "shopMoney": {
+              "amount": "8.0",
+              "currencyCode": "USD"
+            }
+          },
+          "discountedPriceSet": {
+            "shopMoney": {
+              "amount": "4.0"
+            }
+          },
+          "discountAllocations": [
+            {
+              "allocatedAmountSet": {
+                "shopMoney": {
+                  "amount": "4.0"
+                }
+              },
+              "discountApplication": {
+                "__typename": "AutomaticDiscountApplication",
+                "targetType": "SHIPPING_LINE",
+                "title": "MergeShip spike: shipping discount"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "discountApplications": {
+      "nodes": [
+        {
+          "__typename": "AutomaticDiscountApplication",
+          "targetType": "SHIPPING_LINE",
+          "title": "MergeShip spike: shipping discount",
+          "value": {
+            "__typename": "PricingPercentageValue",
+            "percentage": 50
+          }
+        }
+      ]
+    },
+    "customer": {
+      "id": "gid://shopify/Customer/31443516522863"
+    }
+  },
+  "facts": {
+    "shippingLines": [
+      {
+        "title": "Standard",
+        "originalMinor": "800",
+        "discountedMinor": "400",
+        "discountAllocations": [
+          {
+            "amountMinor": "400",
+            "applicationTitle": "MergeShip spike: shipping discount"
+          }
+        ]
+      }
+    ],
+    "discountApplications": [
+      {
+        "targetType": "SHIPPING_LINE",
+        "title": "MergeShip spike: shipping discount"
+      }
+    ]
+  },
+  "verdict": {
+    "granted": true,
+    "grantedMinor": "400",
+    "evidence": "ALLOCATION",
+    "ambiguous": false
+  }
+}
