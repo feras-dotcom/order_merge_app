@@ -1,0 +1,44 @@
+{
+  "ts": "2026-11-12T20:43:29.534Z",
+  "scenario": "e3-guest",
+  "hasPasswordCookie": false,
+  "landedOnCheckout": true,
+  "typedEmail": true,
+  "signedInIndicators": {
+    "mentionsSignOut": false,
+    "hasSignInLink": true
+  },
+  "keyLines": [
+    "Shipping method",
+    "Choose a shipping method",
+    "Standard",
+    "FREE",
+    "Express",
+    "$15.00",
+    "3-digit security code usually found on the back of your card. American Express cards have a 4-digit code located on the front.",
+    "Use shipping address as billing address",
+    "$629.95",
+    "$629.95",
+    "Subtotal",
+    "$629.95",
+    "Shipping",
+    "FREE",
+    "Total",
+    "$629.95",
+    "Updated shipping method: Standard"
+  ],
+  "scraped": {
+    "optionLines": [
+      "Tue, Nov 17–Wed, Nov 18\n\n$15.00",
+      "Pay now\n$629.95"
+    ],
+    "discounts": [
+      "Add discount",
+      "Discount code or gift card",
+      "Discount code or gift card"
+    ],
+    "total": null,
+    "shipping": null,
+    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/[TOKEN]"
+  }
+}

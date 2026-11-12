@@ -18,10 +18,10 @@
     ],
     "total": null,
     "shipping": null,
-    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/cn/hWNJ3vh58giX8YNZiwRNcHkv/en-us?_r=AQABS1fDiZv8A-ez3ffJIQW4oi-g6LICsEU2Z986sOnxUzthDu9j"
+    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/[TOKEN]"
   },
   "confirmation": {
-    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/cn/hWNJ3vh58giX8YNZiwRNcHkv/en-us/thank-you?_r=AQABS1fDiZv8A-ez3ffJIQW4oi-g6LICsEU2Z986sOnxUzthDu9j",
+    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/[TOKEN]",
     "text": "Skip to content\nMS Checkout Spike 1111\nNavigate to Online Store\nMS Checkout Spike 1111 Checkout\n\nConfirmation #HUHYNRFU3\n\nThank you, Spike!\nYour order is confirmed\n\nYou’ll receive a confirmation email soon\n\nG\ne\nt\n \nr\ne\na\nl\n-\nt\ni\nm\ne\n \nu\np\nd\na\nt\ne\ns\nT\nr\na\nc\nk\n \no\nr\nd\ne\nr\n \nw\ni\nt\nh\n \nTrack order with Shop\nEmail me with news and offers\nOrder details\nView account\nContact information\n\[redacted-email]\n\nShipping address\nSpike Test\n100 Test Street\nUnit 5\nNew York NY 10001\nUnited States\nShipping method\n\nStandard\n\nPayment method\n\n•••• 1 · $13.95 USD\n\nBilling address\nSpike Test\n100 Test Street\nUnit 5\nNew York NY 10001\nUnited States\nContinue shopping\n\nNeed help? Contact us\n\nTerms and policies\nOrder summary\nShopping cart\nProduct image\nDescription\nQuantity\nPrice\nQuantity\n1\n\nSelling Plans Ski Wax\n\nSample Selling Plans Ski Wax\n\n1\n$9.95\nScroll for more items\nCost summary\nItem\nValue\nSubtotal\n$9.95\nShipping\nOriginal price\n$8.00\nDiscounted price\n$4.00\nMERGESHIP SPIKE: SHIPPING DISCOUNT\nTotal\nUSD\n$13.95\nTOTAL SAVINGS\n$4.00\nOpens external website in a new window.\nOpens in a new window.\nOpens external website.\nYour order’s being processed.",
     "orderName": null
   },
