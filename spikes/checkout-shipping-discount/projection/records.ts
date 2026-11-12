@@ -37,10 +37,15 @@ export interface OrderFacts {
   customerId: string | null;
   currencyCode: string;
   shippingAddress: {
-    countryCode?: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    company?: string | null;
+    address1?: string | null;
+    address2?: string | null;
+    city?: string | null;
     provinceCode?: string | null;
     zip?: string | null;
-    city?: string | null;
+    countryCode?: string | null;
   } | null;
   shippingLines: {
     title: string;

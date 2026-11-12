@@ -1,0 +1,12 @@
+query Discount($id: ID!) {
+  automaticDiscountNode(id: $id) {
+    id
+    automaticDiscount {
+      ... on DiscountAutomaticApp {
+        title status startsAt endsAt
+        appDiscountType { functionId title }
+      }
+    }
+    metafield(namespace: "$app", key: "config") { jsonValue }
+  }
+}

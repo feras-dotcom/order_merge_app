@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { cartDeliveryOptionsDiscountsGenerateRun } from "../spikes/checkout-shipping-discount/extension/src/cart_delivery_options_discounts_generate_run";
-import { destKey, normMethod, normZip } from "../spikes/checkout-shipping-discount/extension/src/dest-key";
+import { destKey, normMethod, normAddressLine, SEP } from "../spikes/checkout-shipping-discount/extension/src/dest-key";
+import { buildAddressKey } from "../app/lib/eligibility";
 import {
   buildRecord, consumeRecord, mergeRecords, parseElig, serializeElig,
   type EligRecord, type OrderFacts,
@@ -24,7 +25,21 @@ const INPUT_QUERY = readFileSync(join(EXT_SRC, "cart_delivery_options_discounts_
 // ── Function input factory ──────────────────────────────────────────────
 
 const CFG = { v: 1, windowId: "w1", percentage: "100.0", message: "Free shipping — welcome back" };
-const ADDR = { countryCode: "US", provinceCode: "NY", zip: "10001", city: "New York" };
+// Strict destination key: firstName,lastName,company,address1,address2,
+// city,province,zip,country — \u001f-joined, engine-normalized.
+const K = (...f: string[]) => f.join("\u001f");
+const ADDR = {
+  firstName: "Jane",
+  lastName: "Doe",
+  company: "Acme",
+  address1: "123 Main St",
+  address2: "Apt 4",
+  city: "New York",
+  provinceCode: "NY",
+  zip: "10001",
+  countryCode: "US",
+};
+const ADDR_KEY = K("jane", "doe", "acme", "123 main st", "apt 4", "new york", "ny", "10001", "us");
 const option = (over: Record<string, unknown> = {}) => ({
   handle: "opt_std",
   title: "Standard Shipping",
@@ -35,7 +50,7 @@ const option = (over: Record<string, unknown> = {}) => ({
 const rec = (over: Record<string, unknown> = {}): EligRecord => ({
   id: "111",
   win: "w1",
-  dest: "us|ny|10001|new york",
+  dest: ADDR_KEY,
   method: "standard shipping",
   cur: "USD",
   left: 1,
@@ -138,30 +153,46 @@ describe("checkout shipping-discount Function", () => {
   });
 
   it("destination mismatches (zip, city, country) are ineligible", () => {
-    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: "us|ny|90210|new york" })]))).operations).toEqual([]);
-    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: "us|ny|10001|boston" })]))).operations).toEqual([]);
-    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: "ca|ny|10001|new york" })]))).operations).toEqual([]);
+    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: K("jane", "doe", "acme", "123 main st", "apt 4", "new york", "ny", "90210", "us") })]))).operations).toEqual([]);
+    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: K("jane", "doe", "acme", "123 main st", "apt 4", "boston", "ny", "10001", "us") })]))).operations).toEqual([]);
+    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: K("jane", "doe", "acme", "123 main st", "apt 4", "new york", "ny", "10001", "ca") })]))).operations).toEqual([]);
   });
 
-  it("destination normalization: case, whitespace, diacritics and zip spacing all match", () => {
-    const i = withAddr(makeInput(), { countryCode: "br", provinceCode: null, zip: " 01310-100 ", city: "São Paulo" });
-    const j = withCustomer(i, eligMf([rec({ dest: "br||01310100|sao paulo", cur: "BRL" })]));
-    const k = withOptions(j, [option({ cost: { amount: "8.00", currencyCode: "BRL" } })]);
+  it("destination normalization: case, whitespace, diacritics and zip punctuation all match", () => {
+    const i = withAddr(makeInput(), { ...ADDR, countryCode: "br", provinceCode: null, zip: " 01310-100 ", city: "São  Paulo" });
+    // Engine rule keeps letters (ã stays), strips punctuation, collapses
+    // whitespace, lowercases — the same key the projection wrote.
+    const strict = K("jane", "doe", "acme", "123 main st", "apt 4", "são paulo", "", "01310100", "br");
+    const k = withOptions(withCustomer(i, eligMf([rec({ dest: strict, cur: "BRL" })])), [option({ cost: { amount: "8.00", currencyCode: "BRL" } })]);
     expect(runFn(k).operations.length).toBe(1);
   });
 
-  for (const addr of [{ ...ADDR, zip: null }, { ...ADDR, city: null }, { ...ADDR, countryCode: null }]) {
+  for (const addr of [{ ...ADDR, zip: null }, { ...ADDR, city: null }, { ...ADDR, countryCode: null }, { ...ADDR, address1: null }]) {
     it(`partial address missing ${Object.keys(addr).filter((k) => (addr as any)[k] === null)} ⇒ no discount`, () => {
       expect(runFn(withAddr(makeInput(), addr))).toEqual({ operations: [] });
     });
   }
 
   it("missing province still keys (empty slot), but only for a matching record", () => {
-    const i = withAddr(makeInput(), { countryCode: "IE", provinceCode: null, zip: "D02 X285", city: "Dublin" });
-    const j = withCustomer(i, eligMf([rec({ dest: "ie||d02x285|dublin" })]));
+    const i = withAddr(makeInput(), { ...ADDR, countryCode: "IE", provinceCode: null, zip: "D02 X285", city: "Dublin" });
+    const j = withCustomer(i, eligMf([rec({ dest: K("jane", "doe", "acme", "123 main st", "apt 4", "dublin", "", "d02 x285", "ie") })]));
     expect(runFn(j).operations.length).toBe(1);
-    const k = withCustomer(i, eligMf([rec({ dest: "ie|xx|d02x285|dublin" })]));
+    const k = withCustomer(i, eligMf([rec({ dest: K("jane", "doe", "acme", "123 main st", "apt 4", "dublin", "xx", "d02 x285", "ie") })]));
     expect(runFn(k)).toEqual({ operations: [] });
+  });
+
+  it("strict key: different street / unit / recipient / company ⇒ no discount; equal-after-normalization ⇒ discount", () => {
+    // different street, same zip
+    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: K("jane", "doe", "acme", "99 main st", "apt 4", "new york", "ny", "10001", "us") })]))).operations).toEqual([]);
+    // same street, different address2
+    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: K("jane", "doe", "acme", "123 main st", "apt 9", "new york", "ny", "10001", "us") })]))).operations).toEqual([]);
+    // different recipient name
+    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: K("john", "doe", "acme", "123 main st", "apt 4", "new york", "ny", "10001", "us") })]))).operations).toEqual([]);
+    // different company
+    expect(runFn(withCustomer(makeInput(), eligMf([rec({ dest: K("jane", "doe", "acme inc", "123 main st", "apt 4", "new york", "ny", "10001", "us") })]))).operations).toEqual([]);
+    // punctuation/case/whitespace-equal street → same key → discount
+    const i = withAddr(makeInput(), { ...ADDR, address1: "  123  Main   St. " });
+    expect(runFn(withCustomer(i, eligMf([rec()]))).operations.length).toBe(1);
   });
 
   it("method mismatch: no matching SHIPPING option ⇒ empty; a matching option is discounted while others are untouched", () => {
@@ -236,6 +267,7 @@ describe("checkout shipping-discount Function", () => {
     const needed = [
       "isAuthenticated", "customer", "metafield", "jsonValue", "deliveryGroups",
       "deliveryAddress", "countryCode", "provinceCode", "zip", "city",
+      "firstName", "lastName", "company", "address1", "address2",
       "deliveryOptions", "handle", "title", "deliveryMethodType", "cost",
       "currencyCode", "discount", "discountClasses", "shop", "localTime",
       "date", "buyerIdentity", "cart",
@@ -248,19 +280,52 @@ describe("checkout shipping-discount Function", () => {
   });
 });
 
-describe("dest-key normalization", () => {
-  it("folds case, whitespace, diacritics and zip punctuation", () => {
-    expect(destKey({ countryCode: " BR ", provinceCode: "SP", zip: "01310-100", city: "São  Paulo" })).toBe("br|sp|01310100|sao paulo");
-    expect(destKey({ countryCode: "GB", provinceCode: null, zip: "SW1A 1AA", city: "London" })).toBe("gb||sw1a1aa|london");
-    expect(normZip(" SW1A   1AA ")).toBe("sw1a1aa");
+describe("dest-key normalization (strict, engine-identical)", () => {
+  it("folds case, whitespace, diacritics and punctuation into \u001f slots", () => {
+    expect(destKey({ ...ADDR, countryCode: " BR ", provinceCode: "SP", zip: "01310-100", city: "São  Paulo" })).toBe(
+      K("jane", "doe", "acme", "123 main st", "apt 4", "são paulo", "sp", "01310100", "br"),
+    );
+    expect(normAddressLine(" SW1A   1AA ")).toBe("sw1a 1aa");
+    expect(normAddressLine("Rue de l'Église, #42-B")).toBe("rue de léglise 42b");
     expect(normMethod("  Express   Saver ")).toBe("express saver");
+    expect(SEP).toBe("\u001f");
   });
-  it("null when country/zip/city are missing or normalize empty", () => {
+  it("null when address1/country/zip/city are missing or normalize empty", () => {
     expect(destKey(null)).toBeNull();
-    expect(destKey({ countryCode: null, zip: "1", city: "x" })).toBeNull();
-    expect(destKey({ countryCode: "US", zip: null, city: "x" })).toBeNull();
-    expect(destKey({ countryCode: "US", zip: "   ", city: "x" })).toBeNull();
-    expect(destKey({ countryCode: "US", zip: "1", city: null })).toBeNull();
+    expect(destKey({ ...ADDR, countryCode: null })).toBeNull();
+    expect(destKey({ ...ADDR, zip: null })).toBeNull();
+    expect(destKey({ ...ADDR, zip: "   " })).toBeNull();
+    expect(destKey({ ...ADDR, city: null })).toBeNull();
+    expect(destKey({ ...ADDR, address1: null })).toBeNull();
+    expect(destKey({ ...ADDR, address1: "  " })).toBeNull();
+    // Optional slots may be absent.
+    expect(destKey({ firstName: null, lastName: null, company: null, address1: "1 st", address2: null, city: "x", provinceCode: null, zip: "1", countryCode: "US" })).toBe(K("", "", "", "1 st", "", "x", "", "1", "us"));
+  });
+  it("matches the merge engine's buildAddressKey over a parity table (read-only import)", () => {
+    const table = [
+      { firstName: "Jane", lastName: "Doe", company: "Acme, Inc.", address1: "123 Main St.", address2: "Apt 4", city: "New York", provinceCode: "NY", zip: "10001", countryCodeV2: "US" },
+      { firstName: "  João ", lastName: "Da-Silva", company: null, address1: "Rua São Bento, 42", address2: null, city: "São Paulo", provinceCode: "SP", zip: "01310-100", countryCodeV2: "BR" },
+      { firstName: "Max", lastName: "Müller", company: "", address1: "Hauptstr. 5", address2: "Hinterhaus", city: "Zürich", provinceCode: "ZH", zip: "8001", countryCodeV2: "CH" },
+      { firstName: null, lastName: null, company: null, address1: "221B Baker Street", address2: null, city: "London", provinceCode: null, zip: "NW1 6XE", countryCodeV2: "GB" },
+      { firstName: "Ali", lastName: "Al-Saud", company: "شركة", address1: "شارع الملك فهد ١٢", address2: "3", city: "الرياض", provinceCode: null, zip: "11564", countryCodeV2: "SA" },
+      { firstName: "Mei", lastName: "Ling", company: "Acme!", address1: "東京都千代田区1-1", address2: null, city: "東京", provinceCode: null, zip: "100-0001", countryCodeV2: "JP" },
+    ];
+    for (const a of table) {
+      const engine = buildAddressKey("gid://shopify/Customer/9", a);
+      expect(engine).not.toBeNull();
+      const engineNoCustomer = engine!.split("\0").slice(1).join(SEP);
+      const ours = destKey({
+        firstName: a.firstName, lastName: a.lastName, company: a.company,
+        address1: a.address1, address2: a.address2, city: a.city,
+        provinceCode: a.provinceCode, zip: a.zip, countryCode: a.countryCodeV2,
+      });
+      expect(ours).toBe(engineNoCustomer);
+    }
+    // Engine-null inputs (missing address1 or country) are also ours-null;
+    // our key is additionally stricter (zip/city required) — never weaker.
+    expect(buildAddressKey("gid://shopify/Customer/9", { address1: null, city: "x", countryCodeV2: "US" })).toBeNull();
+    expect(destKey({ address1: null, city: "x", zip: "1", countryCode: "US" })).toBeNull();
+    expect(destKey({ address1: "1 st", city: null, zip: "1", countryCode: "US" })).toBeNull(); // ours stricter
   });
 });
 
@@ -270,7 +335,7 @@ const orderFacts = (over: Partial<OrderFacts> = {}): OrderFacts => ({
   orderId: "gid://shopify/Order/555",
   customerId: "gid://shopify/Customer/1",
   currencyCode: "USD",
-  shippingAddress: { countryCode: "US", provinceCode: "NY", zip: "10001", city: "New York" },
+  shippingAddress: { ...ADDR },
   shippingLines: [{ title: "Standard Shipping", originalMinor: "800", discountedMinor: "800" }],
   cancelledAt: null,
   financialStatus: "PAID",
@@ -283,7 +348,7 @@ describe("projection.buildRecord", () => {
     const r = buildRecord(orderFacts(), cfg);
     expect(r).toMatchObject({
       ok: true,
-      record: { id: "555", win: "w1", dest: "us|ny|10001|new york", method: "standard shipping", cur: "USD", left: 1, exp: "2099-01-01" },
+      record: { id: "555", win: "w1", dest: ADDR_KEY, method: "standard shipping", cur: "USD", left: 1, exp: "2099-01-01" },
     });
   });
   it("refuses each disqualifier with a typed reason", () => {
@@ -297,6 +362,8 @@ describe("projection.buildRecord", () => {
     ] }), cfg)).toEqual({ ok: false, reason: "NOT_SINGLE_SHIPPING_LINE" });
     expect(buildRecord(orderFacts({ shippingLines: [{ title: "Free", originalMinor: "0", discountedMinor: "0" }] }), cfg)).toEqual({ ok: false, reason: "ZERO_SHIPPING" });
     expect(buildRecord(orderFacts({ shippingAddress: null }), cfg)).toEqual({ ok: false, reason: "NO_DEST" });
+    expect(buildRecord(orderFacts({ shippingAddress: { ...ADDR, address1: null } }), cfg)).toEqual({ ok: false, reason: "NO_DEST" });
+    expect(buildRecord(orderFacts({ shippingAddress: { ...ADDR, countryCode: null } }), cfg)).toEqual({ ok: false, reason: "NO_DEST" });
   });
 });
 

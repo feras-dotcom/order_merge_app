@@ -1,0 +1,15 @@
+query {
+  shop {
+    name
+    currencyCode
+    ianaTimezone
+    customerAccounts
+    plan { displayName partnerDevelopment shopifyPlus }
+    billingAddress { country }
+    paymentSettings { supportedDigitalWallets }
+  }
+  currentAppInstallation {
+    accessScopes { handle }
+    app { id title handle }
+  }
+}

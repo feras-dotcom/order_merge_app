@@ -1,0 +1,9 @@
+mutation CCreate($input: CustomerInput!) {
+  customerCreate(input: $input) {
+    customer {
+      id email firstName lastName
+      defaultAddress { firstName lastName company address1 address2 city provinceCode zip countryCode }
+    }
+    userErrors { field message }
+  }
+}

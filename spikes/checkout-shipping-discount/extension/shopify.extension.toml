@@ -1,16 +1,18 @@
-api_version = "2026-04"
+api_version = "2026-07"
 
 [[extensions]]
 name = "t:name"
-description = "t:description"
 handle = "checkout-shipping-discount"
 type = "function"
+uid = "50864940-d24f-bef1-b8ea-4051f972a3c02d7054d9"
+description = "t:description"
 
-[[extensions.targeting]]
-target = "cart.delivery-options.discounts.generate.run"
-input_query = "src/cart_delivery_options_discounts_generate_run.graphql"
-export = "generate-delivery-run"
+  [[extensions.targeting]]
+  target = "cart.delivery-options.discounts.generate.run"
+  input_query = "src/cart_delivery_options_discounts_generate_run.graphql"
+  input_variables = { namespace = "$app", key = "config" }
+  export = "cart-delivery-options-discounts-generate-run"
 
-[extensions.input.variables]
-namespace = "$app"
-key = "window"
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"

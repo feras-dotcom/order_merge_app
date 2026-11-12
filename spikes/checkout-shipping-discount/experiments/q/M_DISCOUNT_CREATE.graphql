@@ -1,0 +1,13 @@
+mutation DCreate($input: DiscountAutomaticAppInput!) {
+  discountAutomaticAppCreate(automaticAppDiscount: $input) {
+    automaticAppDiscount {
+      discountId
+      title
+      status
+      startsAt
+      endsAt
+      appDiscountType { functionId title }
+    }
+    userErrors { field message }
+  }
+}

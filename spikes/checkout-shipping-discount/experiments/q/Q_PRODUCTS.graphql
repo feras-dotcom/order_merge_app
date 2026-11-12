@@ -1,0 +1,10 @@
+query {
+  products(first: 10) {
+    nodes {
+      id title status
+      variants(first: 5) {
+        nodes { id title price inventoryItem { tracked requiresShipping } }
+      }
+    }
+  }
+}

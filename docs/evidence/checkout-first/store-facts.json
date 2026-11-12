@@ -1,0 +1,288 @@
+{
+  "shop": {
+    "shop": {
+      "name": "MS Checkout Spike 1111",
+      "currencyCode": "USD",
+      "ianaTimezone": "America/New_York",
+      "customerAccounts": "OPTIONAL",
+      "plan": {
+        "displayName": "Basic App Development",
+        "partnerDevelopment": true,
+        "shopifyPlus": false
+      },
+      "billingAddress": {
+        "country": "United States"
+      },
+      "paymentSettings": {
+        "supportedDigitalWallets": []
+      }
+    },
+    "currentAppInstallation": {
+      "accessScopes": [
+        {
+          "handle": "read_customers"
+        },
+        {
+          "handle": "read_discounts"
+        },
+        {
+          "handle": "read_orders"
+        },
+        {
+          "handle": "read_products"
+        },
+        {
+          "handle": "write_customers"
+        },
+        {
+          "handle": "write_discounts"
+        },
+        {
+          "handle": "write_orders"
+        }
+      ],
+      "app": {
+        "id": "gid://shopify/App/446390730753",
+        "title": "MS Checkout Spike App",
+        "handle": "ms-checkout-spike-app"
+      }
+    }
+  },
+  "deliveryProfiles": {
+    "error": "Error: graphql HTTP 200: {\n  \"errors\": [\n    {\n      \"message\": \"Access denied for deliveryProfiles field.\",\n      \"locations\": [\n        {\n          \"line\": 2,\n          \"column\": 3\n        }\n      ],\n      \"extensions\": {\n        \"code\": \"ACCESS_DENIED\",\n        \"documentation\": \"https://shopify.dev/api/usage/access-scopes\"\n      },\n      \"path\": [\n        \"deliveryProfiles\"\n      ]\n    }\n  ],\n  \"data\": null,\n  \"extensions\": {\n    \"cost\": {\n      \"requestedQueryCost\": 274,\n      \"actualQueryCost\": 2,\n      \"throttleStatus\": {\n        \"maximumAvailable\": 2000,\n        \"currentlyAvailable\": 1998,\n        \"restoreRate\": 100\n      }\n    }\n  }\n}"
+  },
+  "products": {
+    "products": {
+      "nodes": [
+        {
+          "id": "gid://shopify/Product/15497488892271",
+          "title": "The Inventory Not Tracked Snowboard",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100324098415",
+                "title": "Default Title",
+                "price": "949.95",
+                "inventoryItem": {
+                  "tracked": false,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497488925039",
+          "title": "Gift Card",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100323672431",
+                "title": "$10",
+                "price": "10.00",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": false
+                }
+              },
+              {
+                "id": "gid://shopify/ProductVariant/68100323705199",
+                "title": "$25",
+                "price": "25.00",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": false
+                }
+              },
+              {
+                "id": "gid://shopify/ProductVariant/68100323737967",
+                "title": "$50",
+                "price": "50.00",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": false
+                }
+              },
+              {
+                "id": "gid://shopify/ProductVariant/68100323770735",
+                "title": "$100",
+                "price": "100.00",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": false
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497488957807",
+          "title": "The Minimal Snowboard",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100324032879",
+                "title": "Default Title",
+                "price": "885.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497488990575",
+          "title": "The Archived Snowboard",
+          "status": "ARCHIVED",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100323606895",
+                "title": "Default Title",
+                "price": "629.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497489023343",
+          "title": "The Collection Snowboard: Hydrogen",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100324131183",
+                "title": "Default Title",
+                "price": "600.00",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497489056111",
+          "title": "The Draft Snowboard",
+          "status": "DRAFT",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100323967343",
+                "title": "Default Title",
+                "price": "2629.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497489088879",
+          "title": "The Videographer Snowboard",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100323475823",
+                "title": "Default Title",
+                "price": "885.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497489121647",
+          "title": "The Hidden Snowboard",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100324000111",
+                "title": "Default Title",
+                "price": "749.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497489154415",
+          "title": "Selling Plans Ski Wax",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100323508591",
+                "title": "Selling Plans Ski Wax",
+                "price": "24.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              },
+              {
+                "id": "gid://shopify/ProductVariant/68100323541359",
+                "title": "Special Selling Plans Ski Wax",
+                "price": "49.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              },
+              {
+                "id": "gid://shopify/ProductVariant/68100323574127",
+                "title": "Sample Selling Plans Ski Wax",
+                "price": "9.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "gid://shopify/Product/15497489187183",
+          "title": "The Out of Stock Snowboard",
+          "status": "ACTIVE",
+          "variants": {
+            "nodes": [
+              {
+                "id": "gid://shopify/ProductVariant/68100323443055",
+                "title": "Default Title",
+                "price": "885.95",
+                "inventoryItem": {
+                  "tracked": true,
+                  "requiresShipping": true
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "locations": {
+    "error": "Error: graphql HTTP 200: {\n  \"errors\": [\n    {\n      \"message\": \"Access denied for locations field.\",\n      \"locations\": [\n        {\n          \"line\": 2,\n          \"column\": 3\n        }\n      ],\n      \"extensions\": {\n        \"code\": \"ACCESS_DENIED\",\n        \"documentation\": \"https://shopify.dev/api/usage/access-scopes\"\n      },\n      \"path\": [\n        \"locations\"\n      ]\n    }\n  ],\n  \"data\": null,\n  \"extensions\": {\n    \"cost\": {\n      \"requestedQueryCost\": 6,\n      \"actualQueryCost\": 2,\n      \"throttleStatus\": {\n        \"maximumAvailable\": 2000,\n        \"currentlyAvailable\": 1998,\n        \"restoreRate\": 100\n      }\n    }\n  }\n}"
+  }
+}

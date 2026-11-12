@@ -1,0 +1,6 @@
+query Cmf($id: ID!) {
+  customer(id: $id) {
+    id email
+    metafield(namespace: "$app", key: "ship_elig") { id jsonValue compareDigest }
+  }
+}

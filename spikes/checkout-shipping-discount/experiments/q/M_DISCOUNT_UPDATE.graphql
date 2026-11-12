@@ -1,0 +1,6 @@
+mutation DUpdate($id: ID!, $input: DiscountAutomaticAppInput!) {
+  discountAutomaticAppUpdate(id: $id, automaticAppDiscount: $input) {
+    automaticAppDiscount { discountId title status startsAt endsAt }
+    userErrors { field message }
+  }
+}

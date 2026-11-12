@@ -1,0 +1,15 @@
+{
+  "shopifyFunctions": {
+    "nodes": [
+      {
+        "id": "01a1cbd9-85fc-78f2-bcc7-1df414e12e40",
+        "handle": "checkout-shipping-discount",
+        "title": "checkout-shipping-discount",
+        "apiType": "discount",
+        "apiVersion": "2026-07",
+        "appKey": "09fa5573ee4396c41fd0afa1db6d514b",
+        "useCreationUi": true
+      }
+    ]
+  }
+}

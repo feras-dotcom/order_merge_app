@@ -1,0 +1,75 @@
+{
+  "testCustomerId": "gid://shopify/Customer/31443498107247",
+  "pcdMetafieldsSet": {
+    "metafields": [
+      {
+        "id": "gid://shopify/Metafield/192708869390703",
+        "namespace": "app--446390730753",
+        "key": "ship_elig"
+      }
+    ],
+    "userErrors": []
+  },
+  "pcdReadback": {
+    "customer": {
+      "metafield": {
+        "id": "gid://shopify/Metafield/192708869390703",
+        "jsonValue": {
+          "v": 1,
+          "recs": []
+        },
+        "compareDigest": "8634cd596336e1eafa52be850d5eefc0111ea032358e0a0f18334b5ea7dabce0"
+      }
+    }
+  },
+  "discount": {
+    "automaticDiscountNode": {
+      "id": "gid://shopify/DiscountAutomaticNode/1796967858543",
+      "automaticDiscount": {
+        "title": "MS Spike Shipping Discount",
+        "status": "ACTIVE",
+        "startsAt": "2026-11-11T17:41:48Z",
+        "endsAt": null,
+        "appDiscountType": {
+          "functionId": "01a1cbd9-85fc-78f2-bcc7-1df414e12e40"
+        },
+        "combinesWith": {
+          "orderDiscounts": false,
+          "productDiscounts": false,
+          "shippingDiscounts": false
+        }
+      },
+      "metafield": {
+        "jsonValue": {
+          "v": 1,
+          "windowId": "w1",
+          "percentage": "100.0",
+          "message": "MergeShip spike: shipping discount",
+          "windowStart": "2026-11-10T13:41:48",
+          "windowEnd": "2026-11-18T13:41:48"
+        }
+      }
+    }
+  },
+  "windowCheck": {
+    "shopLocalNow": "2026-11-12T07:19:38",
+    "windowStart": "2026-11-10T13:41:48",
+    "windowEnd": "2026-11-18T13:41:48",
+    "covers": true
+  },
+  "metafieldDefinitions": {
+    "metafieldDefinitions": {
+      "nodes": [
+        {
+          "name": "Shipping eligibility",
+          "namespace": "app--446390730753",
+          "key": "ship_elig",
+          "type": {
+            "name": "json"
+          },
+          "ownerType": "CUSTOMER"
+        }
+      ]
+    }
+  }
+}

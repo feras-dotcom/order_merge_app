@@ -1,10 +1,8 @@
 query CartDeliveryOptionsDiscountsGenerateRunInput($windowStart: DateTimeWithoutTimezone!, $windowEnd: DateTimeWithoutTimezone!) {
   cart {
-    buyerIdentity { isAuthenticated customer { id numberOfOrders metafield(namespace: "$app", key: "ship_elig") { jsonValue } } }
+    buyerIdentity { isAuthenticated customer { metafield(namespace: "$app", key: "ship_elig") { jsonValue } } }
     deliveryGroups {
-      id
-      deliveryAddress { countryCode provinceCode zip city }
-      selectedDeliveryOption { handle title deliveryMethodType cost { amount currencyCode } }
+      deliveryAddress { firstName lastName company address1 address2 city provinceCode zip countryCode }
       deliveryOptions { handle title deliveryMethodType cost { amount currencyCode } }
     }
   }
