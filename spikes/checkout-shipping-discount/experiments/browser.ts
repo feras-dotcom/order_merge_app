@@ -54,6 +54,13 @@ export interface BrowserCtx {
   close(): Promise<void>;
 }
 
+export async function connect(): Promise<BrowserCtx> {
+  // CDP attach to the founder's plain Chrome (stays open after disconnect).
+  const b = await (chromium as unknown as { connectOverCDP(u: string): Promise<{ contexts(): BrowserCtx[]; close(): Promise<void> }> }).connectOverCDP("http://127.0.0.1:9222");
+  const ctx0 = b.contexts()[0];
+  return { newPage: () => ctx0.newPage(), pages: () => ctx0.pages(), close: () => b.close() };
+}
+
 export async function launch(opts: Record<string, unknown> = {}): Promise<BrowserCtx> {
   mkdirSync(PROFILE_DIR, { recursive: true });
   mkdirSync(SHOTS_DIR, { recursive: true });

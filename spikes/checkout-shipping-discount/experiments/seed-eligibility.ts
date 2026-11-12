@@ -16,11 +16,11 @@ const plusDays = (d: string, n: number) => {
 };
 
 async function main() {
-  const email = process.env.SPIKE_CUSTOMER_EMAIL;
-  if (!email) throw new Error("SPIKE_CUSTOMER_EMAIL required");
+  const idOrEmail = process.env.SPIKE_CUSTOMER_ID ?? process.env.SPIKE_CUSTOMER_EMAIL;
+  if (!idOrEmail) throw new Error("SPIKE_CUSTOMER_ID or SPIKE_CUSTOMER_EMAIL required");
   const find = await admin.graphql(
     `query F($q: String!) { customers(first: 1, query: $q) { nodes { id email } } }`,
-    { variables: { q: `email:${email}` } },
+    { variables: { q: idOrEmail.startsWith("gid://") ? `id:${idOrEmail.split("/").pop()}` : `email:${idOrEmail}` } },
   );
   const cid = ((find as { data: { customers: { nodes: { id: string }[] } } }).data.customers.nodes[0]?.id) as string | undefined;
   if (!cid) throw new Error(`no customer for email (refusing to create — verify the founder's account)`);

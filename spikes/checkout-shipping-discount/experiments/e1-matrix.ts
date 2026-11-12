@@ -16,7 +16,7 @@ const shopToday = () => new Date().toLocaleDateString("en-CA", { timeZone: "Amer
 async function seedFor(email: string, addr: typeof TEST_ADDRESS, method: string, win = "w1", exp?: string) {
   const find = await admin.graphql(
     `query F($q: String!) { customers(first: 1, query: $q) { nodes { id } } }`,
-    { variables: { q: `email:${email}` } },
+    { variables: { q: email.startsWith("gid://") ? `id:${email.split("/").pop()}` : `email:${email}` } },
   );
   const cid = (find as { data: { customers: { nodes: { id: string }[] } } }).data.customers.nodes[0]?.id;
   if (!cid) throw new Error(`customer not found: ${email.slice(0, 3)}…`);
@@ -64,10 +64,10 @@ async function scenario(name: string, setup: () => Promise<void>, trialOpts?: Pa
 }
 
 async function main() {
-  const ME = process.env.SPIKE_CUSTOMER_EMAIL;
+  const ME = process.env.SPIKE_CUSTOMER_ID ?? process.env.SPIKE_CUSTOMER_EMAIL;
   const OTHER = process.env.SPIKE_WRONG_EMAIL ?? "spike-wrong-customer@example.com";
   const METHOD = process.env.SPIKE_METHOD ?? "Standard Shipping";
-  if (!ME) throw new Error("SPIKE_CUSTOMER_EMAIL required (founder's signed-in customer)");
+  if (!ME) throw new Error("SPIKE_CUSTOMER_ID or SPIKE_CUSTOMER_EMAIL required");
   const only = process.argv[2];
 
   const all: [string, () => Promise<void>, Parameters<typeof runTrial>[0]?][] = [
