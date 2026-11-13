@@ -1,0 +1,48 @@
+{
+  "ts": "2026-11-13T12:43:42.891Z",
+  "action": "activate",
+  "results": [
+    {
+      "id": "gid://shopify/DiscountAutomaticNode/1796967858543",
+      "mutation": "discountAutomaticActivate",
+      "r": {
+        "discountAutomaticActivate": {
+          "automaticDiscountNode": {
+            "id": "gid://shopify/DiscountAutomaticNode/1796967858543",
+            "automaticDiscount": {
+              "__typename": "DiscountAutomaticApp",
+              "title": "MS Spike Shipping Discount",
+              "status": "ACTIVE"
+            }
+          },
+          "userErrors": []
+        }
+      }
+    },
+    {
+      "id": "gid://shopify/DiscountAutomaticNode/1796967858543",
+      "state": {
+        "discountNode": {
+          "id": "gid://shopify/DiscountAutomaticNode/1796967858543",
+          "discount": {
+            "__typename": "DiscountAutomaticApp",
+            "title": "MS Spike Shipping Discount",
+            "status": "ACTIVE",
+            "discountClasses": [
+              "SHIPPING"
+            ],
+            "appDiscountType": {
+              "functionId": "01a1cbd9-85fc-78f2-bcc7-1df414e12e40",
+              "title": "checkout-shipping-discount"
+            },
+            "combinesWith": {
+              "shippingDiscounts": false,
+              "orderDiscounts": false,
+              "productDiscounts": false
+            }
+          }
+        }
+      }
+    }
+  ]
+}

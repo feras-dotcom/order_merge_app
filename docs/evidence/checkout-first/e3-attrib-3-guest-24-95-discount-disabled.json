@@ -1,0 +1,55 @@
+{
+  "ts": "2026-11-13T12:43:33.333Z",
+  "scenario": "attrib-3-guest-24.95-disabled-noRecord",
+  "freshCart": true,
+  "emailIsCustomerEmail": true,
+  "hasPasswordCookie": false,
+  "landedOnCheckout": true,
+  "typedEmail": true,
+  "signedInIndicators": {
+    "mentionsSignOut": false,
+    "hasSignInLink": true
+  },
+  "variant": "68100323508591",
+  "standardPrice": "$8.00",
+  "polls": [
+    {
+      "t": "2026-11-13T12:43:31.704Z",
+      "standard": "$8.00"
+    }
+  ],
+  "keyLines": [
+    "Shipping method",
+    "Choose a shipping method",
+    "Standard",
+    "$8.00",
+    "Express",
+    "$15.00",
+    "3-digit security code usually found on the back of your card. American Express cards have a 4-digit code located on the front.",
+    "Use shipping address as billing address",
+    "$32.95",
+    "$24.95",
+    "Subtotal",
+    "$24.95",
+    "Shipping",
+    "$8.00",
+    "Total",
+    "$32.95",
+    "Updated total price: 32.95 US dollarsUpdated shipping method: Standard"
+  ],
+  "scraped": {
+    "optionLines": [
+      "Thu, Nov 19–Mon, Nov 23\n\n$8.00",
+      "Tue, Nov 17–Wed, Nov 18\n\n$15.00",
+      "Pay now\n$32.95"
+    ],
+    "discounts": [
+      "Add discount",
+      "Discount code or gift card",
+      "Discount code or gift card"
+    ],
+    "total": "2.95",
+    "shipping": null,
+    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/[TOKEN]"
+  }
+}

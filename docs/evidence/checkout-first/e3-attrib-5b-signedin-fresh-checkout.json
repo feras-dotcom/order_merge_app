@@ -1,0 +1,66 @@
+{
+  "ts": "2026-11-13T13:02:30.924Z",
+  "scenario": "attrib-5b-signedin-fresh-checkout",
+  "freshCart": true,
+  "emailIsCustomerEmail": true,
+  "hasPasswordCookie": false,
+  "landedOnCheckout": true,
+  "typedEmail": false,
+  "signedInIndicators": {
+    "mentionsSignOut": false,
+    "hasSignInLink": false
+  },
+  "variant": "68100323508591",
+  "standardPrice": "$8.00",
+  "polls": [
+    {
+      "t": "2026-11-13T13:02:28.989Z",
+      "standard": "$8.00"
+    }
+  ],
+  "keyLines": [
+    "Shipping",
+    "Standard ·",
+    "$8.00",
+    "FREE",
+    "Choose a shipping method",
+    "Standard",
+    "$8.00",
+    "FREE",
+    "Express",
+    "$15.00",
+    "3-digit security code usually found on the back of your card. American Express cards have a 4-digit code located on the front.",
+    "Use shipping address as billing address",
+    "$24.95",
+    "$24.95",
+    "Subtotal",
+    "$24.95",
+    "Shipping",
+    "$8.00",
+    "FREE",
+    "MERGESHIP SPIKE: SHIPPING DISCOUNT",
+    "Total",
+    "$24.95",
+    "TOTAL SAVINGS",
+    "$8.00"
+  ],
+  "scraped": {
+    "optionLines": [
+      "Original price\n$8.00",
+      "Tue, Nov 17–Wed, Nov 18\n\n$15.00",
+      "Pay now\n$24.95"
+    ],
+    "discounts": [
+      "Discounted price",
+      "Discounted price",
+      "Add discount",
+      "Discount code or gift card",
+      "Discount code or gift card",
+      "Discounted price",
+      "MERGESHIP SPIKE: SHIPPING DISCOUNT"
+    ],
+    "total": null,
+    "shipping": null,
+    "url": "https://ms-checkout-spike-1111.myshopify.com/checkouts/[TOKEN]"
+  }
+}

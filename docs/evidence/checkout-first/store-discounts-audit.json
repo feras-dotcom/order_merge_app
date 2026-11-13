@@ -1,0 +1,68 @@
+{
+  "ts": "2026-11-13T12:37:31.596Z",
+  "automatic": {
+    "automaticDiscountNodes": {
+      "nodes": [
+        {
+          "id": "gid://shopify/DiscountAutomaticNode/1796958159215",
+          "automaticDiscount": {
+            "__typename": "DiscountAutomaticBxgy",
+            "title": "Buy one, get the second 10 percent off",
+            "status": "SCHEDULED",
+            "discountClasses": [
+              "PRODUCT"
+            ],
+            "startsAt": "2026-11-26T00:00:00Z",
+            "endsAt": "2026-12-11T00:00:00Z"
+          }
+        },
+        {
+          "id": "gid://shopify/DiscountAutomaticNode/1796958191983",
+          "automaticDiscount": {
+            "__typename": "DiscountAutomaticBasic",
+            "title": "Buy three, get 30 percent off",
+            "status": "ACTIVE",
+            "discountClasses": [
+              "PRODUCT"
+            ],
+            "startsAt": "2026-11-11T00:00:00Z",
+            "endsAt": "2026-11-21T00:00:00Z"
+          }
+        }
+      ]
+    }
+  },
+  "code": {
+    "codeDiscountNodes": {
+      "nodes": [
+        {
+          "id": "gid://shopify/DiscountCodeNode/1796958093679",
+          "codeDiscount": {
+            "__typename": "DiscountCodeFreeShipping",
+            "title": "FREESHIPPING2026",
+            "status": "ACTIVE",
+            "startsAt": "2026-01-01T00:00:00Z",
+            "endsAt": "2026-12-31T23:59:59Z"
+          }
+        },
+        {
+          "id": "gid://shopify/DiscountCodeNode/1796958126447",
+          "codeDiscount": {
+            "__typename": "DiscountCodeBasic",
+            "title": "CODE_DISCOUNT_BLACKFRIDAY",
+            "status": "SCHEDULED",
+            "startsAt": "2026-11-27T00:00:00Z",
+            "endsAt": "2026-11-28T00:00:00Z"
+          }
+        },
+        {
+          "id": "gid://shopify/DiscountCodeNode/1796958224751",
+          "codeDiscount": {
+            "__typename": "DiscountCodeBxgy"
+          }
+        }
+      ]
+    }
+  },
+  "eligibilityRecordCount": 0
+}

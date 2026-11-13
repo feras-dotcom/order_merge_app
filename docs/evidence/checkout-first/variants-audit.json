@@ -1,0 +1,145 @@
+{
+  "ts": "2026-11-13T12:42:33.611Z",
+  "rows": [
+    {
+      "id": "68100323574127",
+      "product": "Selling Plans Ski Wax",
+      "price": "9.95",
+      "qty": 0,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323508591",
+      "product": "Selling Plans Ski Wax",
+      "price": "24.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323541359",
+      "product": "Selling Plans Ski Wax",
+      "price": "49.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324131183",
+      "product": "The Collection Snowboard: Hydrogen",
+      "price": "600.00",
+      "qty": 50,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324327791",
+      "product": "The Multi-managed Snowboard",
+      "price": "629.95",
+      "qty": 74,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323803503",
+      "product": "The Complete Snowboard",
+      "price": "699.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323836271",
+      "product": "The Complete Snowboard",
+      "price": "699.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323869039",
+      "product": "The Complete Snowboard",
+      "price": "699.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323901807",
+      "product": "The Complete Snowboard",
+      "price": "699.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323934575",
+      "product": "The Complete Snowboard",
+      "price": "699.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324229487",
+      "product": "The Multi-location Snowboard",
+      "price": "729.95",
+      "qty": 100,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324000111",
+      "product": "The Hidden Snowboard",
+      "price": "749.95",
+      "qty": 50,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324458863",
+      "product": "The Collection Snowboard: Liquid",
+      "price": "749.95",
+      "qty": 50,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323639663",
+      "product": "The Compare at Price Snowboard",
+      "price": "785.95",
+      "qty": 10,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323443055",
+      "product": "The Out of Stock Snowboard",
+      "price": "885.95",
+      "qty": 0,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100323475823",
+      "product": "The Videographer Snowboard",
+      "price": "885.95",
+      "qty": 50,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324032879",
+      "product": "The Minimal Snowboard",
+      "price": "885.95",
+      "qty": 50,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324098415",
+      "product": "The Inventory Not Tracked Snowboard",
+      "price": "949.95",
+      "qty": 0,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324360559",
+      "product": "The Collection Snowboard: Oxygen",
+      "price": "1025.00",
+      "qty": 50,
+      "policy": "DENY"
+    },
+    {
+      "id": "68100324295023",
+      "product": "The 3p Fulfilled Snowboard",
+      "price": "2629.95",
+      "qty": 20,
+      "policy": "DENY"
+    }
+  ]
+}
