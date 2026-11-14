@@ -365,6 +365,9 @@ describe("app/uninstalled webhook", () => {
         // way — a reinstall can never silently resume the feature.
         checkoutDiscountEnabled: false,
         checkoutDiscountEnabledAt: null,
+        // The recorded discount node id resets too — a reinstall can never
+        // aim the shutdown enforcer at a discount it did not verify.
+        checkoutDiscountNodeId: null,
       },
     });
   });

@@ -53,6 +53,11 @@ model Settings {
   // eligibility records, so enabling never qualifies historical orders.
   // Writable ONLY via setCheckoutDiscountEnabled.
   checkoutDiscountEnabledAt DateTime?
+  // The merchant's OWN Shopify automatic discount node
+  // (gid://shopify/DiscountAutomaticNode/<id>) recorded by prepare-enable
+  // after proving app ownership — lets the shutdown enforcer deactivate
+  // exactly that discount when a per-shop gate lever fails.
+  checkoutDiscountNodeId String?
 }
 
 // The durable work item for an ORDERS_CREATE event: PENDING until a terminal

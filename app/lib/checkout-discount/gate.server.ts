@@ -33,6 +33,22 @@ const defaultDeps = (): CheckoutGateDeps => ({
   control: () => prismaOperationStore.getControl(),
 });
 
+/** The PER-SHOP gate levers, as a single source of truth shared by the gate
+ *  and the shutdown enforcer: returns the first failing reason, or null
+ *  when every per-shop lever holds. (The global levers — env, AppControl,
+ *  allowlist, the shop opt-in flag itself — are deliberately not here.) */
+export function shopLevelGateOff(settings: MergeSettings): string | null {
+  if (!settings.autoMergeEnabled) return "auto-merge";
+  if (!isOnboardingComplete(settings)) return "onboarding";
+  // A merge window shorter than a full shop-local day can never carry an
+  // eligibility record (expiryDateFor has no day to return): the feature
+  // is disabled for 1/6/12 h windows rather than silently never issuing.
+  if (settings.mergeWindowHours < MIN_CHECKOUT_WINDOW_HOURS) {
+    return "window-unsupported";
+  }
+  return null;
+}
+
 export async function checkoutDiscountGate(
   shop: string,
   deps: Partial<CheckoutGateDeps> = {},
@@ -52,14 +68,8 @@ export async function checkoutDiscountGate(
     if (!settings.checkoutDiscountEnabled || settings.checkoutDiscountEnabledAt == null) {
       return { on: false, reason: "shop" };
     }
-    if (!settings.autoMergeEnabled) return { on: false, reason: "auto-merge" };
-    if (!isOnboardingComplete(settings)) return { on: false, reason: "onboarding" };
-    // A merge window shorter than a full shop-local day can never carry an
-    // eligibility record (expiryDateFor has no day to return): the feature
-    // is disabled for 1/6/12 h windows rather than silently never issuing.
-    if (settings.mergeWindowHours < MIN_CHECKOUT_WINDOW_HOURS) {
-      return { on: false, reason: "window-unsupported" };
-    }
+    const off = shopLevelGateOff(settings);
+    if (off !== null) return { on: false, reason: off };
     const enabledAt =
       settings.checkoutDiscountEnabledAt instanceof Date
         ? settings.checkoutDiscountEnabledAt

@@ -15,7 +15,12 @@
 // discountAutomaticDeactivate/Activate(id:), discountAutomaticAppUpdate(
 // id:, automaticAppDiscount:{ metafields:[...] }).
 import { gqlData, type AdminClient } from "../graphql.server";
-import { getSettings, setCheckoutDiscountEnabled } from "../settings.server";
+import {
+  getSettings,
+  setCheckoutDiscountEnabled,
+  setCheckoutDiscountNodeId,
+  type MergeSettings,
+} from "../settings.server";
 import { checkoutDiscountGate, type CheckoutGateResult } from "./gate.server";
 import { CHECKOUT_DISCOUNT_MESSAGE, checkoutDiscountWindowId } from "./config";
 
@@ -34,13 +39,35 @@ const Q_DISCOUNT = `#graphql
           status
           startsAt
           endsAt
-          appDiscountType { functionId }
+          appDiscountType { functionId app { id } }
           combinesWith { orderDiscounts productDiscounts shippingDiscounts }
         }
       }
       metafield(namespace: "$app", key: "config") { jsonValue }
     }
+    currentAppInstallation { app { id } }
   }`;
+
+// Emergency-shutdown verification read: ONLY the status. Deliberately never
+// selects the config metafield — a missing/malformed config must not block
+// stopping checkout discounting.
+const Q_STATUS = `#graphql
+  query CheckoutDiscountStatus($id: ID!) {
+    automaticDiscountNode(id: $id) {
+      id
+      automaticDiscount {
+        __typename
+        ... on DiscountAutomaticApp { status }
+      }
+    }
+  }`;
+
+const Q_SHOP_TZ = `#graphql
+  query CheckoutShopTimezone {
+    shop { ianaTimezone }
+  }`;
+
+const DISCOUNT_NODE_ID = /^gid:\/\/shopify\/DiscountAutomaticNode\/\d+$/;
 
 const M_DEACTIVATE = `#graphql
   mutation CheckoutDiscountDeactivate($id: ID!) {
@@ -78,6 +105,12 @@ export interface CheckoutDiscountConfig {
 
 export interface CheckoutDiscountState {
   status: string;
+  typename: string;
+  /** The appDiscountType's owning App id (null when not an app discount). */
+  appId: string | null;
+  /** True when appDiscountType.app.id === currentAppInstallation.app.id —
+   *  live-validated on Admin 2026-04. */
+  ownsThisApp: boolean;
   title: string;
   functionId: string;
   startsAt: string | null;
@@ -129,11 +162,12 @@ interface DiscountNodeData {
   automaticDiscountNode: {
     id: string;
     automaticDiscount: {
+      __typename?: string;
       title?: string;
       status?: string;
       startsAt?: string | null;
       endsAt?: string | null;
-      appDiscountType?: { functionId?: string } | null;
+      appDiscountType?: { functionId?: string; app?: { id?: string } | null } | null;
       combinesWith?: {
         orderDiscounts?: boolean;
         productDiscounts?: boolean;
@@ -142,6 +176,7 @@ interface DiscountNodeData {
     } | null;
     metafield?: { jsonValue?: unknown } | null;
   } | null;
+  currentAppInstallation?: { app?: { id?: string } | null } | null;
 }
 
 const readNode = async (admin: AdminClient, discountId: string) =>
@@ -159,8 +194,13 @@ export async function readCheckoutDiscount(
   if (!node || !node.automaticDiscount) return null;
   const d = node.automaticDiscount;
   const config = validateCheckoutConfig(node.metafield?.jsonValue);
+  const appId = d.appDiscountType?.app?.id ?? null;
   return {
     status: d.status ?? "UNKNOWN",
+    typename: d.__typename ?? "UNKNOWN",
+    appId,
+    ownsThisApp:
+      appId !== null && appId === (data?.currentAppInstallation?.app?.id ?? null),
     title: d.title ?? "",
     functionId: d.appDiscountType?.functionId ?? "",
     startsAt: d.startsAt ?? null,
@@ -192,36 +232,64 @@ const doSetEnabled = async (
   enabled: boolean,
 ) => (deps.setEnabled ?? setCheckoutDiscountEnabled)(deps.shop, enabled);
 
-/** Shutdown order (E): deactivate the Shopify discount FIRST, require the
- *  verified EXPIRED status, and only then flip the app flag. App flags are
- *  never touched when deactivation or verification fails. Idempotent when
- *  the discount is already inactive. */
+/** Shutdown order (E): NEVER depends on the config metafield — it may be
+ *  missing or malformed and must not block stopping checkout discounting.
+ *  1. Validate the node-id shape before any Admin call.
+ *  2. discountAutomaticDeactivate — always, no pre-read (idempotent;
+ *     userErrors such as "already inactive" cannot by themselves fail the
+ *     shutdown; a transport error is recorded and does not prevent 3).
+ *  3. Independently verify with the status-only read: verified when status
+ *     is EXPIRED or the node no longer exists (DELETED — a deleted discount
+ *     cannot grant). Anything else — ACTIVE, SCHEDULED, a wrong __typename,
+ *     an unreadable read — throws ShutdownNotVerifiedError and leaves the
+ *     app flag untouched (it stays on so the failure stays visible and the
+ *     sweeper retries).
+ *  4. Only after verification, clear the app's opt-in flag.
+ * Idempotent. */
 export async function shutdownCheckoutDiscount(
   deps: CheckoutControlDeps,
-): Promise<{ status: string }> {
-  const current = await readCheckoutDiscount(deps.admin, deps.discountId);
-  if (current && current.status === "EXPIRED") {
+): Promise<{ status: "EXPIRED" | "DELETED" }> {
+  if (!DISCOUNT_NODE_ID.test(deps.discountId)) {
+    throw new DiscountStateError(`invalid discount node id ${deps.discountId}`);
+  }
+  let deactivateError: string | null = null;
+  try {
+    await gqlData(deps.admin, "Deactivate checkout discount", M_DEACTIVATE, {
+      id: deps.discountId,
+    });
+    // userErrors are intentionally not inspected: "already inactive" and
+    // friends cannot themselves fail the shutdown — step 3's independent
+    // status read is the only authority.
+  } catch (err: any) {
+    deactivateError = err?.message ?? String(err);
+  }
+  let status: string | null = null;
+  let verifyError: string | null = null;
+  try {
+    const data = await gqlData<{
+      automaticDiscountNode?: {
+        automaticDiscount?: { __typename?: string; status?: string } | null;
+      } | null;
+    }>(deps.admin, "Verify checkout discount status", Q_STATUS, { id: deps.discountId });
+    const node = data?.automaticDiscountNode;
+    if (!node) {
+      status = "DELETED";
+    } else if (node.automaticDiscount?.__typename === "DiscountAutomaticApp") {
+      status = node.automaticDiscount.status ?? null;
+    }
+  } catch (err: any) {
+    verifyError = err?.message ?? String(err);
+  }
+  if (status === "EXPIRED" || status === "DELETED") {
     await doSetEnabled(deps, false);
-    return { status: "EXPIRED" };
+    return { status };
   }
-  const res = await gqlData<{ discountAutomaticDeactivate?: { userErrors?: { message: string }[] } }>(
-    deps.admin,
-    "Deactivate checkout discount",
-    M_DEACTIVATE,
-    { id: deps.discountId },
-  );
-  const errs = res?.discountAutomaticDeactivate?.userErrors ?? [];
-  if (errs.length) {
-    throw new DiscountStateError(`deactivate userErrors: ${JSON.stringify(errs)}`);
-  }
-  const after = await readCheckoutDiscount(deps.admin, deps.discountId);
-  if (!after || after.status !== "EXPIRED") {
-    throw new ShutdownNotVerifiedError(
-      `discount status after deactivate is ${after?.status ?? "unreadable"}, not EXPIRED — app flags left untouched`,
-    );
-  }
-  await doSetEnabled(deps, false);
-  return { status: "EXPIRED" };
+  const parts = [
+    `discount status after deactivate is ${status ?? "unreadable"}, not EXPIRED`,
+  ];
+  if (deactivateError) parts.push(`deactivate failed: ${deactivateError}`);
+  if (verifyError) parts.push(`verification read failed: ${verifyError}`);
+  throw new ShutdownNotVerifiedError(`${parts.join("; ")} — app flags left untouched`);
 }
 
 /** Stage the discount config for a fresh enable (E): requires the discount
@@ -231,13 +299,36 @@ export async function shutdownCheckoutDiscount(
  *  and re-reads it. The discount is LEFT INACTIVE; activate is a separate
  *  step. */
 export async function prepareEnable(
-  deps: CheckoutControlDeps & { readEnabledAt?: (shop: string) => Promise<Date | null> },
+  deps: CheckoutControlDeps & {
+    readEnabledAt?: (shop: string) => Promise<Date | null>;
+    recordDiscountId?: (shop: string, id: string | null) => Promise<void>;
+  },
 ): Promise<{ windowId: string; enabledAt: Date }> {
   const current = await readCheckoutDiscount(deps.admin, deps.discountId);
   if (!current) throw new DiscountStateError("checkout discount not found");
   if (current.status === "ACTIVE" || current.status === "SCHEDULED") {
     throw new DiscountStateError(
       `discount must be inactive to prepare-enable (status ${current.status})`,
+    );
+  }
+  // Identity proof BEFORE anything is enabled: the node must be a
+  // DiscountAutomaticApp owned by THIS app (appDiscountType.app.id ===
+  // currentAppInstallation.app.id — live-validated on 2026-04) carrying
+  // our checkout message, so an operator typo for someone else's discount
+  // can never be recorded or activated.
+  if (current.typename !== "DiscountAutomaticApp") {
+    throw new DiscountStateError(
+      `discount node is a ${current.typename}, not a DiscountAutomaticApp — refusing to enable`,
+    );
+  }
+  if (!current.ownsThisApp) {
+    throw new DiscountStateError(
+      "discount is not owned by this app (appDiscountType.app.id mismatch) — refusing to enable",
+    );
+  }
+  if (current.message !== CHECKOUT_DISCOUNT_MESSAGE) {
+    throw new DiscountStateError(
+      "discount config message does not match CHECKOUT_DISCOUNT_MESSAGE — refusing to enable",
     );
   }
   await doSetEnabled(deps, true);
@@ -285,26 +376,100 @@ export async function prepareEnable(
       `config read-back windowId ${after?.windowId ?? "unreadable"} != ${windowId}`,
     );
   }
+  // Record the verified discount identity — the only node the shutdown
+  // enforcer and the default CLI id may ever touch.
+  await (deps.recordDiscountId ?? setCheckoutDiscountNodeId)(deps.shop, deps.discountId);
   return { windowId, enabledAt: epoch };
 }
 
-/** Activate the staged discount (E): refuses unless the stored config
- *  windowId equals `expectedWindowId` AND the app gate would be on — a
- *  stale config or a disabled app flag means this activation was never
- *  prepared. Requires the post-mutation status to be ACTIVE. */
+/** Shop-local `YYYY-MM-DDTHH:MM:SS` (no timezone) for `now` in `timeZone`,
+ *  matching the DateTimeWithoutTimezone config format so a string compare
+ *  is a time compare. */
+export function shopLocalNow(now: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
+}
+
+const shopIanaTimezone = async (admin: AdminClient): Promise<string> => {
+  const data = await gqlData<{ shop?: { ianaTimezone?: string } }>(
+    admin,
+    "Read shop timezone",
+    Q_SHOP_TZ,
+    {},
+  );
+  const tz = data?.shop?.ianaTimezone;
+  if (!tz) throw new DiscountStateError("shop ianaTimezone unreadable");
+  return tz;
+};
+
+/** Activate the staged discount (E): a FRESH read must prove, all before
+ *  the mutation — the stored config validates and its windowId equals BOTH
+ *  `expectedWindowId` AND the current gate's windowId (three-way equality
+ *  rules out a stale config from a previous epoch); the config message is
+ *  exactly CHECKOUT_DISCOUNT_MESSAGE; the percentage is a string decimal in
+ *  (0, 100]; the stored window contains the shop-local now; and the node
+ *  id is the recorded checkoutDiscountNodeId (no recorded id → "run
+ *  prepare-enable first"). Requires the post-mutation status to be ACTIVE. */
 export async function activateCheckoutDiscount(
-  deps: CheckoutControlDeps & { expectedWindowId: string },
+  deps: CheckoutControlDeps & {
+    expectedWindowId: string;
+    readSettings?: (shop: string) => Promise<MergeSettings>;
+    now?: () => Date;
+    shopTimezone?: string;
+  },
 ): Promise<{ status: string }> {
   const current = await readCheckoutDiscount(deps.admin, deps.discountId);
   if (!current) throw new DiscountStateError("checkout discount not found");
-  if (current.windowId !== deps.expectedWindowId) {
+  const settings = await (deps.readSettings ?? getSettings)(deps.shop);
+  if (!settings.checkoutDiscountNodeId) {
     throw new DiscountStateError(
-      `stored windowId ${current.windowId} does not match expected ${deps.expectedWindowId} — refusing to activate`,
+      "no checkout discount node id recorded — run prepare-enable first",
+    );
+  }
+  if (settings.checkoutDiscountNodeId !== deps.discountId) {
+    throw new DiscountStateError(
+      `discount id ${deps.discountId} does not match the recorded ${settings.checkoutDiscountNodeId} — refusing to activate an unrelated discount`,
     );
   }
   const gate = await (deps.gate ?? ((s: string) => checkoutDiscountGate(s)))(deps.shop);
   if (!gate.on) {
     throw new DiscountStateError(`app gate is not on (${!gate.on ? gate.reason : "?"}) — refusing to activate`);
+  }
+  if (
+    current.windowId !== deps.expectedWindowId ||
+    gate.windowId !== deps.expectedWindowId
+  ) {
+    throw new DiscountStateError(
+      `windowId mismatch (stored ${current.windowId}, expected ${deps.expectedWindowId}, gate ${gate.windowId}) — refusing to activate`,
+    );
+  }
+  if (current.message !== CHECKOUT_DISCOUNT_MESSAGE) {
+    throw new DiscountStateError(
+      "config message does not match CHECKOUT_DISCOUNT_MESSAGE — refusing to activate",
+    );
+  }
+  const pct = Number(current.percentage);
+  if (!(pct > 0 && pct <= 100)) {
+    throw new DiscountStateError(
+      `config percentage ${current.percentage} out of range (0, 100] — refusing to activate`,
+    );
+  }
+  const tz = deps.shopTimezone ?? (await shopIanaTimezone(deps.admin));
+  const localNow = shopLocalNow(deps.now?.() ?? new Date(), tz);
+  if (!(current.windowStart <= localNow && localNow < current.windowEnd)) {
+    throw new DiscountStateError(
+      `config window ${current.windowStart}..${current.windowEnd} does not contain shop-local now ${localNow} (${tz}) — refusing to activate`,
+    );
   }
   const res = await gqlData<{ discountAutomaticActivate?: { userErrors?: { message: string }[] } }>(
     deps.admin,

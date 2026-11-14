@@ -67,7 +67,11 @@ mutations; `scripts/checkout-discount-control.ts` is the operator CLI.)
   applies; the Function also requires `exp >= today` per record. Once
   `windowEnd` passes, ALL discounts silently stop — it must be maintained.
 - A deactivated discount (status `EXPIRED`) is the ONLY thing that stops
-  checkout discounting — flipping the app's own gate/settings never does.
+  checkout discounting — flipping the app's own gate/settings never does
+  (turning merging off or lowering the merge window below 24 h instead
+  triggers an automatic deactivation of this discount). The operator
+  shutdown path never reads this config — a missing or malformed config
+  cannot block deactivation.
 
 ## Building / deploying in a dev workspace
 

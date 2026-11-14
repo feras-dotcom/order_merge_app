@@ -41,20 +41,42 @@ const baseConfig = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-/** Fake Admin modeling the automaticDiscountNode + its three mutations. */
-const makeDiscountAdmin = (init: { status: string; config?: Record<string, unknown> }) => {
+const APP = "gid://shopify/App/446390730753";
+const OTHER_NODE = "gid://shopify/DiscountAutomaticNode/4242";
+
+/** Fake Admin modeling the automaticDiscountNode + its three mutations, the
+ *  minimal status-only verification read, the shop timezone read, and app
+ *  ownership (appDiscountType.app.id vs currentAppInstallation.app.id). */
+const makeDiscountAdmin = (init: {
+  status: string;
+  config?: Record<string, unknown> | null;
+  typename?: string;
+  appId?: string;
+  installationAppId?: string;
+  deleted?: boolean;
+}) => {
   const state = {
     status: init.status,
-    config: init.config ?? baseConfig(),
+    config: init.config === undefined ? baseConfig() : init.config,
+    typename: init.typename ?? "DiscountAutomaticApp",
+    appId: init.appId ?? APP,
+    installationAppId: init.installationAppId ?? APP,
+    deleted: init.deleted ?? false,
+    calls: 0,
     deactivateCalls: 0,
     activateCalls: 0,
     updateCalls: 0,
-    failDeactivate: false,
+    failDeactivate: false,      // userErrors (e.g. "already inactive")
+    transportDeactivate: false, // top-level errors — gqlData throws
+    failVerify: false,          // the status-only read throws
+    poisonConfigRead: false,    // any config-containing read throws
     stuckStatus: null as string | null, // verification reads keep this status
+    deactivateIds: [] as string[],
   };
   const admin = {
     state,
     async graphql(query: string, options?: { variables?: Record<string, unknown> }) {
+      state.calls += 1;
       const respond = (body: any) => ({ ok: true, status: 200, json: async () => body });
       const vars = options?.variables ?? {};
       const node = () => ({
@@ -62,24 +84,33 @@ const makeDiscountAdmin = (init: { status: string; config?: Record<string, unkno
           automaticDiscountNode: {
             id: vars.id ?? DID,
             automaticDiscount: {
+              __typename: state.typename,
               title: "MS Checkout Shipping",
               status: state.stuckStatus ?? state.status,
               startsAt: "2026-11-01T00:00:00Z",
               endsAt: null,
-              appDiscountType: { functionId: "fn-1" },
+              appDiscountType:
+                state.typename === "DiscountAutomaticApp"
+                  ? { functionId: "fn-1", app: { id: state.appId } }
+                  : null,
               combinesWith: { orderDiscounts: false, productDiscounts: false, shippingDiscounts: false },
             },
             metafield: { jsonValue: state.config },
           },
+          currentAppInstallation: { app: { id: state.installationAppId } },
         },
       });
       if (query.includes("discountAutomaticDeactivate")) {
-        if (state.failDeactivate) {
-          return respond({
-            data: { discountAutomaticDeactivate: { automaticDiscountNode: null, userErrors: [{ field: ["id"], message: "boom" }] } },
-          });
+        state.deactivateIds.push(vars.id as string);
+        if (state.transportDeactivate) {
+          return respond({ errors: [{ message: "transport boom" }] });
         }
         state.deactivateCalls += 1;
+        if (state.failDeactivate) {
+          return respond({
+            data: { discountAutomaticDeactivate: { automaticDiscountNode: null, userErrors: [{ field: ["id"], message: "already inactive" }] } },
+          });
+        }
         state.status = "EXPIRED";
         return respond({ data: { discountAutomaticDeactivate: { automaticDiscountNode: { id: DID }, userErrors: [] } } });
       }
@@ -96,23 +127,64 @@ const makeDiscountAdmin = (init: { status: string; config?: Record<string, unkno
         }
         return respond({ data: { discountAutomaticAppUpdate: { automaticAppDiscount: { discountId: DID, status: state.status }, userErrors: [] } } });
       }
-      if (query.includes("automaticDiscountNode")) return respond(node());
+      // The status-only verification read (Q_STATUS) — BEFORE the generic
+      // automaticDiscountNode branch.
+      if (query.includes("CheckoutDiscountStatus")) {
+        if (state.failVerify) return respond({ errors: [{ message: "verify read fail" }] });
+        return respond({
+          data: {
+            automaticDiscountNode: state.deleted
+              ? null
+              : {
+                  id: vars.id ?? DID,
+                  automaticDiscount: {
+                    __typename: state.typename,
+                    status: state.stuckStatus ?? state.status,
+                  },
+                },
+          },
+        });
+      }
+      if (query.includes("CheckoutShopTimezone") || (query.includes("ianaTimezone") && !query.includes("order"))) {
+        return respond({ data: { shop: { ianaTimezone: "UTC" } } });
+      }
+      if (query.includes("automaticDiscountNode")) {
+        if (state.poisonConfigRead) {
+          return respond({ errors: [{ message: "config read fail" }] });
+        }
+        if (state.deleted) return respond({ data: { automaticDiscountNode: null } });
+        return respond(node());
+      }
       throw new Error(`fake discount admin: unhandled ${query.slice(0, 60)}`);
     },
   };
   return admin;
 };
 
-/** Fake setEnabled/readEnabledAt pair: enable stamps a fresh epoch on a
- *  false→true transition exactly like setCheckoutDiscountEnabled. */
-const makeEpoch = (initial: Date | null) => {
-  const state = { enabledAt: initial as Date | null, tick: Date.parse("2026-11-15T00:00:00Z") };
+/** Fake setEnabled/readEnabledAt/recordDiscountId/readSettings quartet:
+ *  enable stamps a fresh epoch on a false→true transition exactly like
+ *  setCheckoutDiscountEnabled; nodeId mirrors checkoutDiscountNodeId. */
+const makeEpoch = (initial: Date | null, nodeId: string | null = null) => {
+  const state = {
+    enabledAt: initial as Date | null,
+    nodeId: nodeId as string | null,
+    tick: Date.parse("2026-11-15T00:00:00Z"),
+  };
   return {
     state,
     setEnabled: async (_shop: string, enabled: boolean) => {
       state.enabledAt = enabled ? (state.enabledAt ?? new Date(state.tick++)) : null;
     },
     readEnabledAt: async () => state.enabledAt,
+    recordDiscountId: async (_shop: string, id: string | null) => {
+      state.nodeId = id;
+    },
+    readSettings: async () => ({
+      ...DEFAULT_SETTINGS,
+      checkoutDiscountEnabled: state.enabledAt !== null,
+      checkoutDiscountEnabledAt: state.enabledAt,
+      checkoutDiscountNodeId: state.nodeId,
+    }),
   };
 };
 
@@ -122,6 +194,8 @@ const deps = (admin: any, epoch: ReturnType<typeof makeEpoch>) => ({
   discountId: DID,
   setEnabled: epoch.setEnabled,
   readEnabledAt: epoch.readEnabledAt,
+  recordDiscountId: epoch.recordDiscountId,
+  readSettings: epoch.readSettings,
 });
 
 describe("validateCheckoutConfig", () => {
@@ -153,11 +227,86 @@ describe("shutdownCheckoutDiscount", () => {
     expect(epoch.state.enabledAt).toBe(null);
   });
 
-  it("a failed deactivate leaves the app flag untouched", async () => {
-    const admin = makeDiscountAdmin({ status: "ACTIVE" });
-    admin.state.failDeactivate = true;
+  it("a malformed config does not block shutdown (no config read at all)", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE", config: { garbage: true } });
     const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
-    await expect(shutdownCheckoutDiscount(deps(admin as any, epoch) as any)).rejects.toThrow(DiscountStateError);
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("EXPIRED");
+    expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("a missing config metafield does not block shutdown", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE", config: null });
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("EXPIRED");
+    expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("a config read that would throw is never issued — status read alone verifies", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE" });
+    admin.state.poisonConfigRead = true; // Q_DISCOUNT would throw; Q_STATUS answers
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("EXPIRED");
+    expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("an invalid discount id throws before ANY Admin call", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE" });
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    await expect(
+      shutdownCheckoutDiscount({ ...deps(admin as any, epoch), discountId: "not-a-gid" } as any),
+    ).rejects.toThrow(DiscountStateError);
+    expect(admin.state.calls).toBe(0);
+    expect(epoch.state.enabledAt).not.toBe(null);
+  });
+
+  it("deactivate userErrors cannot fail the shutdown — verification decides (already inactive)", async () => {
+    const admin = makeDiscountAdmin({ status: "EXPIRED" });
+    admin.state.failDeactivate = true; // userErrors "already inactive"
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("EXPIRED");
+    expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("a transport deactivate failure still verifies — success with flags flipped", async () => {
+    const admin = makeDiscountAdmin({ status: "EXPIRED" }); // already EXPIRED server-side
+    admin.state.transportDeactivate = true;
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("EXPIRED");
+    expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("a transport deactivate failure + unverifiable status surfaces BOTH messages", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE" });
+    admin.state.transportDeactivate = true;
+    admin.state.failVerify = true;
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    const err = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any).catch((e) => e);
+    expect(err).toBeInstanceOf(ShutdownNotVerifiedError);
+    expect(String(err.message)).toContain("transport boom");
+    expect(String(err.message)).toContain("verify read fail");
+    expect(epoch.state.enabledAt).not.toBe(null);
+  });
+
+  it("a deleted discount is verified DELETED and clears the flag", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE", deleted: true });
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("DELETED");
+    expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("a verification read failure leaves the app flag untouched", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE" });
+    admin.state.failVerify = true;
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    await expect(shutdownCheckoutDiscount(deps(admin as any, epoch) as any)).rejects.toThrow(
+      ShutdownNotVerifiedError,
+    );
     expect(epoch.state.enabledAt).not.toBe(null);
   });
 
@@ -171,12 +320,35 @@ describe("shutdownCheckoutDiscount", () => {
     expect(epoch.state.enabledAt).not.toBe(null);
   });
 
-  it("already inactive => idempotent: no deactivate call, flag cleared", async () => {
+  it("a wrong __typename in the verification read fails closed", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE", typename: "DiscountAutomaticBasic" });
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    await expect(shutdownCheckoutDiscount(deps(admin as any, epoch) as any)).rejects.toThrow(
+      ShutdownNotVerifiedError,
+    );
+    expect(epoch.state.enabledAt).not.toBe(null);
+  });
+
+  it("already inactive => idempotent: deactivate still issued, flag cleared", async () => {
     const admin = makeDiscountAdmin({ status: "EXPIRED" });
     const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
     const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
     expect(r.status).toBe("EXPIRED");
-    expect(admin.state.deactivateCalls).toBe(0);
+    expect(admin.state.deactivateCalls).toBe(1);
+    expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("a transient deactivate failure is recovered by a second call", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE" });
+    admin.state.transportDeactivate = true;
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    await expect(shutdownCheckoutDiscount(deps(admin as any, epoch) as any)).rejects.toThrow(
+      ShutdownNotVerifiedError,
+    );
+    expect(epoch.state.enabledAt).not.toBe(null);
+    admin.state.transportDeactivate = false;
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("EXPIRED");
     expect(epoch.state.enabledAt).toBe(null);
   });
 });
@@ -189,62 +361,190 @@ describe("prepareEnable", () => {
     expect(epoch.state.enabledAt).toBe(null);
   });
 
-  it("derives w<epochMs>, writes it into the config and leaves the discount inactive", async () => {
+  it("refuses a discount owned by a DIFFERENT app — nothing enabled or recorded", async () => {
+    const admin = makeDiscountAdmin({ status: "EXPIRED", appId: "gid://shopify/App/999999" });
+    const epoch = makeEpoch(null);
+    await expect(prepareEnable(deps(admin as any, epoch) as any)).rejects.toThrow(
+      /not owned by this app/,
+    );
+    expect(epoch.state.enabledAt).toBe(null);
+    expect(epoch.state.nodeId).toBe(null);
+    expect(admin.state.updateCalls).toBe(0);
+  });
+
+  it("refuses a non-app automatic discount (wrong __typename)", async () => {
+    const admin = makeDiscountAdmin({ status: "EXPIRED", typename: "DiscountAutomaticBasic" });
+    const epoch = makeEpoch(null);
+    await expect(prepareEnable(deps(admin as any, epoch) as any)).rejects.toThrow(
+      DiscountStateError,
+    );
+    expect(epoch.state.enabledAt).toBe(null);
+    expect(epoch.state.nodeId).toBe(null);
+  });
+
+  it("refuses a config whose message is not ours", async () => {
+    const admin = makeDiscountAdmin({
+      status: "EXPIRED",
+      config: baseConfig({ message: "some other discount" }),
+    });
+    const epoch = makeEpoch(null);
+    await expect(prepareEnable(deps(admin as any, epoch) as any)).rejects.toThrow(
+      DiscountStateError,
+    );
+    expect(epoch.state.enabledAt).toBe(null);
+    expect(epoch.state.nodeId).toBe(null);
+  });
+
+  it("derives w<epochMs>, writes it into the config, records the node id and leaves the discount inactive", async () => {
     const admin = makeDiscountAdmin({ status: "EXPIRED" });
     const epoch = makeEpoch(null);
     const r = await prepareEnable(deps(admin as any, epoch) as any);
     expect(r.windowId).toBe(`w${r.enabledAt.getTime()}`);
-    expect(admin.state.config.windowId).toBe(r.windowId);
+    expect(admin.state.config!.windowId).toBe(r.windowId);
     // Other config keys preserved.
-    expect(admin.state.config.percentage).toBe("100.0");
-    expect(admin.state.config.message).toBe(CHECKOUT_DISCOUNT_MESSAGE);
-    expect(admin.state.config.windowEnd).toBe("2026-12-01T00:00:00");
+    expect(admin.state.config!.percentage).toBe("100.0");
+    expect(admin.state.config!.message).toBe(CHECKOUT_DISCOUNT_MESSAGE);
+    expect(admin.state.config!.windowEnd).toBe("2026-12-01T00:00:00");
     expect(admin.state.status).toBe("EXPIRED"); // still inactive
+    // The verified identity is recorded for activate/shutdown/enforcer.
+    expect(epoch.state.nodeId).toBe(DID);
   });
 });
 
 describe("activateCheckoutDiscount", () => {
-  const gateOn = {
-    on: true,
-    enabledAt: new Date("2026-11-15T00:00:00Z"),
-    mergeWindowHours: 24,
-    windowId: "w",
-  } as const;
+  const NOW = new Date("2026-11-15T12:00:00Z");
+  const gateOn = (windowId: string) =>
+    ({
+      on: true,
+      enabledAt: NOW,
+      mergeWindowHours: 24,
+      windowId,
+    }) as const;
+  const actDeps = (admin: any, epoch: ReturnType<typeof makeEpoch>, over: Record<string, unknown> = {}) => ({
+    ...deps(admin, epoch),
+    expectedWindowId: "w1",
+    gate: async () => gateOn("w1"),
+    now: () => NOW,
+    shopTimezone: "UTC",
+    ...over,
+  });
+  const ready = (config: Record<string, unknown> = {}, nodeId: string | null = DID) => ({
+    admin: makeDiscountAdmin({ status: "EXPIRED", config: baseConfig({ windowId: "w1", ...config }) }),
+    epoch: makeEpoch(new Date("2026-11-15T00:00:00Z"), nodeId),
+  });
 
-  it("refuses when the stored windowId does not match", async () => {
-    const admin = makeDiscountAdmin({ status: "EXPIRED", config: baseConfig({ windowId: "w1" }) });
-    const epoch = makeEpoch(new Date("2026-11-15T00:00:00Z"));
+  it("refuses when no discount node id is recorded — run prepare-enable first", async () => {
+    const { admin, epoch } = ready({}, null);
+    await expect(activateCheckoutDiscount(actDeps(admin, epoch) as any)).rejects.toThrow(
+      /prepare-enable first/,
+    );
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("refuses an unrelated discount id", async () => {
+    const { admin, epoch } = ready();
     await expect(
-      activateCheckoutDiscount({
-        ...deps(admin as any, epoch),
-        expectedWindowId: "w-other",
-        gate: async () => gateOn,
-      } as any),
+      activateCheckoutDiscount(actDeps(admin, epoch, { discountId: OTHER_NODE }) as any),
+    ).rejects.toThrow(DiscountStateError);
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("refuses a wrong expected epoch", async () => {
+    const { admin, epoch } = ready();
+    await expect(
+      activateCheckoutDiscount(actDeps(admin, epoch, { expectedWindowId: "w-other" }) as any),
+    ).rejects.toThrow(DiscountStateError);
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("refuses a stale config from a previous epoch while the gate is on the new one", async () => {
+    const { admin, epoch } = ready({ windowId: "w-old-epoch" });
+    await expect(
+      activateCheckoutDiscount(actDeps(admin, epoch, { expectedWindowId: "w-new" }) as any),
+    ).rejects.toThrow(DiscountStateError);
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("refuses when the gate windowId differs from expected", async () => {
+    const { admin, epoch } = ready();
+    await expect(
+      activateCheckoutDiscount(
+        actDeps(admin, epoch, { gate: async () => gateOn("w-gate-rotated") }) as any,
+      ),
     ).rejects.toThrow(DiscountStateError);
     expect(admin.state.activateCalls).toBe(0);
   });
 
   it("refuses when the app gate is not on", async () => {
-    const admin = makeDiscountAdmin({ status: "EXPIRED", config: baseConfig({ windowId: "w1" }) });
-    const epoch = makeEpoch(new Date("2026-11-15T00:00:00Z"));
+    const { admin, epoch } = ready();
     await expect(
-      activateCheckoutDiscount({
-        ...deps(admin as any, epoch),
-        expectedWindowId: "w1",
-        gate: async () => ({ on: false, reason: "shop" }),
-      } as any),
+      activateCheckoutDiscount(
+        actDeps(admin, epoch, { gate: async () => ({ on: false, reason: "auto-merge" }) }) as any,
+      ),
     ).rejects.toThrow(DiscountStateError);
     expect(admin.state.activateCalls).toBe(0);
   });
 
-  it("activates when config and gate agree, verified ACTIVE", async () => {
-    const admin = makeDiscountAdmin({ status: "EXPIRED", config: baseConfig({ windowId: "w1" }) });
-    const epoch = makeEpoch(new Date("2026-11-15T00:00:00Z"));
-    const r = await activateCheckoutDiscount({
-      ...deps(admin as any, epoch),
-      expectedWindowId: "w1",
-      gate: async () => gateOn,
-    } as any);
+  it("refuses an incorrect config message", async () => {
+    const { admin, epoch } = ready({ message: "wrong message" });
+    await expect(activateCheckoutDiscount(actDeps(admin, epoch) as any)).rejects.toThrow(
+      DiscountStateError,
+    );
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("refuses a non-string percentage (fails config validation)", async () => {
+    const { admin, epoch } = ready({ percentage: 100 });
+    await expect(activateCheckoutDiscount(actDeps(admin, epoch) as any)).rejects.toThrow(
+      DiscountConfigError,
+    );
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("refuses out-of-range percentages", async () => {
+    for (const percentage of ["0.0", "150.0"]) {
+      const { admin, epoch } = ready({ percentage });
+      await expect(activateCheckoutDiscount(actDeps(admin, epoch) as any)).rejects.toThrow(
+        DiscountStateError,
+      );
+      expect(admin.state.activateCalls).toBe(0);
+    }
+  });
+
+  it("refuses when the config window has not started (shop-local now)", async () => {
+    const { admin, epoch } = ready({ windowStart: "2026-11-20T00:00:00" });
+    await expect(activateCheckoutDiscount(actDeps(admin, epoch) as any)).rejects.toThrow(
+      /does not contain shop-local now/,
+    );
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("refuses when the config window already ended", async () => {
+    const { admin, epoch } = ready({ windowEnd: "2026-11-10T00:00:00" });
+    await expect(activateCheckoutDiscount(actDeps(admin, epoch) as any)).rejects.toThrow(
+      DiscountStateError,
+    );
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("the window check compares against the SHOP timezone, not UTC", async () => {
+    // 2026-11-15T23:30Z is 2026-11-16 in Kiritimati (UTC+14) — the window
+    // ending 2026-11-15 has already passed shop-locally.
+    const { admin, epoch } = ready({ windowEnd: "2026-11-15T23:59:59" });
+    await expect(
+      activateCheckoutDiscount(
+        actDeps(admin, epoch, {
+          now: () => new Date("2026-11-15T23:30:00Z"),
+          shopTimezone: "Pacific/Kiritimati",
+        }) as any,
+      ),
+    ).rejects.toThrow(DiscountStateError);
+    expect(admin.state.activateCalls).toBe(0);
+  });
+
+  it("activates when config, gate, window and recorded id all agree, verified ACTIVE", async () => {
+    const { admin, epoch } = ready();
+    const r = await activateCheckoutDiscount(actDeps(admin, epoch) as any);
     expect(r.status).toBe("ACTIVE");
     expect(admin.state.activateCalls).toBe(1);
   });
@@ -385,7 +685,7 @@ it("E2E: a record from a previous enable epoch can never grant again", async () 
   expect(parseElig(elig.stored(CUST)).doc.recs.find((r) => r.id === "2002")!.left).toBe(0);
 
   // Shutdown: discount deactivated (verified EXPIRED), then the flag flips.
-  const ddeps = { admin: admin as any, shop: SHOP, discountId: DID, setEnabled: epoch.setEnabled };
+  const ddeps = deps(admin as any, epoch);
   await shutdownCheckoutDiscount(ddeps);
   expect(epoch.state.enabledAt).toBe(null);
   expect(discount.state.status).toBe("EXPIRED");
@@ -395,7 +695,7 @@ it("E2E: a record from a previous enable epoch can never grant again", async () 
   const prep = await prepareEnable({ ...ddeps, readEnabledAt: epoch.readEnabledAt });
   const WIN2 = prep.windowId;
   expect(WIN2).not.toBe(WIN1);
-  expect(discount.state.config.windowId).toBe(WIN2);
+  expect(discount.state.config!.windowId).toBe(WIN2);
   expect(discount.state.status).toBe("EXPIRED");
 
   // The stale WIN1 records — live AND consumed — cannot discount under the

@@ -13,7 +13,7 @@
 // Date bind.
 
 import { execSync } from "child_process";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import {
   CHECKOUT_DEADLINE_MS,
@@ -280,5 +280,44 @@ describe.skipIf(!URL)("checkout work store (real Postgres)", () => {
     } finally {
       await db2.$disconnect();
     }
+  });
+});
+
+describe.skipIf(!URL)("checkout discount node id (real Postgres)", () => {
+  let db: PrismaClient;
+
+  beforeAll(async () => {
+    await preflightDisposableDatabase(URL!);
+    db = new PrismaClient({ datasources: { db: { url: URL } } });
+  }, 120_000);
+
+  beforeEach(async () => {
+    await db.$executeRawUnsafe(`TRUNCATE "Settings" RESTART IDENTITY CASCADE`);
+  });
+
+  afterAll(async () => {
+    await db?.$disconnect();
+  });
+
+  it("the column exists and setCheckoutDiscountNodeId writes/clears it", async () => {
+    const { setCheckoutDiscountNodeId } = await import("../app/lib/settings.server");
+    await setCheckoutDiscountNodeId(SHOP, "gid://shopify/DiscountAutomaticNode/99", db);
+    let s = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s?.checkoutDiscountNodeId).toBe("gid://shopify/DiscountAutomaticNode/99");
+    await setCheckoutDiscountNodeId(SHOP, null, db);
+    s = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s?.checkoutDiscountNodeId).toBe(null);
+  });
+
+  it("resetAutomationForUninstall clears the recorded node id", async () => {
+    const { setCheckoutDiscountNodeId, resetAutomationForUninstall } = await import(
+      "../app/lib/settings.server"
+    );
+    await setCheckoutDiscountNodeId(SHOP, "gid://shopify/DiscountAutomaticNode/99", db);
+    await resetAutomationForUninstall(SHOP, db);
+    const s = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s?.checkoutDiscountNodeId).toBe(null);
+    expect(s?.checkoutDiscountEnabled).toBe(false);
+    expect(s?.checkoutDiscountEnabledAt).toBe(null);
   });
 });
