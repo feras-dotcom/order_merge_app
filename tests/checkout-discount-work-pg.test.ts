@@ -191,4 +191,94 @@ describe.skipIf(!URL)("checkout work store (real Postgres)", () => {
     expect(await store.find(SHOP, oid(14))).toBeNull();
     expect(await store.find(SHOP, oid(13))).not.toBeNull(); // REVIEW is kept
   });
+  it("touchExisting: no row => null and nothing written", async () => {
+    expect(await store.touchExisting(SHOP, oid(20), "tok1", TTL, CHECKOUT_DEADLINE_MS)).toBeNull();
+    expect(await store.find(SHOP, oid(20))).toBeNull();
+    const [{ n }] = await db.$queryRawUnsafe<{ n: bigint }[]>(
+      `SELECT count(*) AS n FROM "CheckoutEligibilityWork"`,
+    );
+    expect(Number(n)).toBe(0);
+  });
+
+  it("touchExisting: live lease is kept (owner untouched), gen bumps, acquired=false", async () => {
+    const r = await store.upsertDirty(SHOP, oid(21), "tok1", TTL, CHECKOUT_DEADLINE_MS);
+    const t = await store.touchExisting(SHOP, oid(21), "tok2", TTL, CHECKOUT_DEADLINE_MS);
+    expect(t).not.toBeNull();
+    expect(t!.acquired).toBe(false);
+    const row = await store.find(SHOP, oid(21));
+    expect(row).toMatchObject({ gen: 2, status: "PENDING", leaseToken: "tok1", attempts: 1 });
+    expect(row!.leasedUntil!.getTime()).toBe(r.item.leasedUntil!.getTime());
+  });
+
+  it("touchExisting: expired lease is acquired by the supplied token", async () => {
+    const r = await store.upsertDirty(SHOP, oid(22), "tok1", TTL, CHECKOUT_DEADLINE_MS);
+    await expireLease(r.item.id);
+    const t = await store.touchExisting(SHOP, oid(22), "tok2", TTL, CHECKOUT_DEADLINE_MS);
+    expect(t!.acquired).toBe(true);
+    expect(await store.find(SHOP, oid(22))).toMatchObject({
+      gen: 2, status: "PENDING", leaseToken: "tok2", attempts: 1,
+    });
+  });
+
+  it("touchExisting re-opens a DONE row exactly like the upsertDirty conflict branch", async () => {
+    const r = await store.upsertDirty(SHOP, oid(23), "tok1", TTL, CHECKOUT_DEADLINE_MS);
+    await store.complete(r.item.id, "tok1", 1, "PROJECTED", "ok");
+    const t = await store.touchExisting(SHOP, oid(23), "tok2", TTL, CHECKOUT_DEADLINE_MS);
+    expect(t!.acquired).toBe(true);
+    expect(await store.find(SHOP, oid(23))).toMatchObject({
+      gen: 2, status: "PENDING", outcome: null, doneAt: null, leaseToken: "tok2", attempts: 1,
+    });
+  });
+
+  it("reopenOutstanding: outcome + age filtering and FOR UPDATE SKIP LOCKED limit", async () => {
+    const made = async (n: number, outcome: string) => {
+      const r = await store.upsertDirty(SHOP, oid(n), "tok1", TTL, CHECKOUT_DEADLINE_MS);
+      await store.complete(r.item.id, "tok1", 1, outcome, "ok");
+      return r.item.id;
+    };
+    // Old enough to re-open: PROJECTED rows.
+    const ids = [await made(30, "PROJECTED"), await made(31, "PROJECTED"), await made(32, "PROJECTED")];
+    await made(33, "CONSUMED");   // never
+    await made(34, "REFUSED");    // never
+    // Too young to re-open.
+    await made(35, "PROJECTED");
+    for (const id of ids) {
+      await db.$executeRaw`UPDATE "CheckoutEligibilityWork" SET "doneAt" = ${dbWallPlus(-700_000)} WHERE id = ${id}`;
+    }
+    const args = { olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 50, deadlineMs: CHECKOUT_DEADLINE_MS };
+    // Too-old row: createdAt beyond maxAge stays DONE.
+    await db.$executeRaw`UPDATE "CheckoutEligibilityWork" SET "createdAt" = ${dbWallPlus(-9 * 24 * 3600_000)} WHERE id = ${ids[0]}`;
+    expect(await store.reopenOutstanding(args)).toBe(2);
+    expect(await store.find(SHOP, oid(31))).toMatchObject({ status: "PENDING", outcome: null, attempts: 0, leaseToken: null, doneAt: null });
+    expect(await store.find(SHOP, oid(32))).toMatchObject({ status: "PENDING" });
+    expect((await store.find(SHOP, oid(30)))!.status).toBe("DONE"); // too old
+    expect((await store.find(SHOP, oid(33)))!.status).toBe("DONE");
+    expect((await store.find(SHOP, oid(34)))!.status).toBe("DONE");
+    expect((await store.find(SHOP, oid(35)))!.status).toBe("DONE"); // too young
+    // limit: another aged batch, limit 1 takes exactly one.
+    const m1 = await made(36, "PROJECTED");
+    const m2 = await made(37, "PROJECTED");
+    await db.$executeRaw`UPDATE "CheckoutEligibilityWork" SET "doneAt" = ${dbWallPlus(-700_000)} WHERE id IN (${m1}, ${m2})`;
+    expect(await store.reopenOutstanding({ ...args, limit: 1 })).toBe(1);
+  });
+
+  it("reopenOutstanding is safe under concurrent calls (SKIP LOCKED)", async () => {
+    for (let n = 40; n < 46; n++) {
+      const r = await store.upsertDirty(SHOP, oid(n), "tok1", TTL, CHECKOUT_DEADLINE_MS);
+      await store.complete(r.item.id, "tok1", 1, "PROJECTED", "ok");
+      await db.$executeRaw`UPDATE "CheckoutEligibilityWork" SET "doneAt" = ${dbWallPlus(-700_000)} WHERE id = ${r.item.id}`;
+    }
+    const db2 = new PrismaClient({ datasources: { db: { url: URL! } } });
+    const store2 = prismaCheckoutWorkStore(db2);
+    try {
+      const args = { olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 4, deadlineMs: CHECKOUT_DEADLINE_MS };
+      const [a, b] = await Promise.all([store.reopenOutstanding(args), store2.reopenOutstanding(args)]);
+      // Both calls together cover all 6 rows exactly once — no double-open.
+      expect(a + b).toBe(6);
+      const [claim1] = await Promise.all([store.claimDue(10, TTL), store2.claimDue(10, TTL)]);
+      expect(claim1.length).toBe(6);
+    } finally {
+      await db2.$disconnect();
+    }
+  });
 });

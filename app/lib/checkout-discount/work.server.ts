@@ -62,6 +62,13 @@ export const CHECKOUT_MAX_ATTEMPTS = 20;
 export const CHECKOUT_DEADLINE_MS = 6 * 60 * 60 * 1000;
 export const CHECKOUT_DONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** Sweeper re-check cadence: every outstanding PROJECTED row is re-verified
+ *  from fresh Shopify state roughly every 10 minutes for its first 8 days,
+ *  so a lost revocation webhook self-corrects within one sweep tick. */
+export const CHECKOUT_RECHECK_MS = 10 * 60_000;
+export const CHECKOUT_RECHECK_MAX_AGE_MS = 8 * 24 * 3600_000;
+export const CHECKOUT_RECHECK_LIMIT = 50;
+
 export interface CheckoutWorkStore {
   /** Marks (shop, orderId) dirty and bumps gen. A new row is created PENDING
    *  leased to `token` (attempts 1, deadline now + deadlineMs). An existing
@@ -76,6 +83,32 @@ export interface CheckoutWorkStore {
     ttlMs: number,
     deadlineMs: number,
   ): Promise<{ item: CheckoutWorkItem; acquired: boolean }>;
+  /** Exactly the conflict-branch semantics of `upsertDirty` — gen+1,
+   *  PENDING, due now, live lease kept / expired lease taken — for a row
+   *  that already exists. Returns null and writes NOTHING when no row
+   *  exists: an order that never became checkout work has nothing to
+   *  revoke, and revocation topics fire for every order in every shop. */
+  touchExisting(
+    shop: string,
+    orderId: string,
+    token: string,
+    ttlMs: number,
+    deadlineMs: number,
+  ): Promise<{ item: CheckoutWorkItem; acquired: boolean } | null>;
+  /** Missed-webhook reconciliation: re-opens recently PROJECTED rows as
+   *  PENDING (due now, attempts 0, fresh deadline, lease cleared) so the
+   *  processor re-reads the order's live state and applies the same
+   *  disqualifiers a webhook would have delivered. Only rows settled
+   *  DONE/PROJECTED at least `olderThanMs` ago and younger than `maxAgeMs`
+   *  qualify — consumed/terminal outcomes are never re-opened. Bounded by
+   *  `limit` under FOR UPDATE SKIP LOCKED so concurrent sweeps split the
+   *  work. Returns the number re-opened. */
+  reopenOutstanding(args: {
+    olderThanMs: number;
+    maxAgeMs: number;
+    limit: number;
+    deadlineMs: number;
+  }): Promise<number>;
   /** Leases up to `limit` due items (PENDING, retryAfter <= now, lease null
    *  or expired), each with its own fresh token, attempts += 1. */
   claimDue(limit: number, ttlMs: number): Promise<CheckoutWorkItem[]>;
@@ -151,6 +184,51 @@ export function prismaCheckoutWorkStore(db: PrismaClient = defaultDb): CheckoutW
         RETURNING *, ("leaseToken" = ${token}) AS "acquired"`;
       const row = rows[0];
       return { item: toItem(row), acquired: row.acquired === true };
+    },
+    async touchExisting(shop, orderId, token, ttlMs, deadlineMs) {
+      // The upsertDirty conflict branch WITHOUT the insert: same
+      // re-dirty/re-lease semantics, no row created for an unknown order.
+      const rows = await db.$queryRaw<any[]>`
+        UPDATE "CheckoutEligibilityWork" SET
+          "gen" = "gen" + 1,
+          "status" = 'PENDING',
+          "retryAfter" = ${DB_WALL},
+          "deadlineAt" = ${dbWallPlus(deadlineMs)},
+          "outcome" = NULL, "lastReason" = NULL, "doneAt" = NULL,
+          "leaseToken" = CASE
+            WHEN "status" = 'PENDING' AND "leasedUntil" > ${DB_WALL}
+            THEN "leaseToken" ELSE ${token} END,
+          "leasedUntil" = CASE
+            WHEN "status" = 'PENDING' AND "leasedUntil" > ${DB_WALL}
+            THEN "leasedUntil" ELSE ${dbWallPlus(ttlMs)} END,
+          "attempts" = CASE
+            WHEN "status" = 'PENDING' AND "leasedUntil" > ${DB_WALL}
+            THEN "attempts" ELSE 1 END,
+          "updatedAt" = ${DB_WALL}
+        WHERE "shop" = ${shop} AND "orderId" = ${orderId}
+        RETURNING *, ("leaseToken" = ${token}) AS "acquired"`;
+      if (rows.length === 0) return null;
+      const row = rows[0];
+      return { item: toItem(row), acquired: row.acquired === true };
+    },
+    async reopenOutstanding({ olderThanMs, maxAgeMs, limit, deadlineMs }) {
+      return db.$executeRaw`
+        UPDATE "CheckoutEligibilityWork" w
+        SET "status" = 'PENDING', "gen" = w."gen" + 1, "retryAfter" = ${DB_WALL},
+            "attempts" = 0, "deadlineAt" = ${dbWallPlus(deadlineMs)},
+            "leaseToken" = NULL, "leasedUntil" = NULL,
+            "outcome" = NULL, "lastReason" = NULL, "doneAt" = NULL,
+            "updatedAt" = ${DB_WALL}
+        FROM (
+          SELECT id FROM "CheckoutEligibilityWork"
+          WHERE "status" = 'DONE' AND "outcome" = 'PROJECTED'
+            AND "doneAt" < ${dbWallPlus(-olderThanMs)}
+            AND "createdAt" > ${dbWallPlus(-maxAgeMs)}
+          ORDER BY "doneAt"
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+        ) due
+        WHERE w.id = due.id`;
     },
     async claimDue(limit = 1, ttlMs) {
       // One statement: SKIP LOCKED picks due rows that no live worker holds;
@@ -324,6 +402,51 @@ export function memoryCheckoutWorkStore(clock: () => number): CheckoutWorkStore 
       // Detached snapshot — Postgres returns a stale copy, and the gen race
       // test depends on complete() comparing the snapshot, not the live row.
       return { item: { ...existing }, acquired: !hadLiveLease };
+    },
+    async touchExisting(shop, orderId, token, ttlMs, deadlineMs) {
+      const existing = rows.get(key(shop, orderId));
+      if (!existing) return null;
+      const hadLiveLease = live(existing);
+      existing.gen += 1;
+      existing.status = "PENDING";
+      existing.retryAfter = now();
+      existing.deadlineAt = new Date(clock() + deadlineMs);
+      existing.outcome = null;
+      existing.lastReason = null;
+      existing.doneAt = null;
+      if (!hadLiveLease) {
+        existing.leaseToken = token;
+        existing.leasedUntil = new Date(clock() + ttlMs);
+        existing.attempts = 1;
+      }
+      existing.updatedAt = now();
+      return { item: { ...existing }, acquired: !hadLiveLease };
+    },
+    async reopenOutstanding({ olderThanMs, maxAgeMs, limit, deadlineMs }) {
+      const dueRows = [...rows.values()]
+        .filter(
+          (r) =>
+            r.status === "DONE" &&
+            r.outcome === "PROJECTED" &&
+            (r.doneAt?.getTime() ?? 0) < clock() - olderThanMs &&
+            r.createdAt.getTime() > clock() - maxAgeMs,
+        )
+        .sort((a, b) => (a.doneAt?.getTime() ?? 0) - (b.doneAt?.getTime() ?? 0))
+        .slice(0, limit);
+      for (const r of dueRows) {
+        r.status = "PENDING";
+        r.gen += 1;
+        r.retryAfter = now();
+        r.attempts = 0;
+        r.deadlineAt = new Date(clock() + deadlineMs);
+        r.leaseToken = null;
+        r.leasedUntil = null;
+        r.outcome = null;
+        r.lastReason = null;
+        r.doneAt = null;
+        r.updatedAt = now();
+      }
+      return dueRows.length;
     },
     async claimDue(limit, ttlMs) {
       const out: CheckoutWorkItem[] = [];

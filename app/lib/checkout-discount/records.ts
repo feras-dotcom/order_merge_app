@@ -169,16 +169,54 @@ export function serializeElig(doc: EligDoc): string {
 export function mergeRecords(
   existing: unknown,
   incoming: EligRecord[],
-  opts: { todayDate: string; maxRecs?: number },
+  opts: { todayDate: string; maxRecs?: number; windowId?: string },
 ): { doc: EligDoc; serialized: string; garbage: boolean } {
   const maxRecs = opts.maxRecs ?? 5;
   const { doc, garbage } = parseElig(existing);
   const byId = new Map<string, EligRecord>();
-  // Existing records win on `left` for an id already present — a replayed
-  // projection can never reset a consumed record.
-  for (const r of doc.recs) byId.set(r.id, r);
+  // Window rotation (D2/B): the Function only ever matches records of the
+  // CURRENT config windowId, so records from an older enable epoch can
+  // never grant again — they are pruned on the next write. BUT a consumed
+  // id stays consumed even across rotation: a dropped tombstone is held
+  // aside so an incoming same-id record can never resurrect it.
+  const consumedElsewhere = new Map<string, EligRecord>();
+  for (const r of doc.recs) {
+    if (opts.windowId !== undefined && r.win !== opts.windowId) {
+      if (r.left <= 0 || (r.used?.length ?? 0) > 0) consumedElsewhere.set(r.id, r);
+      continue;
+    }
+    byId.set(r.id, r);
+  }
   for (const r of incoming) {
-    if (validRec(r) && !byId.has(r.id)) byId.set(r.id, { ...r });
+    if (!validRec(r)) continue;
+    const consumed = consumedElsewhere.get(r.id);
+    if (consumed) {
+      // Consumed in a previous window: keep it as a tombstone — refresh
+      // win/dest/method/cur, expiry never extends, left stays 0 and used
+      // is preserved. Never grants again.
+      byId.set(r.id, {
+        ...r,
+        left: 0,
+        used: consumed.used,
+        exp: r.exp < consumed.exp ? r.exp : consumed.exp,
+      });
+      continue;
+    }
+    const prev = byId.get(r.id);
+    if (!prev) {
+      byId.set(r.id, { ...r });
+      continue;
+    }
+    // Re-projection of an id already present refreshes the destination,
+    // method, currency and window (an edited shipping address/method must
+    // update the record, not keep granting the stale destination), moves
+    // expiry EARLIER only (never extends it) and preserves `left`/`used` —
+    // a replay can never reset a consumed record.
+    prev.win = r.win;
+    prev.dest = r.dest;
+    prev.method = r.method;
+    prev.cur = r.cur;
+    if (r.exp < prev.exp) prev.exp = r.exp;
   }
   // Prune expired and left<=0 records — except that a left<=0 record with a
   // `used` list stays as a tombstone until exp: without it a replayed order
@@ -265,15 +303,23 @@ const localDate = (epochMs: number, timeZone: string): string =>
   new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date(epochMs));
 
 /** Record expiry per D4: the shop-local calendar date of
- *  (createdAt + mergeWindowHours) minus one day, floored at the shop-local
- *  order date. Effective lifetime sits inside (window - 24h, window] — the
- *  record can never outlive the merge window the discount stands in for.
+ *  (createdAt + mergeWindowHours) minus one day. The Function treats a
+ *  record as valid through the END of local day `exp`, so the result is
+ *  safe iff local midnight after `exp` is <= createdAt + window — which
+ *  this formula guarantees exactly (the end of `exp` is one full local
+ *  day after the window-end local date, and that day cannot straddle the
+ *  boundary because `exp` is strictly before the end date).
+ *  Returns null when no full local day fits inside the window (the
+ *  candidate would precede the order's own local date — e.g. a window
+ *  shorter than the time to the next local midnight). NO floor: flooring
+ *  to the order date would extend validity to end-of-order-day even when
+ *  the merge window closes earlier (windows < 24h).
  *  App-side only: Intl is unavailable inside the Function. */
 export function expiryDateFor(args: {
   createdAt: string;
   windowHours: number;
   timeZone: string;
-}): string {
+}): string | null {
   const created = new Date(args.createdAt).getTime();
   const plus = created + args.windowHours * 3_600_000;
   // One CALENDAR day off the window-end local date (not ts - 24h: DST can
@@ -281,6 +327,5 @@ export function expiryDateFor(args: {
   const endDate = localDate(plus, args.timeZone);
   const [y, m, d] = endDate.split("-").map(Number);
   const candidate = new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
-  const floor = localDate(created, args.timeZone);
-  return candidate < floor ? floor : candidate;
+  return candidate < localDate(created, args.timeZone) ? null : candidate;
 }

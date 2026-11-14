@@ -220,9 +220,12 @@ beforeEach(() => {
   clock = new Date("2026-11-10T12:00:00Z").getTime();
 });
 
+/** The windowId the real gate derives from SETTINGS.checkoutDiscountEnabledAt. */
+const WIN = `w${EPOCH.getTime()}`;
+
 const baseRec = (over: Record<string, unknown> = {}): EligRecord => ({
   id: "1001",
-  win: "w1",
+  win: WIN,
   dest: ADDR_KEY,
   method: "standard shipping",
   cur: "USD",
@@ -239,7 +242,7 @@ describe("processCheckoutWork — ISSUE", () => {
     expect(settle(row)).toBe("DONE/PROJECTED");
     const recs = eligDoc(admin).recs;
     expect(recs.length).toBe(1);
-    expect(recs[0]).toMatchObject({ id: "1001", win: "w1", dest: ADDR_KEY, method: "standard shipping", cur: "USD", left: 1 });
+    expect(recs[0]).toMatchObject({ id: "1001", win: WIN, dest: ADDR_KEY, method: "standard shipping", cur: "USD", left: 1 });
     // D4: createdAt + 72h ends on shop-local Nov 13; exp = Nov 12.
     expect(recs[0].exp).toBe("2026-11-12");
     expect(diagLog.some((e) => e.kind === "PROJECTED")).toBe(true);
@@ -581,6 +584,7 @@ describe("processCheckoutWork — gates", () => {
     { name: "kill switch", off: { control: async () => ({ checkoutDiscountEnabled: false, checkoutDiscountAllowShops: [SHOP] }) } },
     { name: "allowlist", off: { control: async () => ({ checkoutDiscountEnabled: true, checkoutDiscountAllowShops: [] }) } },
     { name: "shop flag", off: { settings: async () => ({ ...SETTINGS, checkoutDiscountEnabled: false }) } },
+    { name: "window-unsupported", off: { settings: async () => ({ ...SETTINGS, mergeWindowHours: 6 }) } },
     { name: "auto-merge", off: { settings: async () => ({ ...SETTINGS, autoMergeEnabled: false }) } },
     { name: "onboarding", off: { settings: async () => ({ ...SETTINGS, onboardingCompletedAt: null }) } },
   ];
@@ -596,6 +600,67 @@ describe("processCheckoutWork — gates", () => {
       expect(diagLog.some((e) => e.kind === "FEATURE_OFF")).toBe(true);
     });
   }
+
+  it("an unreadable gate RETRIES with GATE_READ — never DONE/FEATURE_OFF", async () => {
+    const admin = makeAdmin({ orders: { [OID1]: adminOrder() } });
+    const work = newWork();
+    const row = await drive(OID1, admin, work, {
+      gate: { ...GATE, control: async () => { throw new Error("db down"); } },
+    });
+    expect(row.status).toBe("PENDING"); // retried, not settled
+    expect(admin.calls.length).toBe(0); // still zero Admin calls
+    expect(diagLog.some((e) => e.kind === "RETRY" && e.code === "GATE_READ")).toBe(true);
+    expect(diagLog.some((e) => e.kind === "FEATURE_OFF")).toBe(false);
+  });
+
+  it("a gate that recovers on the next pass completes the work", async () => {
+    const admin = makeAdmin({ orders: { [OID1]: adminOrder() } });
+    const work = newWork();
+    let down = true;
+    const gate = {
+      ...GATE,
+      control: async () => {
+        if (down) throw new Error("db down");
+        return { checkoutDiscountEnabled: true, checkoutDiscountAllowShops: [SHOP] };
+      },
+    };
+    const first = await drive(OID1, admin, work, { gate });
+    expect(first.status).toBe("PENDING");
+    down = false;
+    clock += 300_000; // past the transient retry delay
+    // The sweeper re-claims the retried row and the recovered gate lets it
+    // through.
+    const [claimed] = await work.claimDue(1, LEASE);
+    await processCheckoutWork({
+      item: claimed, token: claimed.leaseToken!, shop: SHOP,
+      admin: admin as any, work, now, sleep: async () => {}, random: () => 0.5, gate, diag,
+    });
+    const row = await work.find(SHOP, OID1);
+    expect(settle(row)).toBe("DONE/PROJECTED");
+  });
+
+  it("if scheduleRetry itself throws, the lease simply lapses and the sweeper re-claims", async () => {
+    const admin = makeAdmin({ orders: { [OID1]: adminOrder() } });
+    const base = newWork();
+    const down = { ...GATE, control: async () => { throw new Error("db down"); } };
+    const flaky: CheckoutWorkStore = {
+      ...base,
+      scheduleRetry: async () => {
+        throw new Error("transient store failure");
+      },
+    };
+    const token = "tok-x";
+    const { item } = await flaky.upsertDirty(SHOP, OID1, token, 50, CHECKOUT_DEADLINE_MS);
+    await processCheckoutWork({
+      item, token, shop: SHOP, admin: admin as any, work: flaky,
+      now, sleep: async () => {}, random: () => 0.5, gate: down, diag,
+    });
+    const row = await flaky.find(SHOP, OID1);
+    expect(row!.status).toBe("PENDING"); // lease expiring, not settled
+    clock += 100; // lease lapses
+    const [claimed] = await base.claimDue(1, LEASE);
+    expect(claimed.orderId).toBe(OID1); // sweeper re-claims it
+  });
 
   it("diagnostics never carry PII (no address/name/email/tokens/dest keys)", async () => {
     const admin = makeAdmin({ orders: { [OID1]: adminOrder(), [OID2]: adminOrder({ id: OID2, name: "#2002", shippingLines: { nodes: [grantedLine("0.00", "8.00")] }, discountApplications: grantedApps() }) } });

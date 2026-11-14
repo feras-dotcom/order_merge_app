@@ -28,17 +28,20 @@ The earlier ~72 s propagation figure is INVALID (native free-shipping cart) and 
 
 ## 3. Decisions
 
-**D1. One new table `CheckoutEligibilityWork`, level-triggered reconciliation.** Each webhook (paid, cancelled, fulfilled, partially_fulfilled) only marks the
-order "dirty": upsert on `(shop, orderId)` with `gen = gen + 1`, `status = PENDING`. The processor never trusts the payload or the topic: it loads the order fresh and
+**D1. One new table `CheckoutEligibilityWork`, level-triggered reconciliation.** `orders/paid` upserts a row on `(shop, orderId)`; every other topic (section 3a) only TOUCHES an existing row
+(`gen = gen + 1`, `status = PENDING`); an order that never became work has nothing to revoke. The processor never trusts the payload or the topic: it loads the order fresh and
 reconciles the desired state, so duplicates, reordering, delayed payment and restarts all converge. Completion is conditional on `gen` still equal to the generation
 that was processed; a newer event that arrived mid-processing re-queues instead of being lost. The row stores only shop, order GID, outcome codes: **no PII**.
 
-**D2. Gate (all must hold, checked at the webhook AND again in the processor; any failure = no write, row DONE `FEATURE_OFF`):**
+**D2. Gate (all must hold, checked at the webhook AND again in the processor).**
 env `MERGESHIP_CHECKOUT_DISCOUNT === "enabled"` AND `AppControl.checkoutDiscountEnabled` AND shop in `AppControl.checkoutDiscountAllowShops` (inverted: empty = NO shops)
-AND `Settings.checkoutDiscountEnabled` with `checkoutDiscountEnabledAt` set AND `autoMergeEnabled` AND onboarding complete.
+AND `Settings.checkoutDiscountEnabled` with `checkoutDiscountEnabledAt` set AND `autoMergeEnabled` AND onboarding complete AND `mergeWindowHours >= 24` (`window-unsupported` otherwise, see D4).
 The discount is only worth giving when the merge engine will merge the second order, hence the merge-setting dependency (it does NOT require a completed merge).
-`checkoutDiscountEnabledAt` is an enable epoch (stamped on the DB clock only by `setCheckoutDiscountEnabled`): orders created before it never produce records.
+`checkoutDiscountEnabledAt` is an enable epoch (stamped on the DB clock only by `setCheckoutDiscountEnabled`): orders created before it never produce records, and the Function window id is derived from it (`w<epochMs>`), so a re-enable rotates the window and old eligibility can never grant again.
 Defaults: all OFF. Uninstall resets the per-shop flag and epoch.
+A CONFIRMED off answer (any lever above) means: HTTP 200, no row, no Admin call, row DONE `FEATURE_OFF`. A gate that cannot be READ (a dependency threw) is `unknown`, never a decision:
+the webhook retries the read 3 times (100 ms, 300 ms) and then answers 500 so Shopify redelivers; the processor retries with backoff and never settles `FEATURE_OFF` on an unreadable gate.
+IMPORTANT: this gate only controls whether the APP projects, consumes and revokes records. It does not stop checkout discounting. Only the Shopify automatic discount's status does (section 7.6).
 
 **D3. Desired-state rule for one order (processor `classify`):**
 - CONSUME: the order carries the MergeShip shipping grant (`detectShippingDiscountGrant`, title token = `CHECKOUT_DISCOUNT_MESSAGE`, evidence ALLOCATION) and is not cancelled.
@@ -46,15 +49,25 @@ Defaults: all OFF. Uninstall resets the per-shop flag and epoch.
   No matching record with `left > 0` = diagnostic `OVERDRAW` (the signature of simultaneous checkouts, see 5).
 - ISSUE: `orderStateIneligibility` is null AND the location rule holds AND exactly one shipping line with original and discounted price > 0 AND no ambiguous shipping delta
   AND `createdAt >= enabledAt` AND now < `createdAt + mergeWindowHours` AND destination key (all nine fields incl. first/last name) is non-null.
-  Record: `{id, win, dest, method, cur, left: 1, exp}`; `mergeRecords` lets an existing record win on `left`, so a replay can never reset a consumed grant.
+  Record: `{id, win, dest, method, cur, left: 1, exp}`; re-projecting an id that already exists refreshes `win/dest/method/cur` (an edited address must update the record), moves `exp` EARLIER only, and keeps the existing `left`/`used`, so a replay can never reset a consumed grant.
 - NOT ELIGIBLE (cancelled, closed, fulfilled/partially fulfilled, refunded, unpaid, risk not LOW, window passed, refused by rule): ensure the record is ABSENT
   (revoke an unused record; a used record stays as a `left = 0` tombstone until `exp`).
 - RETRY (evidence not yet available: risk level still null, search/fulfillment data incomplete, Admin throttling/5xx, CAS conflict after retries): record unchanged, transient backoff.
   A transient state is NEVER treated as ineligible, so it can never revoke by accident.
 
-**D4. Expiry (conservative, never longer than the merge window).** `exp` is a shop-local calendar date (the Function compares dates). `exp = localDate(createdAt + mergeWindowHours) - 1 day`,
-floored at `localDate(createdAt)`. Effective lifetime is between `window - 24h` and `window`: it under-promises rather than lets a discount outlive the merge window. Shop timezone from `shop { ianaTimezone }`.
-Records are capped at 5 per customer, expired and fully consumed records are pruned on every write.
+**D4. Expiry (never longer than the merge window; corrected after independent review).** The Function can only compare shop-local dates (`shop.localTime.date`; there is no per-record time of day), so a record is valid through the END of local day `exp`.
+That is safe iff local midnight after `exp` is not later than `createdAt + window`, which holds exactly for `exp = localDate(createdAt + mergeWindowHours) - 1 calendar day`. There is NO floor: the earlier floor at the order date let windows shorter than a day outlive the window.
+When that date precedes the order's own local date (no full local day fits, which also happens on a 25 h DST day with a 24 h window) the order gets `ABSENT WINDOW_TOO_SHORT` and no record. Shop timezone from `shop { ianaTimezone }`.
+Consequences by merge window (effective lifetime is in `(window - 24 h, window]`):
+
+| Merge window | Result |
+|---|---|
+| 1 h, 6 h, 12 h | Feature DISABLED for the shop by the gate (`window-unsupported`); most orders would otherwise get no record and the rest an erratic one |
+| 24 h | Supported; effective lifetime between ~0 and 24 h (mean about 12 h); never beyond the window |
+| 72 h | Supported; effective lifetime between 48 h and 72 h |
+Proven by a property test (tests/checkout-discount-records.test.ts): windows 1/6/12/24/48/72/168 h x 7 time zones (UTC, New York, Los Angeles, London, Kolkata, Kiritimati, Chatham) x ~200 instants each incl. DST transitions: the end of local day `exp` is never later than `createdAt + window`.
+Core merge-window settings are unchanged. Records are capped at 5 per customer; expired, fully consumed and old-window records are pruned on every write.
+Known limit: lowering the merge window AFTER a record was issued does not shorten that record (its expiry was fixed at issue time); rotate the window (shutdown + prepare-enable, section 7.6) to invalidate outstanding records.
 
 **D5. Metafield writes** use `metafieldsSet` with `compareDigest` (real compare-and-set), re-read and retry on `STALE_OBJECT` with jittered backoff (5 tries), then a post-write read-back must show
 the expected state before the work row is marked DONE. A failed or unverified write is a retry, never a success.
@@ -69,6 +82,26 @@ It fails closed (full shipping, no financial exposure). It mirrors merge, which 
 **D8. The Function is not an extension on this branch.** Source lives in `functions/checkout-shipping-discount/` (outside `extensions/*`, so Shopify CLI does not discover or deploy it).
 It is a validated copy of the spike Function with `selectionStrategy: "ALL"`. The strict regression test validates its output against a trimmed copy of Shopify's published
 Function schema and fails on `"FIRST"`.
+
+### 3a. Revocation coverage (audit after independent review)
+A record exists for an order that was PAID, open, UNFULFILLED, LOW risk, single shipping line, in the merge window. Every way that can stop being true, and what notices it:
+
+| Disqualifier | Shopify signal | Subscribed | Backstop |
+|---|---|---|---|
+| Cancellation | `orders/cancelled` (also `orders/updated`) | yes | recheck |
+| Closed | `orders/updated` | yes | recheck |
+| Refund / void (financial status leaves PAID) | `refunds/create` (also `orders/updated`) | yes | recheck |
+| Fulfilled / partially fulfilled | `orders/fulfilled`, `orders/partially_fulfilled` (also `orders/updated`) | yes | recheck |
+| Risk no longer LOW | `orders/risk_assessment_changed` | yes | recheck |
+| Shipping address / method / shipping lines edited | `orders/updated` (all order edits fire it; `orders/edited` is therefore redundant and NOT subscribed) | yes | recheck |
+| Fulfillment hold, location change | none that carries order state | no | recheck (the location rule runs again on every re-verification) |
+| Window end | none needed | n/a | record `exp` + `WINDOW_PASSED` |
+| Any lost or late delivery | n/a | n/a | recheck |
+
+Recheck = `reopenOutstanding` in the existing sweeper step: every `PROJECTED` row older than 10 minutes (and younger than 8 days) is re-opened and reprocessed from fresh Shopify state (no new worker). Shopify documents that webhook delivery is not guaranteed and tells apps to reconcile periodically. Worst-case lag for a missed revocation is about 10 minutes plus one sweep tick, plus Admin latency.
+Cost: about 5-6 Admin calls per outstanding record every 10 minutes (single pilot shop: negligible; revisit before wider rollout).
+`orders/updated`, `refunds/create` and `orders/risk_assessment_changed` only touch rows that already exist, so the all-orders streams cost one cheap check per event while the feature is confirmed off for the shop (the first check is the env flag, which needs no database read).
+Tests prove, with the REAL Function evaluating the projected metafield, that after each disqualifier the order no longer grants (and after an address edit grants only at the new address): tests/checkout-discount-revocation.test.ts.
 
 ## 4. Files (for review)
 
@@ -113,7 +146,7 @@ dashboard access. Required before any pilot: confirm Distribution = public (list
 ### 7.2 Additional scopes and merchant re-authorization
 Needed: `write_customers` (customer metafield `metafieldsSet`), `write_discounts` (create/deactivate the automatic app discount). Order read access already exists (`write_orders`); the optional location scopes already exist.
 Recommended: declare both as `optional_scopes` (same mechanism as the existing location scopes) so only the pilot merchant is prompted and no other install is affected; the app requests them in-context for the pilot shop.
-If they were added as required `scopes`, every installed merchant would be prompted to re-approve on next open. Webhook topics to add: `orders/paid`, `orders/cancelled`, `orders/fulfilled`, `orders/partially_fulfilled`.
+If they were added as required `scopes`, every installed merchant would be prompted to re-approve on next open. Webhook topics to add: `orders/paid`, `orders/cancelled`, `orders/fulfilled`, `orders/partially_fulfilled`, `orders/updated`, `refunds/create`, `orders/risk_assessment_changed` (`orders/edited` is deliberately not subscribed, section 3a).
 Required `shopify.app.toml` change (NOT applied on this branch, because `shopify app deploy` pushes scopes, topics and extensions together):
 ```toml
 [access_scopes]
@@ -131,6 +164,15 @@ optional_scopes = [ "read_merchant_managed_fulfillment_orders", "read_locations"
   [[webhooks.subscriptions]]
   uri = "/webhooks/orders/partially_fulfilled"
   topics = [ "orders/partially_fulfilled" ]
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/updated"
+  topics = [ "orders/updated" ]
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/refunds/create"
+  topics = [ "refunds/create" ]
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/risk_assessment_changed"
+  topics = [ "orders/risk_assessment_changed" ]
 ```
 Reconcile first with production `main` (`07773b5`), which does not contain this line: its routes use `webhook-auth.server.ts` (dual-secret validation); the new routes must call the same helper.
 
@@ -153,11 +195,16 @@ On a development store with the same app version: below-native-free-shipping car
 (c) different street, other customer, or guest: no discount. (d) clear the record: baseline returns.
 Offline tests do NOT prove the Function executes: the `selectionStrategy: "FIRST"` bug passed every offline test and Shopify silently discarded the result. The harness used on the spike branch (`spikes/.../experiments/signal.ts`, `e2-direct.ts`) is the reference; porting it into `scripts/` is a follow-up.
 
-### 7.6 Rollback and kill switches (fastest first)
-1. **Deactivate the automatic app discount** (`discountAutomaticDeactivate`): instant, stops ALL discounting regardless of metafields or app state. This is the primary kill switch.
-2. **Change the discount config `windowId`** (or `MERGESHIP_CHECKOUT_DISCOUNT_WINDOW`): every existing record stops matching.
-3. **`npx vite-node scripts/app-control.ts --checkout off`** (or remove the shop from `--checkout-allow`, or unset `MERGESHIP_CHECKOUT_DISCOUNT`, or `setCheckoutDiscountEnabled(shop, false)`): stops projection and consumption of new events. It does NOT remove already-projected records, so always pair it with step 1 when stopping discounts.
-4. **Release the previous app version** (`shopify app release --version <previous>`): removes the Function from the active version.
+### 7.6 Disablement: two independent switches, and the verified shutdown procedure
+There are TWO different things, and only one of them stops shoppers receiving a discount:
+- **App-side gate** (env, `AppControl`, allowlist, `Settings` flag): stops the app from projecting, consuming and revoking records. Records that already sit in customers' metafields stay there and, while the Shopify discount is ACTIVE, keep granting until they expire (at most one merge window).
+- **Shopify automatic discount status** (`ACTIVE` vs `EXPIRED`): the ONLY thing that stops checkout discounting, regardless of which records exist and regardless of the app's state.
+Therefore a shutdown must deactivate and VERIFY the Shopify discount first, and only then turn the app flags off. `scripts/checkout-discount-control.ts` (library `app/lib/checkout-discount/discount-control.server.ts`) implements it; it is dry-run by default and needs `--apply`:
+1. `shutdown --shop S --discount-id D --apply`: `discountAutomaticDeactivate`, re-read, REQUIRE `status === "EXPIRED"` (anything else, including `ACTIVE`, `SCHEDULED` or a failed read, aborts with `ShutdownNotVerifiedError` and leaves the app flags untouched), then `setCheckoutDiscountEnabled(S, false)`. Idempotent.
+2. Re-enable without resurrecting stale eligibility: `prepare-enable` requires the discount to be inactive, stamps a fresh enable epoch, derives `windowId = w<epochMs>`, writes it into the discount config (all other config fields preserved) and verifies the read-back, leaving the discount INACTIVE. The Function ignores every record of an older window and the next projection write prunes them; a consumed record never grants again. Then run the real-checkout smoke test (7.5) and only then `activate`, which refuses unless the stored config `windowId` equals the app's expected one and the app gate is on, and requires `status === "ACTIVE"` afterwards.
+Proven in tests/checkout-discount-control.test.ts (fake Admin with discount status transitions + the real Function): shutdown order, flags untouched on failed verification, refusal to prepare an ACTIVE discount, window mismatch refusal, and the full epoch1 -> project -> shutdown -> epoch2 scenario where the old record is not discounted, not consumable and pruned, and a consumed epoch-1 record never grants after re-enable.
+Faster/other levers, in order: (a) deactivate the discount by hand in Shopify admin; (b) change the config `windowId` (invalidates every record at once); (c) `npx vite-node scripts/app-control.ts --checkout off` / remove the shop from `--checkout-allow` / unset `MERGESHIP_CHECKOUT_DISCOUNT` (stops app-side processing only: pair with (a)); (d) release the previous app version (`shopify app release --version <previous>`), which removes the Function.
+Silent stop: the config `windowEnd` passing makes the Function return nothing for everyone (the Function's `inWindow` check); it must be maintained, and its expiry is an alert condition, not a feature.
 The merge and refund engines do not depend on any of these and keep running.
 
 ## 8. Requirements for a single-merchant pilot (none is satisfied today)
@@ -165,12 +212,13 @@ The merge and refund engines do not depend on any of these and keep running.
 2. PCD Name + Address approved and verified on a real pilot checkout (7.3); `write_customers` and `write_discounts` granted on the pilot shop.
 3. Merge automation ON and onboarding complete for the pilot shop; single fulfillment location, or location scopes granted.
 4. Merge/refund interaction test (L10) done; an exposure report (orders carrying the MergeShip grant, their MergeRecord status, shipping discounted, `OVERDRAW` events) defined and run daily.
-5. Gate levers set deliberately, in this order: discount deactivated -> env, `--checkout on`, `--checkout-allow <pilot shop>`, `setCheckoutDiscountEnabled` -> smoke test (7.5) on the pilot shop with a test customer -> activate the discount.
+5. Gate levers set deliberately, in this order: discount deactivated -> env, `--checkout on`, `--checkout-allow <pilot shop>`, then `prepare-enable` (7.6) -> smoke test (7.5) on the pilot shop with a test customer -> `activate`. The shop's merge window must be at least 24 h.
 6. Guardrails: one shop, a consciously chosen percentage, one stable Standard shipping-rate title, a named owner watching `evt: "checkout_elig"` logs (RETRY / FAILED / OVERDRAW rates), abort criteria (any OVERDRAW burst, any grant with no merge, any unexplained discount) = step 1 of 7.6 immediately.
 7. Merchant-facing copy that tells shoppers they must be signed in (guests never receive it).
 
 ## 9. Verification (this branch)
-Baseline (`8178caf`) and final: `npm test` 1731 passed, 0 failed (398 env-gated skips); new files: function 44, records 27, projection 6, work-store 12, processor 33, gate 11, webhook 7, isolation 5 (145 total, also run under TZ America/Los_Angeles, Pacific/Kiritimati and UTC), plus 11 real-Postgres work-store tests on a fresh migrated disposable database.
-`tsc --noEmit`: only the 7 pre-existing errors (`app/shopify.server.ts` 1, `scripts/shipping-refund-readback.ts` 6). `eslint`: no new problems. `npm run build` and `prisma validate` pass. `prisma migrate diff` shows only one pre-existing unrelated index-rename drift.
-The order query used by the processor was validated read-only against the isolated spike dev store (Admin API 2026-04) on real discounted and undiscounted orders.
-NOT verified: any production behaviour (Admin API connectivity under the Shopify IP allowlist remains an outstanding operational verification), distribution status, PCD approval for production, wallet checkouts.
+Final: `npm test` 1792 passed, 0 failed (404 env-gated skips). Checkout-discount suite: 206 tests in 10 files (function 30, records 36, processor 31, webhook 19, revocation 18, work-store 17, gate 13, control 11, projection 6, isolation 5) plus 17 real-Postgres work-store tests on a freshly migrated disposable database (including `touchExisting` and `reopenOutstanding` incl. concurrent SKIP LOCKED re-open); the expiry proof and the new tests also pass under TZ America/Los_Angeles, Pacific/Kiritimati and UTC.
+`tsc --noEmit`: only the 7 pre-existing errors (`app/shopify.server.ts` 1, `scripts/shipping-refund-readback.ts` 6). `eslint`: clean on every touched file. `npm run build` and `prisma validate` pass.
+Function (functions/checkout-shipping-discount): sources are byte-identical to the live-validated spike deployment and to spike commit 94b6166, `shopify.extension.toml` is identical field for field, a scratch rebuild exports the required entrypoint `cart-delivery-options-discounts-generate-run`, and all 55 parity fixtures give the same result in the rebuilt wasm (Shopify CLI function runner) as in the Node implementation. The rebuilt wasm file hash differs from the deployed one although the sources are identical (build-toolchain output is not byte-reproducible, not source drift); behaviour is covered by the 55/55 parity result. The runner also proved that `percentage: "100.0"` (string) discounts and `percentage: 100` (number) yields no operation, which is why the earlier README example was wrong. The local runner cannot validate the DateTimeWithoutTimezone query variables (Shopify resolves them), so only the live-validated format is documented.
+Test-suite note: `tests/shipping-refund-trigger-manifest.test.ts > no source mutates the replication role...` is a source-scanning test with the default 5 s timeout; it takes about 1.7 s alone (the same with and without the new checkout tests) but exceeded 5 s in 2 of 4 full parallel runs on the development machine under CPU load, and passed in the others. It is unrelated to this change (not modified here).
+NOT verified: any production behaviour (Admin API connectivity under the Shopify IP allowlist remains an outstanding operational verification), distribution status, PCD approval for production, wallet checkouts, the new CLI against any real shop (never executed).

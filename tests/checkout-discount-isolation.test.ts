@@ -149,6 +149,9 @@ describe("sweep isolation", () => {
       },
       purgeDone: async () => 0,
       find: async () => item,
+      reopenOutstanding: async () => 0,
+      touchExisting: async () => null,
+      upsertDirty: async () => null,
     } as any;
     // Default gate deps hit the real DB — force the gate off explicitly by
     // stubbing the settings/control reads to refuse.

@@ -148,6 +148,86 @@ export function checkoutWorkStoreContract(make: () => { store: CheckoutWorkStore
       expect(await store.purgeDone(30 * 24 * 3600_000)).toBe(1);
       expect(await store.find(SHOP, OID)).toBeNull();
     });
+
+    it("touchExisting on a missing row returns null and writes NOTHING", async () => {
+      const { store } = make();
+      expect(await store.touchExisting(SHOP, OID, "tok1", TTL, DEADLINE)).toBeNull();
+      expect(await store.find(SHOP, OID)).toBeNull();
+    });
+
+    it("touchExisting on a live lease keeps the lease, bumps gen, acquired=false", async () => {
+      const { store } = make();
+      await store.upsertDirty(SHOP, OID, "tok1", TTL, DEADLINE);
+      const r = await store.touchExisting(SHOP, OID, "tok2", TTL, DEADLINE);
+      expect(r?.acquired).toBe(false);
+      expect(await store.find(SHOP, OID)).toMatchObject({ gen: 2, status: "PENDING", leaseToken: "tok1" });
+    });
+
+    it("touchExisting on an expired lease acquires it and re-opens DONE rows", async () => {
+      const { store, setClock } = make();
+      const r = await store.upsertDirty(SHOP, OID, "tok1", TTL, DEADLINE);
+      await store.complete(r.item.id, "tok1", 1, "PROJECTED", "ok");
+      const t = await store.touchExisting(SHOP, OID, "tok2", TTL, DEADLINE);
+      expect(t?.acquired).toBe(true);
+      expect(await store.find(SHOP, OID)).toMatchObject({
+        gen: 2, status: "PENDING", leaseToken: "tok2", outcome: null, doneAt: null,
+      });
+      // And an expired live lease is taken over too.
+      setClock(Date.now() + TTL + 1);
+      const t2 = await store.touchExisting(SHOP, OID, "tok3", TTL, DEADLINE);
+      expect(t2?.acquired).toBe(true);
+      expect((await store.find(SHOP, OID))!.leaseToken).toBe("tok3");
+    });
+
+    it("reopenOutstanding re-opens only old DONE/PROJECTED rows within the age bound", async () => {
+      const { store, setClock } = make();
+      const t0 = Date.now();
+      // Fresh PROJECTED row — too young to re-open.
+      const a = await store.upsertDirty(SHOP, OID, "tok1", TTL, DEADLINE);
+      await store.complete(a.item.id, "tok1", 1, "PROJECTED", "ok");
+      // A CONSUMED terminal row — never re-opened.
+      const OID2 = "gid://shopify/Order/2002";
+      const b = await store.upsertDirty(SHOP, OID2, "tok1", TTL, DEADLINE);
+      await store.complete(b.item.id, "tok1", 1, "CONSUMED", "ok");
+      // A REFUSED row — not an outstanding projection.
+      const OID3 = "gid://shopify/Order/3003";
+      const c = await store.upsertDirty(SHOP, OID3, "tok1", TTL, DEADLINE);
+      await store.complete(c.item.id, "tok1", 1, "REFUSED", "ok");
+      // Still fresh => nothing.
+      expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 50, deadlineMs: DEADLINE })).toBe(0);
+      // Aged past the cadence: only the PROJECTED row re-opens.
+      setClock(t0 + 601_000);
+      expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 50, deadlineMs: DEADLINE })).toBe(1);
+      expect(await store.find(SHOP, OID)).toMatchObject({ status: "PENDING", outcome: null, doneAt: null, attempts: 0, leaseToken: null });
+      expect((await store.find(SHOP, OID2))!.status).toBe("DONE");
+      expect((await store.find(SHOP, OID3))!.status).toBe("DONE");
+      // Past maxAge the same row is left alone.
+      const done = await store.complete(
+        (await store.claimDue(1, TTL))[0].id,
+        (await store.find(SHOP, OID))!.leaseToken!,
+        (await store.find(SHOP, OID))!.gen,
+        "PROJECTED",
+        "ok",
+      );
+      expect(done).toBe("DONE");
+      setClock(t0 + 601_000 + 9 * 24 * 3600_000);
+      expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 50, deadlineMs: DEADLINE })).toBe(0);
+    });
+
+    it("reopenOutstanding honours the limit and a second call takes the rest", async () => {
+      const { store, setClock } = make();
+      const t0 = Date.now();
+      for (let i = 0; i < 5; i++) {
+        const r = await store.upsertDirty(SHOP, `gid://shopify/Order/${i}`, "tok1", TTL, DEADLINE);
+        await store.complete(r.item.id, "tok1", 1, "PROJECTED", "ok");
+      }
+      setClock(t0 + 601_000);
+      expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 2, deadlineMs: DEADLINE })).toBe(2);
+      expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 2, deadlineMs: DEADLINE })).toBe(2);
+      expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 2, deadlineMs: DEADLINE })).toBe(1);
+      // All five are PENDING now; re-opening is idempotent for PENDING rows.
+      expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 50, deadlineMs: DEADLINE })).toBe(0);
+    });
   });
 }
 

@@ -18,7 +18,6 @@ import type { OrderState } from "../eligibility";
 import { isSessionNotFound } from "../order-work-processor.server";
 import { getCurrencyPrecision, parseShopMoney } from "../money";
 import { classify, type CheckoutFacts, type Decision } from "./classify";
-import { checkoutDiscountWindowId } from "./config";
 import { defaultDiag, type Diag, type DiagEvent } from "./diag";
 import { checkoutDiscountGate, type CheckoutGateDeps } from "./gate.server";
 import {
@@ -183,9 +182,20 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
   };
 
   // (1) Authoritative gate re-check: levers can flip between delivery and
-  //     processing. Off => DONE FEATURE_OFF, no Admin call at all.
+  //     processing. CONFIRMED off => DONE FEATURE_OFF, no Admin call at
+  //     all. An UNKNOWN gate (a dependency read threw) is transient —
+  //     retry, never FEATURE_OFF. If scheduleRetry itself throws, the
+  //     lease simply expires and the sweeper re-claims.
   const gate = await checkoutDiscountGate(shop, args.gate);
   if (!gate.on) {
+    if (gate.unknown) {
+      try {
+        await retry("GATE_READ", `gate unreadable: ${gate.reason}`);
+      } catch {
+        // leave the lease to lapse
+      }
+      return;
+    }
     await settle("FEATURE_OFF", `gate off: ${gate.reason}`, "FEATURE_OFF", gate.reason);
     return;
   }
@@ -291,7 +301,7 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
   let decision: Decision = classify(facts, {
     enabledAt: gate.enabledAt,
     mergeWindowHours: gate.mergeWindowHours,
-    windowId: checkoutDiscountWindowId(),
+    windowId: gate.windowId,
     now: nowDate,
     timeZone,
   });
@@ -352,7 +362,11 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
           if (doc.recs.some((r) => r.id === record.id && (r.used?.length ?? 0) > 0)) {
             sawConsumedId = true;
           }
-          const m = mergeRecords(current, [record], { todayDate: today, maxRecs: 5 });
+          const m = mergeRecords(current, [record], {
+            todayDate: today,
+            maxRecs: 5,
+            windowId: gate.windowId,
+          });
           return { serialized: m.serialized };
         },
         { sleep, random },
@@ -383,7 +397,7 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
       // checkout — never consume a record it could not have matched.
       const current = await readDoc(adminGql, customerId);
       const match = selectRecordForCheckout(current, {
-        win: checkoutDiscountWindowId(),
+        win: gate.windowId,
         dest: decision.match.dest,
         method: decision.match.method,
         cur: decision.match.cur,

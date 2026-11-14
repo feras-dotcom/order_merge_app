@@ -241,7 +241,7 @@ describe("records.selectRecordForCheckout (Function-equivalent)", () => {
 });
 
 describe("records.expiryDateFor (D4)", () => {
-  it("is localDate(createdAt + window) - 1 calendar day, floored at the order date", () => {
+  it("is localDate(createdAt + window) - 1 calendar day, never past the window", () => {
     // 24h window on a mid-morning order: end next day, minus a day = the
     // order's own local date.
     expect(expiryDateFor({ createdAt: "2026-11-01T15:00:00Z", windowHours: 24, timeZone: "America/New_York" })).toBe("2026-11-01");
@@ -252,8 +252,19 @@ describe("records.expiryDateFor (D4)", () => {
     // local day, exp = that day - 1 = the order date — never past the window.
     expect(expiryDateFor({ createdAt: "2026-11-02T03:30:00Z", windowHours: 24, timeZone: "America/New_York" })).toBe("2026-11-01");
   });
-  it("a window shorter than a day floors at the order's local date", () => {
-    expect(expiryDateFor({ createdAt: "2026-11-01T15:00:00Z", windowHours: 6, timeZone: "America/New_York" })).toBe("2026-11-01");
+  it("a window that fits no full local day returns null — never floored", () => {
+    // 6h from 11:00 EST ends 17:00 the same local day; minus one day =
+    // the previous day => null (flooring would have granted validity
+    // until end of the order day, hours past the window).
+    expect(expiryDateFor({ createdAt: "2026-11-01T15:00:00Z", windowHours: 6, timeZone: "America/New_York" })).toBe(null);
+    expect(expiryDateFor({ createdAt: "2026-11-01T15:00:00Z", windowHours: 1, timeZone: "America/New_York" })).toBe(null);
+    expect(expiryDateFor({ createdAt: "2026-11-01T15:00:00Z", windowHours: 12, timeZone: "America/New_York" })).toBe(null);
+  });
+  it("a short window that still crosses local midnight keeps the order date", () => {
+    // 6h from 22:00 EST ends 04:00 the next local day; minus one day =
+    // the order date — the record is valid until local midnight, INSIDE
+    // the window (non-null is correct; the gate still refuses w<24h).
+    expect(expiryDateFor({ createdAt: "2026-11-02T02:00:00Z", windowHours: 6, timeZone: "America/New_York" })).toBe("2026-11-01");
   });
   it("never lands AFTER the merge window across a DST change (calendar day, not 24h)", () => {
     // Spring forward 2026-03-08 in America/New_York: a naive ts-minus-24h
@@ -273,5 +284,249 @@ describe("records.expiryDateFor (D4)", () => {
     // 2026-11-02T04:30Z is Nov 1 in New York but Nov 2 in UTC.
     expect(expiryDateFor({ createdAt: "2026-11-02T04:30:00Z", windowHours: 24, timeZone: "UTC" })).toBe("2026-11-02");
     expect(expiryDateFor({ createdAt: "2026-11-02T04:30:00Z", windowHours: 24, timeZone: "America/New_York" })).toBe("2026-11-01");
+  });
+});
+
+// ── Expiry property proof (D4) ─────────────────────────────────────────────
+// For every sampled instant and window: when expiryDateFor is non-null,
+// local midnight after `exp` — the first instant whose shop-local date
+// exceeds exp, found by bisection over Intl — is <= createdAt + window,
+// and exp >= localDate(createdAt). exp is null iff no full local day fits
+// inside the window (the end falls on the order's own local date). Covers
+// sub-day windows, half/45-minute zones, zones past the dateline and the
+// 2026 spring-forward / fall-back dates of New York and London.
+
+const mulberry32 = (seed: number) => () => {
+  seed |= 0;
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+
+// One formatter per zone — Intl.DateTimeFormat construction is the
+// expensive part, format() is cheap.
+const makeLocal = (tz: string) => {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz });
+  const fmtParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const date = (ms: number) => fmt.format(ms);
+  const parts = (ms: number) => {
+    const p: Record<string, string> = {};
+    for (const part of fmtParts.formatToParts(ms)) p[part.type] = part.value;
+    return p;
+  };
+  /** First instant whose local date is >= `date` — bisection over Intl
+   *  within ±15h of the UTC guess (max |offset| is UTC+14). */
+  const firstInstantOfLocalDate = (d: string): number => {
+    let lo = Date.parse(`${d}T00:00:00Z`) - 15 * 3600_000;
+    let hi = Date.parse(`${d}T00:00:00Z`) + 15 * 3600_000;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (date(mid) < d) lo = mid;
+      else hi = mid;
+    }
+    return hi;
+  };
+  /** First instant whose local date EXCEEDS `exp` — local midnight after
+   *  the expiry day, where the record stops being valid. */
+  const endOfDay = (exp: string): number =>
+    firstInstantOfLocalDate(
+      new Date(Date.parse(`${exp}T00:00:00Z`) + 86400_000).toISOString().slice(0, 10),
+    );
+  return { date, parts, firstInstantOfLocalDate, endOfDay };
+};
+
+describe("records.expiryDateFor — window-boundedness proof", () => {
+  const HOUR = 3600_000;
+  const WINDOWS_H = [1, 6, 12, 24, 48, 72, 168];
+  const ZONES = [
+    "UTC",
+    "America/New_York",
+    "America/Los_Angeles",
+    "Europe/London",
+    "Asia/Kolkata",
+    "Pacific/Kiritimati",
+    "Pacific/Chatham",
+  ];
+  // NY 2026: spring forward Mar 8 02:00, fall back Nov 1 02:00.
+  // London 2026: forward Mar 29 01:00, back Oct 25 02:00.
+  const ANCHORS: [string, number][] = [
+    ["UTC", Date.parse("2026-01-15T00:00:00Z")],
+    ["America/New_York", Date.parse("2026-03-08T00:00:00Z")],
+    ["America/New_York", Date.parse("2026-11-01T00:00:00Z")],
+    ["America/Los_Angeles", Date.parse("2026-03-08T00:00:00Z")],
+    ["Europe/London", Date.parse("2026-03-29T00:00:00Z")],
+    ["Europe/London", Date.parse("2026-10-25T00:00:00Z")],
+    ["Asia/Kolkata", Date.parse("2026-04-01T00:00:00Z")],
+    ["Pacific/Kiritimati", Date.parse("2026-04-01T00:00:00Z")],
+    ["Pacific/Chatham", Date.parse("2026-04-05T00:00:00Z")], // Chatham DST end Apr 5 2026
+  ];
+
+  it("never outlives the merge window; null iff no full local day fits", { timeout: 120_000 }, () => {
+    const rand = mulberry32(20261115);
+    let checked = 0;
+    let nulls = 0;
+    for (const zone of ZONES) {
+      const L = makeLocal(zone);
+      const anchors = ANCHORS.filter(([z]) => z === zone).map(([, t]) => t);
+      if (anchors.length === 0) anchors.push(Date.parse("2026-03-15T00:00:00Z"));
+      for (const windowHours of WINDOWS_H) {
+        const windowMs = windowHours * HOUR;
+        const instants: number[] = [];
+        // ~200 seeded instants spread across ±4 days of each anchor.
+        for (let i = 0; i < Math.ceil(200 / anchors.length); i++) {
+          for (const a of anchors) {
+            instants.push(a + Math.floor((rand() * 8 - 4) * 24 * HOUR) + Math.floor(rand() * 86_400_000));
+          }
+        }
+        // Edge instants: local 00:00:00, local 23:59:59, and created such
+        // that createdAt + window lands exactly on a local midnight.
+        for (const a of anchors) {
+          const midnight = L.firstInstantOfLocalDate(L.date(a));
+          if (L.parts(midnight).hour === "00") instants.push(midnight);
+          instants.push(midnight - 1000); // last instant of the previous day
+          instants.push(midnight - windowMs); // window ends exactly at local midnight
+          instants.push(midnight + 30 * 24 * HOUR - windowMs);
+        }
+        for (const createdMs of instants) {
+          const createdAt = new Date(createdMs).toISOString();
+          const exp = expiryDateFor({ createdAt, windowHours, timeZone: zone });
+          const endMs = createdMs + windowMs;
+          const fitsFullDay = L.date(endMs) > L.date(createdMs);
+          if (exp === null) {
+            nulls++;
+            expect(fitsFullDay, `${createdAt} +${windowHours}h ${zone}: null but a day fits`).toBe(false);
+            continue;
+          }
+          expect(
+            fitsFullDay,
+            `${createdAt} +${windowHours}h ${zone}: non-null but no full day fits`,
+          ).toBe(true);
+          const eod = L.endOfDay(exp);
+          expect(
+            eod <= endMs,
+            `${createdAt} +${windowHours}h ${zone}: endOfDay(${exp}) ${new Date(eod).toISOString()} > window end ${new Date(endMs).toISOString()}`,
+          ).toBe(true);
+          expect(exp >= L.date(createdMs)).toBe(true);
+          checked++;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(5000);
+    expect(nulls).toBeGreaterThan(0); // the <24h windows do produce nulls
+  });
+
+  it("table: max effective lifetime per window stays inside (window - day, window]", () => {
+    // created 2026-11-01T15:00:00Z = 10:00 EST (Nov 1 2026 is the 25-hour
+    // fall-back day). Max lifetime = the instant the record stops being
+    // valid minus createdAt.
+    const rows: [number, number | null][] = [
+      [1, null], // no full local day fits
+      [6, null],
+      [12, null],
+      [24, 14 * HOUR], // exp = Nov 1 -> dead at Nov 2 00:00 EST = 14h after 10:00
+      [72, 62 * HOUR], // exp = Nov 3 -> dead at Nov 4 00:00 EST = 62h after
+    ];
+    for (const [hours, expectLifetime] of rows) {
+      const createdMs = Date.parse("2026-11-01T15:00:00Z");
+      const exp = expiryDateFor({
+        createdAt: new Date(createdMs).toISOString(),
+        windowHours: hours,
+        timeZone: "America/New_York",
+      });
+      if (expectLifetime === null) {
+        expect(exp, `${hours}h`).toBe(null);
+        continue;
+      }
+      expect(exp, `${hours}h`).not.toBe(null);
+      const lifetime = makeLocal("America/New_York").endOfDay(exp!) - createdMs;
+      expect(lifetime, `${hours}h lifetime`).toBe(expectLifetime);
+      expect(lifetime <= hours * HOUR).toBe(true);
+      expect(lifetime > (hours - 25) * HOUR).toBe(true); // > window - a 25h day
+    }
+  });
+});
+
+// ── Window rotation + safe record refresh (B) ───────────────────────────────
+
+describe("mergeRecords — window rotation and refresh", () => {
+  const rec = (over: Partial<EligRecord> = {}): EligRecord => ({
+    id: "1001", win: "w2", dest: "dest-a", method: "standard shipping",
+    cur: "USD", left: 1, exp: "2026-11-12", ...over,
+  });
+  const doc = (recs: EligRecord[]) => serializeElig({ v: 1, recs });
+
+  it("prunes stale-window records on the next write", () => {
+    const m = mergeRecords(
+      doc([rec({ id: "old", win: "w1" }), rec({ id: "cur", win: "w2" })]),
+      [rec({ id: "new", win: "w2" })],
+      { todayDate: "2026-11-10", windowId: "w2" },
+    );
+    expect(m.doc.recs.map((r) => r.id).sort()).toEqual(["cur", "new"]);
+  });
+
+  it("a stale-window record is never selected even before the next write", () => {
+    const sel = selectRecordForCheckout(
+      doc([rec({ id: "old", win: "w1" })]),
+      { win: "w2", dest: "dest-a", method: "standard shipping", cur: "USD", today: "2026-11-10" },
+    );
+    expect(sel).toBe(null);
+  });
+
+  it("an edited shipping address refreshes the record's destination", () => {
+    const m = mergeRecords(
+      doc([rec()]),
+      [rec({ dest: "dest-b" })],
+      { todayDate: "2026-11-10", windowId: "w2" },
+    );
+    expect(m.doc.recs).toHaveLength(1);
+    expect(m.doc.recs[0].dest).toBe("dest-b");
+    expect(m.doc.recs[0].left).toBe(1);
+  });
+
+  it("a consumed record is never resurrected — same window AND across rotation", () => {
+    const tomb = rec({ left: 0, used: ["2002"] });
+    // Same window: refresh keeps left:0 + used.
+    const same = mergeRecords(doc([tomb]), [rec()], { todayDate: "2026-11-10", windowId: "w2" });
+    expect(same.doc.recs[0].left).toBe(0);
+    expect(same.doc.recs[0].used).toEqual(["2002"]);
+    // Old window: the dropped tombstone still blocks resurrection of the id.
+    const rotated = mergeRecords(
+      doc([{ ...tomb, win: "w1" }]),
+      [rec()],
+      { todayDate: "2026-11-10", windowId: "w2" },
+    );
+    expect(rotated.doc.recs).toHaveLength(1);
+    expect(rotated.doc.recs[0].left).toBe(0);
+    expect(rotated.doc.recs[0].used).toEqual(["2002"]);
+    expect(rotated.doc.recs[0].win).toBe("w2");
+  });
+
+  it("an untouched stale tombstone is dropped when nothing re-projects the id", () => {
+    const m = mergeRecords(
+      doc([rec({ id: "old", win: "w1", left: 0, used: ["9"] })]),
+      [rec({ id: "new" })],
+      { todayDate: "2026-11-10", windowId: "w2" },
+    );
+    expect(m.doc.recs.map((r) => r.id)).toEqual(["new"]);
+  });
+
+  it("refresh moves expiry earlier, never later", () => {
+    const m = mergeRecords(
+      doc([rec({ exp: "2026-11-15" })]),
+      [rec({ exp: "2026-11-11" })],
+      { todayDate: "2026-11-10", windowId: "w2" },
+    );
+    expect(m.doc.recs[0].exp).toBe("2026-11-11");
+    const later = mergeRecords(
+      doc([rec({ exp: "2026-11-11" })]),
+      [rec({ exp: "2026-11-15" })],
+      { todayDate: "2026-11-10", windowId: "w2" },
+    );
+    expect(later.doc.recs[0].exp).toBe("2026-11-11");
   });
 });

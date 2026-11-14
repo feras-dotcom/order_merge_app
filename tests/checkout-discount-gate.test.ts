@@ -41,9 +41,30 @@ const deps = (over: Partial<CheckoutGateDeps> = {}): CheckoutGateDeps => ({
 });
 
 describe("checkoutDiscountGate — six independent levers", () => {
-  it("all levers on => on, carrying the enable epoch and merge window", async () => {
+  it("all levers on => on, carrying the enable epoch, merge window and epoch-derived windowId", async () => {
     const g = await checkoutDiscountGate(SHOP, deps());
-    expect(g).toEqual({ on: true, enabledAt: EPOCH, mergeWindowHours: 24 });
+    expect(g).toEqual({
+      on: true,
+      enabledAt: EPOCH,
+      mergeWindowHours: 24,
+      windowId: `w${EPOCH.getTime()}`,
+    });
+  });
+
+  it("a merge window shorter than a full local day => off, reason window-unsupported", async () => {
+    for (const hours of [1, 6, 12]) {
+      const g = await checkoutDiscountGate(
+        SHOP,
+        deps({ settings: async () => onSettings({ mergeWindowHours: hours }) }),
+      );
+      expect(g).toEqual({ on: false, reason: "window-unsupported" });
+    }
+    // 24h and up stays on.
+    const g = await checkoutDiscountGate(
+      SHOP,
+      deps({ settings: async () => onSettings({ mergeWindowHours: 24 }) }),
+    );
+    expect(g.on).toBe(true);
   });
 
   it("env lever off (default) => off", async () => {
@@ -94,10 +115,31 @@ describe("checkoutDiscountGate — six independent levers", () => {
     expect(g.on).toBe(false);
   });
 
-  it("every read failure fails closed", async () => {
-    expect((await checkoutDiscountGate(SHOP, deps({ control: async () => { throw new Error("db down"); } }))).on).toBe(false);
-    expect((await checkoutDiscountGate(SHOP, deps({ settings: async () => { throw new Error("db down"); } }))).on).toBe(false);
-    expect((await checkoutDiscountGate(SHOP, deps({ control: async () => null }))).on).toBe(false);
+  it("every read failure fails closed AND is marked unknown", async () => {
+    for (const dep of [
+      { control: async () => { throw new Error("db down"); } },
+      { settings: async () => { throw new Error("db down"); } },
+    ] as Partial<CheckoutGateDeps>[]) {
+      const g = await checkoutDiscountGate(SHOP, deps(dep));
+      expect(g).toEqual({ on: false, reason: "read-error", unknown: true });
+    }
+    // A null control row is a CONFIRMED off (no flags set), not an error.
+    const g = await checkoutDiscountGate(SHOP, deps({ control: async () => null }));
+    expect(g.on).toBe(false);
+    expect((g as { unknown?: boolean }).unknown).toBeUndefined();
+  });
+
+  it("confirmed-off reasons never carry the unknown flag", async () => {
+    for (const dep of [
+      { env: () => undefined },
+      { control: async () => onControl({ checkoutDiscountEnabled: false }) },
+      { settings: async () => onSettings({ checkoutDiscountEnabled: false }) },
+      { settings: async () => onSettings({ mergeWindowHours: 6 }) },
+    ] as Partial<CheckoutGateDeps>[]) {
+      const g = await checkoutDiscountGate(SHOP, deps(dep));
+      expect(g.on).toBe(false);
+      expect((g as { unknown?: boolean }).unknown).toBeUndefined();
+    }
   });
 });
 

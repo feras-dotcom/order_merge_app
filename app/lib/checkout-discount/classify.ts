@@ -29,7 +29,8 @@ export type AbsentCode =
   | "MULTI_SHIPPING"
   | "ZERO_SHIPPING"
   | "AMBIGUOUS_DISCOUNT"
-  | "UNSUPPORTED_CURRENCY";
+  | "UNSUPPORTED_CURRENCY"
+  | "WINDOW_TOO_SHORT";
 
 export type RetryCode = "RISK_UNKNOWN" | "INCOMPLETE";
 
@@ -133,6 +134,15 @@ export function classify(facts: CheckoutFacts, ctx: ClassifyContext): Decision {
   }
   if (facts.shippingLines.length !== 1) return { kind: "ABSENT", code: "MULTI_SHIPPING" };
 
+  // No full shop-local day fits inside the merge window — the record could
+  // outlive the window it stands in for, so it must never be written.
+  const expiresOn = expiryDateFor({
+    createdAt: facts.createdAt,
+    windowHours: ctx.mergeWindowHours,
+    timeZone: ctx.timeZone,
+  });
+  if (expiresOn === null) return { kind: "ABSENT", code: "WINDOW_TOO_SHORT" };
+
   const built = buildRecord(
     {
       orderId: facts.orderId,
@@ -147,14 +157,7 @@ export function classify(facts: CheckoutFacts, ctx: ClassifyContext): Decision {
       cancelledAt: facts.cancelledAt,
       financialStatus: facts.financialStatus,
     },
-    {
-      windowId: ctx.windowId,
-      expiresOn: expiryDateFor({
-        createdAt: facts.createdAt,
-        windowHours: ctx.mergeWindowHours,
-        timeZone: ctx.timeZone,
-      }),
-    },
+    { windowId: ctx.windowId, expiresOn },
   );
   if (!built.ok) {
     const code: AbsentCode =

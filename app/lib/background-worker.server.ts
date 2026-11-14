@@ -32,7 +32,11 @@ import {
 import { isSessionNotFound, processOrderWork } from "./order-work-processor.server";
 import { getSettings, type MergeSettings } from "./settings.server";
 import {
+  CHECKOUT_DEADLINE_MS,
   CHECKOUT_DONE_RETENTION_MS,
+  CHECKOUT_RECHECK_LIMIT,
+  CHECKOUT_RECHECK_MAX_AGE_MS,
+  CHECKOUT_RECHECK_MS,
   prismaCheckoutWorkStore,
   type CheckoutWorkStore,
 } from "./checkout-discount/work.server";
@@ -195,6 +199,18 @@ export async function runSweepOnce(ctx: SweepContext): Promise<void> {
   //      Admin calls (claimDue/exhaustDue are DB-only).
   if (ctx.checkoutWork) {
     try {
+      // Missed-webhook reconciliation BEFORE claiming: every outstanding
+      // PROJECTED row is re-verified from fresh Shopify state about every
+      // CHECKOUT_RECHECK_MS, so a lost revocation webhook self-corrects
+      // within a sweep tick (the processor re-applies the location, hold,
+      // risk, fulfillment and address rules and revokes).
+      const reopened = await ctx.checkoutWork.reopenOutstanding({
+        olderThanMs: CHECKOUT_RECHECK_MS,
+        maxAgeMs: CHECKOUT_RECHECK_MAX_AGE_MS,
+        limit: CHECKOUT_RECHECK_LIMIT,
+        deadlineMs: CHECKOUT_DEADLINE_MS,
+      });
+      if (reopened) console.log(`[worker] Re-opened ${reopened} projected checkout item(s) for re-check.`);
       const exhausted = await ctx.checkoutWork.exhaustDue();
       if (exhausted) console.log(`[worker] Exhausted ${exhausted} checkout work item(s) → REVIEW.`);
       while (budgetLeft() > 0) {
