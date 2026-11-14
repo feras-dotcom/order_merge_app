@@ -32,6 +32,11 @@ export interface MergeSettings {
   /** Enable-epoch: writable ONLY via setCheckoutDiscountEnabled — orders
    *  created before it can never produce eligibility records. */
   checkoutDiscountEnabledAt: Date | null;
+  /** The merchant's Shopify automatic discount node id, recorded by
+   *  prepare-enable after proving ownership — the only discount the
+   *  shutdown enforcer may touch. Writable ONLY via
+   *  setCheckoutDiscountNodeId. */
+  checkoutDiscountNodeId: string | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
@@ -50,6 +55,7 @@ export const DEFAULT_SETTINGS: MergeSettings = {
   shippingRolloutAt: null,
   checkoutDiscountEnabled: false,
   checkoutDiscountEnabledAt: null,
+  checkoutDiscountNodeId: null,
 };
 
 /**
@@ -76,6 +82,7 @@ export async function upsertSettings(
       | "shippingRolloutAt"
       | "checkoutDiscountEnabled"
       | "checkoutDiscountEnabledAt"
+      | "checkoutDiscountNodeId"
     >
   >,
 ): Promise<MergeSettings> {
@@ -137,6 +144,23 @@ export async function setCheckoutDiscountEnabled(
 }
 
 /**
+ * The ONLY write path for Settings.checkoutDiscountNodeId — recorded by
+ * prepare-enable after proving the discount belongs to this app, cleared
+ * on uninstall reset. Plain field (no epoch semantics): upserts the row.
+ */
+export async function setCheckoutDiscountNodeId(
+  shop: string,
+  id: string | null,
+  client: PrismaClient = db,
+): Promise<void> {
+  await client.settings.upsert({
+    where: { shop },
+    create: { shop, ...DEFAULT_SETTINGS, checkoutDiscountNodeId: id },
+    update: { checkoutDiscountNodeId: id },
+  });
+}
+
+/**
  * Uninstall reset: a reinstall is a new install — automation, onboarding and
  * the shipping opt-in (including its epoch) must not silently resume. The
  * rollout-membership epoch is cleared too: even if the shop domain is still
@@ -160,6 +184,7 @@ export async function resetAutomationForUninstall(
       shippingRolloutAt: null,
       checkoutDiscountEnabled: false,
       checkoutDiscountEnabledAt: null,
+      checkoutDiscountNodeId: null,
     },
   });
 }

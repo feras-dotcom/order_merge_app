@@ -41,6 +41,7 @@ import {
   type CheckoutWorkStore,
 } from "./checkout-discount/work.server";
 import { processCheckoutWork } from "./checkout-discount/processor.server";
+import { enforcePendingShutdowns } from "./checkout-discount/shutdown-enforcer.server";
 
 /** How long a sweep tick works before deferring to the next tick. */
 export const SWEEP_BUDGET_MS = 20_000;
@@ -75,6 +76,11 @@ export interface SweepContext {
    *  means the sweep simply skips that step; a throwing store must not stop
    *  any existing step. */
   checkoutWork?: CheckoutWorkStore;
+  /** OPTIONAL — pending checkout-discount shutdowns (the durable marker is
+   *  checkoutDiscountEnabled=true with a failing per-shop lever). Runs
+   *  inside the guarded checkout block before claiming; its own try/catch
+   *  keeps a failure from stopping the claim loop. */
+  checkoutShutdown?: () => Promise<unknown>;
   now: () => Date;
   random?: () => number;
   /** Max wall-clock time the op-drive and work loops may use (default 20s). */
@@ -198,6 +204,17 @@ export async function runSweepOnce(ctx: SweepContext): Promise<void> {
   //      re-checks the gate itself, so a gate-off sweep makes zero checkout
   //      Admin calls (claimDue/exhaustDue are DB-only).
   if (ctx.checkoutWork) {
+    if (ctx.checkoutShutdown) {
+      // Independent step with its own guard, before the claim loop: a
+      // pending-shutdown failure must never stop checkout work (or the
+      // merge/refund steps above), and a shop that lost its lever stops
+      // discounting before more work is claimed for it.
+      try {
+        await ctx.checkoutShutdown();
+      } catch (err: any) {
+        console.error(`[worker] Checkout shutdown enforcement failed: ${msg(err)}`);
+      }
+    }
     try {
       // Missed-webhook reconciliation BEFORE claiming: every outstanding
       // PROJECTED row is re-verified from fresh Shopify state about every
@@ -280,6 +297,8 @@ const productionContext = (): SweepContext => {
     ops: prismaOperationStore,
     work: prismaWorkStore(),
     checkoutWork: prismaCheckoutWorkStore(),
+    checkoutShutdown: () =>
+      enforcePendingShutdowns({ adminFactory: sessionAdminFactory }),
     deps,
     adminFactory: sessionAdminFactory,
     settings: getSettings,

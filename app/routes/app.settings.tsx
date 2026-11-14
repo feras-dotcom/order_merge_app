@@ -17,6 +17,7 @@ import {
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { getSettings, upsertSettings } from "../lib/settings.server";
+import { enforceShopShutdown } from "../lib/checkout-discount/shutdown-enforcer.server";
 import { getLocationAccess } from "../lib/location-access.server";
 import {
   isOnboardingComplete,
@@ -54,7 +55,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 // ── Action ────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const formData = await request.formData();
   const current = await getSettings(session.shop);
 
@@ -84,6 +85,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     mergeWindowHours,
     ...(turningOn && !current.autoMergeAcknowledgedAt && { autoMergeAcknowledgedAt: new Date() }),
   });
+  // The merchant's save is never blocked or delayed by a Shopify call: a
+  // failed enforcement is diag'd (FAILED) inside the enforcer and the
+  // durable pending marker (checkoutDiscountEnabled still true with a
+  // failing lever) makes the sweeper retry — see shutdown-enforcer.
+  try {
+    await enforceShopShutdown({ shop: session.shop, admin });
+  } catch (err: any) {
+    console.error(
+      `[settings] Checkout shutdown enforcement threw for ${session.shop}: ${err?.message ?? err}`,
+    );
+  }
   return json({ success: true, error: null });
 };
 

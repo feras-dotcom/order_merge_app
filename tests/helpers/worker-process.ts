@@ -110,6 +110,7 @@ const settings = async () => ({
   shippingRolloutAt: null,
   checkoutDiscountEnabled: false,
   checkoutDiscountEnabledAt: null,
+    checkoutDiscountNodeId: null,
 });
 
 // Start barrier: lease anchor work before registering, then wait for /go —

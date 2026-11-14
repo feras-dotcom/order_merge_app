@@ -1781,6 +1781,7 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
     shippingRolloutAt: null,
     checkoutDiscountEnabled: false,
     checkoutDiscountEnabledAt: null,
+    checkoutDiscountNodeId: null,
     ...opts.settings,
   };
   const getSettings = async () => settings;

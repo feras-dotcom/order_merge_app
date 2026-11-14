@@ -25,19 +25,47 @@ const opt = (name: string) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const shop = opt("shop");
-const discountId = opt("discount-id");
+const suppliedDiscountId = opt("discount-id");
 const expectedWindowId = opt("window-id");
 const apply = argv.includes("--apply");
 
 const usage =
-  "usage: npx vite-node scripts/checkout-discount-control.ts <status|shutdown|prepare-enable|activate> --shop <store> --discount-id <gid> [--window-id <id>] [--apply]";
-if (!["status", "shutdown", "prepare-enable", "activate"].includes(cmd ?? "") || !shop || !discountId) {
+  "usage: npx vite-node scripts/checkout-discount-control.ts <status|shutdown|prepare-enable|activate> --shop <store> [--discount-id <gid>] [--window-id <id>] [--apply]\n" +
+  "  --discount-id is optional for status/shutdown/activate (defaults to the recorded\n" +
+  "  checkoutDiscountNodeId; a supplied id must match it) and REQUIRED for prepare-enable\n" +
+  "  (prepare-enable records it).";
+if (!["status", "shutdown", "prepare-enable", "activate"].includes(cmd ?? "") || !shop) {
   console.error(usage);
+  process.exit(2);
+}
+if (cmd === "prepare-enable" && !suppliedDiscountId) {
+  console.error("prepare-enable requires --discount-id <gid> (the discount it records)");
   process.exit(2);
 }
 if (cmd === "activate" && !expectedWindowId) {
   console.error("activate requires --window-id <w<epochMs>> (printed by prepare-enable)");
   process.exit(2);
+}
+
+// Resolve the discount id: the recorded checkoutDiscountNodeId is the
+// default for status/shutdown/activate; an explicit --discount-id that
+// disagrees with the recorded id is refused (never operate on an
+// unrelated discount).
+let discountId = suppliedDiscountId;
+if (cmd !== "prepare-enable") {
+  const { getSettings } = await import("../app/lib/settings.server");
+  const recorded = (await getSettings(shop!)).checkoutDiscountNodeId;
+  if (suppliedDiscountId && recorded && suppliedDiscountId !== recorded) {
+    console.error(
+      `error: --discount-id ${suppliedDiscountId} does not match the recorded ${recorded} — refusing`,
+    );
+    process.exit(2);
+  }
+  discountId = discountId ?? recorded ?? undefined;
+  if (!discountId) {
+    console.error("error: no checkout discount node id recorded — run prepare-enable first");
+    process.exit(2);
+  }
 }
 if (cmd !== "status" && !apply) {
   console.log(`dry-run: re-run with --apply to ${cmd} discount ${discountId} on ${shop}`);
