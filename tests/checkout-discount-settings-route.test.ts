@@ -8,7 +8,8 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { cartDeliveryOptionsDiscountsGenerateRun } from "../functions/checkout-shipping-discount/src/cart_delivery_options_discounts_generate_run";
 import { action } from "../app/routes/app.settings";
 import { CHECKOUT_DISCOUNT_MESSAGE } from "../app/lib/checkout-discount/config";
-import type { CheckoutGateDeps } from "../app/lib/checkout-discount/gate.server";
+import { checkoutDiscountGate, type CheckoutGateDeps } from "../app/lib/checkout-discount/gate.server";
+import { enforceShopShutdown } from "../app/lib/checkout-discount/shutdown-enforcer.server";
 import { parseElig } from "../app/lib/checkout-discount/records";
 import { processCheckoutWork } from "../app/lib/checkout-discount/processor.server";
 import {
@@ -28,6 +29,11 @@ const WIN1 = `w${EPOCH1.getTime()}`;
 // ── In-memory settings store backing the mocked settings.server ──
 const env = {
   settings: { ...DEFAULT_SETTINGS } as MergeSettings,
+  /** Records the order of "raise" / "upsert" calls through the mocks. */
+  calls: [] as string[],
+  /** When set, the mocked raise/upsert throw it — DB failure shapes. */
+  raiseError: null as Error | null,
+  upsertError: null as Error | null,
 };
 
 vi.mock("../app/db.server", () => ({ default: {} }));
@@ -38,6 +44,8 @@ vi.mock("../app/lib/settings.server", async (importOriginal) => {
     ...actual,
     getSettings: async () => env.settings,
     upsertSettings: async (_shop: string, update: Partial<MergeSettings>) => {
+      env.calls.push("upsert");
+      if (env.upsertError) throw env.upsertError;
       env.settings = { ...env.settings, ...update };
       return env.settings;
     },
@@ -46,11 +54,36 @@ vi.mock("../app/lib/settings.server", async (importOriginal) => {
         ...env.settings,
         checkoutDiscountEnabled: enabled,
         checkoutDiscountEnabledAt: enabled ? (env.settings.checkoutDiscountEnabledAt ?? EPOCH1) : null,
+        // Mirror the real writer: a false→true transition stamps the merge
+        // window in force; already-enabled keeps its stamp; disable clears.
+        checkoutDiscountWindowHours: enabled
+          ? (env.settings.checkoutDiscountEnabled
+              ? env.settings.checkoutDiscountWindowHours
+              : env.settings.mergeWindowHours)
+          : null,
       };
       return env.settings.checkoutDiscountEnabledAt;
     },
     setCheckoutDiscountNodeId: async (_shop: string, id: string | null) => {
       env.settings = { ...env.settings, checkoutDiscountNodeId: id };
+    },
+    raiseCheckoutDiscountWindowStamp: async (_shop: string, hours: number) => {
+      env.calls.push("raise");
+      if (env.raiseError) throw env.raiseError;
+      // Mirror GREATEST(stamp, hours) while enabled and stamped — the real
+      // writer is called with the NEW window before the save lands.
+      if (
+        env.settings.checkoutDiscountEnabled &&
+        env.settings.checkoutDiscountWindowHours != null
+      ) {
+        env.settings = {
+          ...env.settings,
+          checkoutDiscountWindowHours: Math.max(
+            env.settings.checkoutDiscountWindowHours,
+            hours,
+          ),
+        };
+      }
     },
   };
 });
@@ -228,7 +261,11 @@ beforeEach(() => {
     checkoutDiscountEnabled: true,
     checkoutDiscountEnabledAt: EPOCH1,
     checkoutDiscountNodeId: DID,
+    checkoutDiscountWindowHours: 48,
   };
+  env.calls = [];
+  env.raiseError = null;
+  env.upsertError = null;
   current.admin = null;
 });
 
@@ -280,6 +317,102 @@ describe("settings action → checkout shutdown enforcement", () => {
     expect(res.status).toBe(200);
     expect(admin.state.deactivateIds).toEqual([DID]);
     expect(env.settings.checkoutDiscountEnabled).toBe(false);
+  });
+
+  it("lowering the merge window below the enabled-at stamp deactivates the discount and clears the stamp", async () => {
+    const admin = makeAdmin(orderFixture());
+    current.admin = admin;
+    await project(admin);
+    expect(admin.state.discountStatus).toBe("ACTIVE");
+    // The record was issued under the 48 h window: at created+30 h the new
+    // 24 h window has closed but the record's exp has not — it still grants.
+    const grantsAt = (date: string) =>
+      admin.state.discountStatus === "ACTIVE" &&
+      (cartDeliveryOptionsDiscountsGenerateRun({
+        ...fnInput(admin.elig.stored(CUST)),
+        shop: { localTime: { inWindow: true, date } },
+      }).operations as unknown[]).length > 0;
+    expect(grantsAt("2026-11-11")).toBe(true);
+
+    const res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "24" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    expect(env.settings.mergeWindowHours).toBe(24);
+    // The window stamp (48 h, stamped at enable) exceeds the new window —
+    // fail closed: deactivate+verify, flip the flag, clear the stamp.
+    expect(admin.state.deactivateIds).toEqual([DID]);
+    expect(admin.state.discountStatus).toBe("EXPIRED");
+    expect(env.settings.checkoutDiscountEnabled).toBe(false);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(null);
+    expect(grantsAt("2026-11-11")).toBe(false);
+  });
+
+  it("raising the window raises the stamp without a shutdown; a later lower below it shuts down", async () => {
+    env.settings.mergeWindowHours = 24;
+    env.settings.checkoutDiscountWindowHours = 24;
+    const admin = makeAdmin(orderFixture());
+    current.admin = admin;
+
+    // 24 -> 72: the stamp follows (GREATEST) — no discount call at all.
+    let res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "72" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    expect(env.settings.mergeWindowHours).toBe(72);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(72);
+    expect(env.settings.checkoutDiscountEnabled).toBe(true);
+    expect(admin.state.deactivateCalls).toBe(0);
+
+    // 72 -> 48: still >= 24 but below the 72 stamp — fail-closed shutdown.
+    res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "48" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    expect(admin.state.deactivateIds).toEqual([DID]);
+    expect(admin.state.discountStatus).toBe("EXPIRED");
+    expect(env.settings.checkoutDiscountEnabled).toBe(false);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(null);
+  });
+
+  it("enabled but never stamped (window-unstamped) fails closed through the same save path", async () => {
+    env.settings.checkoutDiscountWindowHours = null;
+    const admin = makeAdmin(orderFixture());
+    current.admin = admin;
+    const res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "48" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    expect(admin.state.deactivateIds).toEqual([DID]);
+    expect(admin.state.discountStatus).toBe("EXPIRED");
+    expect(env.settings.checkoutDiscountEnabled).toBe(false);
+  });
+
+  it("a failed window-shortened deactivation keeps the pending marker and the gate reports it", async () => {
+    const admin = makeAdmin(orderFixture());
+    admin.state.failDeactivate = true;
+    current.admin = admin;
+    const res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "24" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    // The settings save still landed — Shopify never blocks the merchant.
+    expect(env.settings.mergeWindowHours).toBe(24);
+    // Shutdown could not be verified: the durable pending marker (flag on +
+    // failing lever) stays for the sweeper.
+    expect(env.settings.checkoutDiscountEnabled).toBe(true);
+    const g = await checkoutDiscountGate(SHOP, gateDeps());
+    expect(g).toEqual({ on: false, reason: "window-shortened" });
   });
 
   it("a deactivate failure still saves the settings and leaves the flag for the sweeper", async () => {
@@ -337,5 +470,115 @@ describe("settings action → checkout shutdown enforcement", () => {
     } as any);
     expect(res.status).toBe(200);
     expect(admin.state.deactivateCalls).toBe(0);
+  });
+});
+
+describe("settings action → stamp raise ordering", () => {
+  it("the stamp raise runs BEFORE the settings write, carrying the new window", async () => {
+    const admin = makeAdmin(orderFixture());
+    current.admin = admin;
+    const res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "72" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    // raise(hours=72) lands before upsertSettings — the stamp can never sit
+    // below a window under which records may already have been issued.
+    expect(env.calls).toEqual(["raise", "upsert"]);
+    expect(env.settings.mergeWindowHours).toBe(72);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(72);
+    expect(admin.state.deactivateCalls).toBe(0);
+  });
+
+  it("a failed stamp raise rejects the save: nothing written, no shutdown attempted", async () => {
+    const admin = makeAdmin(orderFixture());
+    current.admin = admin;
+    env.raiseError = new Error("db down");
+    await expect(
+      action({
+        request: post({ autoMergeEnabled: "true", mergeWindowHours: "72" }),
+        params: {},
+        context: {},
+      } as any),
+    ).rejects.toThrow("db down");
+    // The write never ran and enforcement was never reached.
+    expect(env.calls).toEqual(["raise"]);
+    expect(env.settings.mergeWindowHours).toBe(48);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(48);
+    expect(admin.state.deactivateCalls).toBe(0);
+    expect(admin.state.deactivateIds).toHaveLength(0);
+  });
+
+  it("a raise that lands before a failed save leaves stamp > window — the gate fails closed and the sweeper shuts down", async () => {
+    env.settings.mergeWindowHours = 24;
+    env.settings.checkoutDiscountWindowHours = 24;
+    const admin = makeAdmin(orderFixture());
+    current.admin = admin;
+    env.upsertError = new Error("save failed");
+    await expect(
+      action({
+        request: post({ autoMergeEnabled: "true", mergeWindowHours: "72" }),
+        params: {},
+        context: {},
+      } as any),
+    ).rejects.toThrow("save failed");
+    // The window never moved but the stamp did: 72 > 24 — overshooting only
+    // ever fails closed.
+    expect(env.settings.mergeWindowHours).toBe(24);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(72);
+    expect(env.settings.checkoutDiscountEnabled).toBe(true);
+    const g = await checkoutDiscountGate(SHOP, gateDeps());
+    expect(g).toEqual({ on: false, reason: "window-shortened" });
+    // The same enforce path the sweeper runs deactivates+verifies and
+    // flips the flag.
+    const r = await enforceShopShutdown({ shop: SHOP, admin: admin as any });
+    expect(r).toEqual({ action: "shutdown", status: "EXPIRED" });
+    expect(admin.state.deactivateIds).toEqual([DID]);
+    expect(admin.state.discountStatus).toBe("EXPIRED");
+    expect(env.settings.checkoutDiscountEnabled).toBe(false);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(null);
+  });
+
+  it("a record issued under a widened window still triggers shutdown when the window is later lowered below the stamp", async () => {
+    env.settings.mergeWindowHours = 24;
+    env.settings.checkoutDiscountWindowHours = 24;
+    const admin = makeAdmin(orderFixture());
+    current.admin = admin;
+    // 24 -> 72: raise lands before the save — the stamp tracks the window
+    // under which records may now be issued (this is the gap the after-save
+    // raise used to leave uncovered).
+    let res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "72" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(72);
+    expect(admin.state.deactivateCalls).toBe(0);
+    // A record is really projected under the 72 h window — while ACTIVE the
+    // Function still grants at created+50 h, well past 48 h.
+    await project(admin);
+    const grantsAt = (date: string) =>
+      admin.state.discountStatus === "ACTIVE" &&
+      (cartDeliveryOptionsDiscountsGenerateRun({
+        ...fnInput(admin.elig.stored(CUST)),
+        shop: { localTime: { inWindow: true, date } },
+      }).operations as unknown[]).length > 0;
+    expect(grantsAt("2026-11-12")).toBe(true);
+    // 72 -> 48: raise(48) is a GREATEST no-op — stamp 72 > window 48 → the
+    // lever fires and the discount is verified down.
+    res = await action({
+      request: post({ autoMergeEnabled: "true", mergeWindowHours: "48" }),
+      params: {},
+      context: {},
+    } as any);
+    expect(res.status).toBe(200);
+    expect(env.settings.mergeWindowHours).toBe(48);
+    expect(admin.state.deactivateIds).toEqual([DID]);
+    expect(admin.state.discountStatus).toBe("EXPIRED");
+    expect(env.settings.checkoutDiscountEnabled).toBe(false);
+    expect(env.settings.checkoutDiscountWindowHours).toBe(null);
+    expect(grantsAt("2026-11-12")).toBe(false);
   });
 });

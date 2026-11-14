@@ -104,6 +104,48 @@ describe("projection.mergeRecords", () => {
     recs[1].left = 0; // consumed, no used list
     const merged = mergeRecords(null, recs, { todayDate: "2026-11-01", maxRecs: 3 });
     expect(merged.doc.recs.map((r) => r.id)).toEqual(["2", "3", "4"]);
+    expect(merged.refused).toEqual(["5"]);
+  });
+  it("capacity is fail-closed: a new id at cap is refused, nothing is evicted", () => {
+    const full = serializeElig({
+      v: 1,
+      recs: ["a", "b", "c", "d", "e"].map((id) => rec({ id, exp: "2099-01-01" })),
+    });
+    const merged = mergeRecords(full, [rec({ id: "new", exp: "2099-01-02" })], {
+      todayDate: "2026-11-01",
+      maxRecs: 5,
+    });
+    expect(merged.refused).toEqual(["new"]);
+    expect(merged.doc.recs.map((r) => r.id)).toEqual(["a", "b", "c", "d", "e"]);
+  });
+  it("capacity never evicts a consumed tombstone; expiry later frees the slot", () => {
+    const tomb = { ...rec({ id: "t", exp: "2099-01-01" }), left: 0, used: ["x"] };
+    const doc = serializeElig({
+      v: 1,
+      recs: [tomb, ...["a", "b", "c", "d"].map((id) => rec({ id, exp: "2099-02-01" }))],
+    });
+    // At cap with a live tombstone: a sixth id is refused, the tombstone stays.
+    const refused = mergeRecords(doc, [rec({ id: "new", exp: "2099-03-01" })], { todayDate: "2026-11-01", maxRecs: 5 });
+    expect(refused.refused).toEqual(["new"]);
+    expect(refused.doc.recs.find((r) => r.id === "t")?.used).toEqual(["x"]);
+    // Once the tombstone expires it no longer holds a slot — the same
+    // incoming id is admitted instead of refused.
+    const freed = mergeRecords(doc, [rec({ id: "new", exp: "2099-03-01" })], { todayDate: "2099-01-15", maxRecs: 5 });
+    expect(freed.refused).toEqual([]);
+    expect(freed.doc.recs.map((r) => r.id)).toEqual(["a", "b", "c", "d", "new"]);
+  });
+  it("refreshing an existing id is never refused, and over-cap legacy entries are kept", () => {
+    const legacy = serializeElig({
+      v: 1,
+      recs: ["a", "b", "c", "d", "e", "f"].map((id) => rec({ id, exp: "2099-01-01" })),
+    });
+    const merged = mergeRecords(legacy, [rec({ id: "a", exp: "2098-06-01" })], {
+      todayDate: "2026-11-01",
+      maxRecs: 5,
+    });
+    expect(merged.refused).toEqual([]);
+    expect(merged.doc.recs).toHaveLength(6); // never trimmed
+    expect(merged.doc.recs.find((r) => r.id === "a")?.exp).toBe("2098-06-01");
   });
   it("tolerates garbage and reports it", () => {
     expect(mergeRecords("{{{", [r1], { todayDate: "2026-11-01" }).garbage).toBe(true);

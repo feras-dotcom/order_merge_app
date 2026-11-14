@@ -58,6 +58,13 @@ model Settings {
   // after proving app ownership — lets the shutdown enforcer deactivate
   // exactly that discount when a per-shop gate lever fails.
   checkoutDiscountNodeId String?
+  // Window stamp: the highest mergeWindowHours under which eligibility
+  // records may have been issued since the current enable epoch. Lowering
+  // mergeWindowHours below the stamp fails the checkout gate and forces a
+  // shutdown; resuming needs prepare-enable (fresh epoch + stamp).
+  // Writable ONLY via setCheckoutDiscountEnabled /
+  // raiseCheckoutDiscountWindowStamp.
+  checkoutDiscountWindowHours Int?
 }
 
 // The durable work item for an ORDERS_CREATE event: PENDING until a terminal
@@ -110,6 +117,11 @@ model CheckoutEligibilityWork {
   lastReason  String?
   deadlineAt  DateTime?
   doneAt      DateTime?
+  // Durable consumed evidence: set BEFORE the customer metafield write when
+  // a checkout grant consumed this order's record. Independent of the
+  // document's tombstone (which the record cap can evict and expiry prunes),
+  // so a replay/recheck can never issue a second grant for the order.
+  grantConsumedAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @default(now()) @updatedAt
 

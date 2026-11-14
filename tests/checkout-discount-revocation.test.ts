@@ -43,6 +43,7 @@ const SETTINGS: MergeSettings = {
   onboardingCompletedAt: EPOCH,
   checkoutDiscountEnabled: true,
   checkoutDiscountEnabledAt: EPOCH,
+  checkoutDiscountWindowHours: 72,
   mergeWindowHours: 72,
 };
 const GATE: CheckoutGateDeps = {

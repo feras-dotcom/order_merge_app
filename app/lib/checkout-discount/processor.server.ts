@@ -304,6 +304,7 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
     windowId: gate.windowId,
     now: nowDate,
     timeZone,
+    grantConsumed: item.grantConsumedAt != null,
   });
 
   // (4) The location rule only gates ISSUE — an ISSUE candidate that fails
@@ -354,6 +355,7 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
       // or a spent record): mergeRecords deliberately refuses to resurrect
       // it, so "no grantable record" IS the correct converged state then.
       let sawConsumedId = false;
+      let refusedAtCapacity = false;
       const { written } = await writeProjection(
         adminGql,
         customerId,
@@ -367,10 +369,22 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
             maxRecs: 5,
             windowId: gate.windowId,
           });
+          if (m.refused.includes(record.id)) {
+            // The document holds maxRecs unexpired entries: rather than
+            // evict one (consumed tombstones included) this order simply
+            // gets no discount — nothing is written, the row settles
+            // DONE/CAPACITY so it is never rechecked.
+            refusedAtCapacity = true;
+            return null;
+          }
           return { serialized: m.serialized };
         },
         { sleep, random },
       );
+      if (refusedAtCapacity) {
+        await settle("CAPACITY", "eligibility document at capacity — record refused", "REFUSED", "CAPACITY");
+        return;
+      }
       // (7) Read-back verification: the expected record must be visible —
       // unless the id was already consumed, in which case its absence (or a
       // left:0 tombstone) is exactly what must be there.
@@ -410,6 +424,12 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
         return;
       }
       if (!(await renew())) return;
+      // Durable consumed mark BEFORE the document write: the metafield
+      // tombstone can be evicted or pruned, but this row can never lose the
+      // evidence — a crash here retries; a crash after the write still
+      // leaves the record spent and the next pass re-marks. Only a real
+      // match is marked; an overdraw with no record marks nothing.
+      await work.markGrantConsumed(shop, `gid://shopify/Order/${match.id}`);
       await writeProjection(
         adminGql,
         customerId,

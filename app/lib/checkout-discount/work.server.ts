@@ -32,6 +32,8 @@ export type CheckoutWorkOutcome =
   | "REVOKED"
   | "CONSUMED"
   | "CONSUMED_NO_RECORD"
+  | "GRANT_CONSUMED"
+  | "CAPACITY"
   | "ORDER_GONE"
   | "CUSTOMER_GONE"
   | "FEATURE_OFF"
@@ -54,6 +56,11 @@ export interface CheckoutWorkItem {
   lastReason: string | null;
   deadlineAt: Date | null;
   doneAt: Date | null;
+  /** Durable consumed evidence, set before the metafield document write when
+   *  a checkout grant consumed this order's record. Unlike the document's
+   *  tombstone it can never be evicted or pruned, so no replay, recheck or
+   *  window change can issue a second grant for the order. */
+  grantConsumedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -95,6 +102,12 @@ export interface CheckoutWorkStore {
     ttlMs: number,
     deadlineMs: number,
   ): Promise<{ item: CheckoutWorkItem; acquired: boolean } | null>;
+  /** Durable consumed mark, written BEFORE the metafield document write when
+   *  a grant consumed the record for (shop, orderId). A single upsert: an
+   *  absent row is inserted as inert DONE/GRANT_CONSUMED; an existing row
+   *  only gains grantConsumedAt (COALESCE keeps the first timestamp) — its
+   *  lease, status, gen, attempts and outcome are never touched. */
+  markGrantConsumed(shop: string, orderId: string): Promise<void>;
   /** Missed-webhook reconciliation: re-opens recently PROJECTED rows as
    *  PENDING (due now, attempts 0, fresh deadline, lease cleared) so the
    *  processor re-reads the order's live state and applies the same
@@ -211,6 +224,23 @@ export function prismaCheckoutWorkStore(db: PrismaClient = defaultDb): CheckoutW
       const row = rows[0];
       return { item: toItem(row), acquired: row.acquired === true };
     },
+    async markGrantConsumed(shop, orderId) {
+      // Single statement. INSERT only happens when the order never became
+      // work: an inert DONE row carrying the consumed mark. On conflict only
+      // grantConsumedAt is written (first timestamp wins) — an active row's
+      // lease/status/gen/attempts/outcome stay untouched.
+      await db.$executeRaw`
+        INSERT INTO "CheckoutEligibilityWork"
+          ("id", "shop", "orderId", "gen", "status", "attempts",
+           "outcome", "doneAt", "grantConsumedAt", "createdAt", "updatedAt")
+        VALUES (
+          ${crypto.randomUUID()}, ${shop}, ${orderId}, 1, 'DONE', 0,
+          'GRANT_CONSUMED', ${DB_WALL}, ${DB_WALL}, ${DB_WALL}, ${DB_WALL}
+        )
+        ON CONFLICT ("shop", "orderId") DO UPDATE SET
+          "grantConsumedAt" =
+            COALESCE("CheckoutEligibilityWork"."grantConsumedAt", ${DB_WALL})`;
+    },
     async reopenOutstanding({ olderThanMs, maxAgeMs, limit, deadlineMs }) {
       return db.$executeRaw`
         UPDATE "CheckoutEligibilityWork" w
@@ -224,6 +254,7 @@ export function prismaCheckoutWorkStore(db: PrismaClient = defaultDb): CheckoutW
           WHERE "status" = 'DONE' AND "outcome" = 'PROJECTED'
             AND "doneAt" < ${dbWallPlus(-olderThanMs)}
             AND "createdAt" > ${dbWallPlus(-maxAgeMs)}
+            AND "grantConsumedAt" IS NULL
           ORDER BY "doneAt"
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
@@ -379,6 +410,7 @@ export function memoryCheckoutWorkStore(clock: () => number): CheckoutWorkStore 
           lastReason: null,
           deadlineAt: new Date(clock() + deadlineMs),
           doneAt: null,
+          grantConsumedAt: null,
           createdAt: now(),
           updatedAt: now(),
         };
@@ -422,6 +454,34 @@ export function memoryCheckoutWorkStore(clock: () => number): CheckoutWorkStore 
       existing.updatedAt = now();
       return { item: { ...existing }, acquired: !hadLiveLease };
     },
+    async markGrantConsumed(shop, orderId) {
+      const k = key(shop, orderId);
+      const existing = rows.get(k);
+      if (!existing) {
+        rows.set(k, {
+          id: `mem-${rows.size + 1}`,
+          shop,
+          orderId,
+          gen: 1,
+          status: "DONE",
+          attempts: 0,
+          retryAfter: null,
+          leaseToken: null,
+          leasedUntil: null,
+          outcome: "GRANT_CONSUMED",
+          lastReason: null,
+          deadlineAt: null,
+          doneAt: now(),
+          grantConsumedAt: now(),
+          createdAt: now(),
+          updatedAt: now(),
+        });
+        return;
+      }
+      // Conflict branch: grantConsumedAt only — first timestamp wins, the
+      // lease/status/gen/attempts/outcome of an active row stay untouched.
+      existing.grantConsumedAt ??= now();
+    },
     async reopenOutstanding({ olderThanMs, maxAgeMs, limit, deadlineMs }) {
       const dueRows = [...rows.values()]
         .filter(
@@ -429,7 +489,8 @@ export function memoryCheckoutWorkStore(clock: () => number): CheckoutWorkStore 
             r.status === "DONE" &&
             r.outcome === "PROJECTED" &&
             (r.doneAt?.getTime() ?? 0) < clock() - olderThanMs &&
-            r.createdAt.getTime() > clock() - maxAgeMs,
+            r.createdAt.getTime() > clock() - maxAgeMs &&
+            r.grantConsumedAt === null,
         )
         .sort((a, b) => (a.doneAt?.getTime() ?? 0) - (b.doneAt?.getTime() ?? 0))
         .slice(0, limit);

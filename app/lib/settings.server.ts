@@ -37,6 +37,13 @@ export interface MergeSettings {
    *  shutdown enforcer may touch. Writable ONLY via
    *  setCheckoutDiscountNodeId. */
   checkoutDiscountNodeId: string | null;
+  /** Window stamp: the highest mergeWindowHours under which eligibility
+   *  records may have been issued since the current enable epoch. Stamped
+   *  on enable, raised monotonically by
+   *  raiseCheckoutDiscountWindowStamp, cleared on disable — lowering the
+   *  merge window below it fails the checkout gate and forces a shutdown.
+   *  Writable ONLY via the dedicated writers, never upsertSettings. */
+  checkoutDiscountWindowHours: number | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
@@ -56,6 +63,7 @@ export const DEFAULT_SETTINGS: MergeSettings = {
   checkoutDiscountEnabled: false,
   checkoutDiscountEnabledAt: null,
   checkoutDiscountNodeId: null,
+  checkoutDiscountWindowHours: null,
 };
 
 /**
@@ -83,6 +91,7 @@ export async function upsertSettings(
       | "checkoutDiscountEnabled"
       | "checkoutDiscountEnabledAt"
       | "checkoutDiscountNodeId"
+      | "checkoutDiscountWindowHours"
     >
   >,
 ): Promise<MergeSettings> {
@@ -130,17 +139,50 @@ export async function setCheckoutDiscountEnabled(
   enabled: boolean,
   client: PrismaClient = db,
 ): Promise<void> {
+  // The window stamp moves with the flag: a false→true transition stamps
+  // the mergeWindowHours in force at enable time, enabling again keeps the
+  // existing stamp (idempotent while enabled), disabling clears it. The
+  // INSERT path stamps 24 — the mergeWindowHours column default.
   await client.$executeRaw`
-    INSERT INTO "Settings" ("id", "shop", "checkoutDiscountEnabled", "checkoutDiscountEnabledAt")
+    INSERT INTO "Settings" ("id", "shop", "checkoutDiscountEnabled", "checkoutDiscountEnabledAt", "checkoutDiscountWindowHours")
     VALUES (${crypto.randomUUID()}, ${shop}, ${enabled},
-      CASE WHEN ${enabled} THEN ${DB_WALL} ELSE NULL END)
+      CASE WHEN ${enabled} THEN ${DB_WALL} ELSE NULL END,
+      CASE WHEN ${enabled} THEN 24 ELSE NULL END)
     ON CONFLICT ("shop") DO UPDATE SET
       "checkoutDiscountEnabled" = EXCLUDED."checkoutDiscountEnabled",
       "checkoutDiscountEnabledAt" = CASE
         WHEN NOT EXCLUDED."checkoutDiscountEnabled" THEN NULL
         WHEN "Settings"."checkoutDiscountEnabled" THEN "Settings"."checkoutDiscountEnabledAt"
         ELSE ${DB_WALL}
+      END,
+      "checkoutDiscountWindowHours" = CASE
+        WHEN NOT EXCLUDED."checkoutDiscountEnabled" THEN NULL
+        WHEN "Settings"."checkoutDiscountEnabled" THEN "Settings"."checkoutDiscountWindowHours"
+        ELSE "Settings"."mergeWindowHours"
       END`;
+}
+
+/**
+ * Monotonic raise of the checkout window stamp: called BEFORE the settings
+ * save that widens mergeWindowHours, with the NEW window value — the stamp
+ * must never sit below a window under which records may have been issued
+ * (a missed raise would let a later lowering slip under the stale stamp).
+ * GREATEST never lowers it — lowering mergeWindowHours below the stamp is
+ * the fail-closed path (gate off + shutdown). Only runs while the checkout
+ * discount is enabled and stamped.
+ */
+export async function raiseCheckoutDiscountWindowStamp(
+  shop: string,
+  hours: number,
+  client: PrismaClient = db,
+): Promise<void> {
+  await client.$executeRaw`
+    UPDATE "Settings"
+    SET "checkoutDiscountWindowHours" =
+      GREATEST("checkoutDiscountWindowHours", ${hours})
+    WHERE "shop" = ${shop}
+      AND "checkoutDiscountEnabled"
+      AND "checkoutDiscountWindowHours" IS NOT NULL`;
 }
 
 /**
@@ -185,6 +227,7 @@ export async function resetAutomationForUninstall(
       checkoutDiscountEnabled: false,
       checkoutDiscountEnabledAt: null,
       checkoutDiscountNodeId: null,
+      checkoutDiscountWindowHours: null,
     },
   });
 }
