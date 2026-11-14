@@ -36,15 +36,18 @@ const GATE_ON: CheckoutGateResult = {
   windowId: "w-test",
 };
 
+vi.mock("../app/lib/webhook-auth.server", () => ({
+  authenticateWebhook: async (request: Request) => ({
+    topic: env.topic,
+    shop: SHOP,
+    admin: env.admin,
+    payload: await request.json().catch(() => ({})),
+  }),
+}));
+
 vi.mock("../app/shopify.server", () => ({
-  authenticate: {
-    webhook: async (request: Request) => ({
-      topic: env.topic,
-      shop: SHOP,
-      admin: env.admin,
-      payload: await request.json().catch(() => ({})),
-    }),
-  },
+  authenticate: { webhook: vi.fn() },
+  unauthenticated: { admin: vi.fn() },
 }));
 
 vi.mock("../app/lib/checkout-discount/gate.server", () => ({

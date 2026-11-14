@@ -35,7 +35,7 @@
 //      runs inline as a latency optimization — the sweeper owns it
 //      otherwise, and always on any failure.
 
-import { authenticate } from "../../shopify.server";
+import { authenticateWebhook } from "../webhook-auth.server";
 import { LEASE_TTL_MS, newLeaseToken } from "../ownership.server";
 import { checkoutDiscountGate, type CheckoutGateResult } from "./gate.server";
 import { processCheckoutWork } from "./processor.server";
@@ -106,7 +106,7 @@ export const handleCheckoutEligibilityWebhook = async (
     sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<Response> => {
-  const { topic: actual, shop, payload, admin } = await authenticate.webhook(request);
+  const { topic: actual, shop, payload, admin } = await authenticateWebhook(request);
 
   if (actual !== topic || !TOPICS.includes(actual)) {
     console.warn(`[checkout] Unexpected topic: ${actual} (expected ${topic})`);

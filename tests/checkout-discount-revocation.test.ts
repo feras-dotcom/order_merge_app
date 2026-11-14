@@ -177,17 +177,20 @@ const todayOf = () => new Date(clock).toISOString().slice(0, 10);
 // ── Webhook delivery + processing ────────────────────────────────────────
 
 const authEnv = vi.hoisted(() => ({ topic: "", admin: null as any }));
+vi.mock("../app/lib/webhook-auth.server", () => ({
+  authenticateWebhook: async (request: Request) => ({
+    topic: authEnv.topic,
+    shop: SHOP,
+    // No inline admin — the handler only marks/touches the durable row;
+    // the test then claims and processes it deterministically.
+    admin: null,
+    payload: await request.json().catch(() => ({})),
+  }),
+}));
+
 vi.mock("../app/shopify.server", () => ({
-  authenticate: {
-    webhook: async (request: Request) => ({
-      topic: authEnv.topic,
-      shop: SHOP,
-      // No inline admin — the handler only marks/touches the durable row;
-      // the test then claims and processes it deterministically.
-      admin: null,
-      payload: await request.json().catch(() => ({})),
-    }),
-  },
+  authenticate: { webhook: vi.fn() },
+  unauthenticated: { admin: vi.fn() },
 }));
 
 const TOPIC_PAYLOADS: Record<string, unknown> = {
