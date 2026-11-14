@@ -119,3 +119,46 @@ merge still resolving — they are requeued for v2 reconsideration, never
 touched directly. Rows older than that are provably abandoned work and
 require an explicit operator disposition because "silently forgotten" and
 "automatically retried" are both wrong answers for different shops.
+
+## Shopify client-secret rotation
+
+Dual-secret webhook support (`app/lib/webhook-auth.server.ts`) exists so the
+app's client secret can be rotated without dropping deliveries. Shopify signs
+webhooks with the **oldest unrevoked** client secret; the new secret can take
+up to ~1 hour to start signing — and a revoked secret can keep signing for
+~30–60 minutes afterward.
+
+Procedure:
+
+1. Deploy code containing `authenticateWebhook` with
+   `SHOPIFY_API_SECRET_PREVIOUS` **unset** — pure pass-through, no behavior
+   change.
+2. Generate the new client secret (Partner/Dev dashboard → rotate).
+3. Set `SHOPIFY_API_SECRET=<new>` and `SHOPIFY_API_SECRET_PREVIOUS=<old>`,
+   redeploy. OAuth, token exchange and token refresh now use the new secret;
+   deliveries signed with either secret verify. Do not unset `PREVIOUS`.
+4. **Only after every running instance is on the new secret** (check the
+   deployment is fully replaced — no stale replicas), migrate stored sessions:
+   ```
+   npx vite-node scripts/migrate-offline-tokens.ts            # dry run
+   npx vite-node scripts/migrate-offline-tokens.ts --apply
+   ```
+   The script re-pins each `offline_*` session onto the new secret via the
+   refresh_token grant, persists access/refresh tokens and expiries, and
+   verifies each with a read-only admin query. It is idempotent — re-run until
+   all report `migrated` (or explain `skipped`/`failed`).
+   Ordering matters: the SDK refreshes/exchanges tokens continuously, and a
+   stale instance still holding the old secret can overwrite a migrated row
+   with an old-secret-issued token after the script's verify step passed.
+   Migrate only when no old-secret instance remains.
+5. **Do not revoke the old secret yet.** Re-run the migration dry/apply until
+   it reports clean, confirming no row regressed.
+6. Revoke the old client secret in the dashboard.
+7. Keep `SHOPIFY_API_SECRET_PREVIOUS` set until **~1 hour after revocation** —
+   Shopify's signing tail outlives revocation. Watch logs for
+   `[webhook-auth] previous-secret HMAC accepted`: deliveries signed with the
+   old secret are expected during the window, but if they keep arriving well
+   past it the fallback must stay armed (or investigate a forger replaying
+   with a compromised old secret).
+8. Unset `SHOPIFY_API_SECRET_PREVIOUS`, redeploy — restores single-secret
+   pass-through with no code change.
