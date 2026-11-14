@@ -33,7 +33,9 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const ok = verifyHmac(raw, String(req.headers["x-shopify-hmac-sha256"] ?? ""));
     const topic = String(req.headers["x-shopify-topic"] ?? "?");
     const shop = String(req.headers["x-shopify-shop-domain"] ?? "?");
-    appendFileSync(LOG, JSON.stringify({ ts: new Date().toISOString(), topic, shop, ok, bytes: raw.length }) + "\n");
+    let orderGid: string | undefined;
+    try { orderGid = (JSON.parse(raw.toString("utf8")) as { admin_graphql_api_id?: string }).admin_graphql_api_id; } catch { /* non-JSON */ }
+    appendFileSync(LOG, JSON.stringify({ ts: new Date().toISOString(), topic, shop, ok, bytes: raw.length, orderGid }) + "\n");
     log(`webhook ${topic} shop=${shop} hmac=${ok}`);
     res.writeHead(ok ? 200 : 401).end();
   });

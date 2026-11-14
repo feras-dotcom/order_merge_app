@@ -1,3 +1,4 @@
+// INVALID EXPERIMENT (retained for the record): ran on a cart where Standard shipping was natively free and seeded a synthetic record. Do not reuse; see docs/evidence/checkout-first/INVALID-original-e2-e3/README.md
 // e2-pipeline.ts — E2 order-paid -> webhook -> projection write -> checkout
 // visibility latency measurement. Requires tunnel-webhooks.ts running
 // (subscriptions live) and the signed-in :9222 Chrome.

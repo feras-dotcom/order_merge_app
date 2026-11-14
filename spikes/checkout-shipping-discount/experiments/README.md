@@ -53,7 +53,8 @@ Env for all: `SPIKE_APP_DIR=<isolated app>`; run `npx jiti spikes/checkout-shipp
   title is the config message, NOT the discount node title. Partial
   case leaves the $4.00 remainder refundable. Evidence: e6-order.json,
   e6-place-order.json.
-- E2: tunnel+HMAC receiver + orders/paid sub. Per-trial chain
+- **INVALID (retracted; see docs/evidence/checkout-first/INVALID-original-e2-e3/README.md): the E2 numbers below came from a cart where Standard was natively free and a synthetic seeded record.**
+- E2 (INVALID): tunnel+HMAC receiver + orders/paid sub. Per-trial chain
   measured: Admin order visible ~76s after trial start (dominated by
   browser order placement), webhook receipt 5.5–6.3s after order
   creation, projection write 0.7–0.9s, checkout visibility of the new
@@ -64,7 +65,8 @@ Env for all: `SPIKE_APP_DIR=<isolated app>`; run `npx jiti spikes/checkout-shipp
   #number/#name/#expiry/#verification_value); Test Payment Gateway
   card "1" approves.
 
-### E2 campaign (26 trials, n=26, ms)
+### E2 campaign (26 trials, n=26, ms) — INVALID, DO NOT CITE
+Retained only as a record of a flawed experiment: native free shipping on the $629.95 cart, synthetic record seeding, loose success text match. Superseded by e2-direct / e2-real runs.
 | delta | p50 | p95 | max |
 |---|---|---|---|
 | order visible in Admin after trial start (incl. ~50s browser order placement) | 75685 | 77112 | 77264 |

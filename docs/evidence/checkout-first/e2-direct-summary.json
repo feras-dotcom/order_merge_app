@@ -1,0 +1,57 @@
+{
+ "note": "computed from e2-direct-run1.json + e2-direct.json (10 trials, no orders). hi = end of first page load showing target state minus Admin write completion (upper bound); lowerBound never observed (staleLowerBoundObs=0).",
+ "stats": {
+  "appear/fresh": {
+   "n": 10,
+   "reached": 10,
+   "hi_p50": 2914,
+   "hi_p95": 11882,
+   "hi_max": 11882,
+   "loadStartAfterWrite_p50": 4319,
+   "loadStartAfterWrite_max": 5308,
+   "nLoadsStartingAfterWrite": 4,
+   "staleLowerBoundObs": 0
+  },
+  "appear/existing": {
+   "n": 10,
+   "reached": 10,
+   "hi_p50": 4659,
+   "hi_p95": 6738,
+   "hi_max": 6738,
+   "loadStartAfterWrite_p50": 2071,
+   "loadStartAfterWrite_max": 3433,
+   "nLoadsStartingAfterWrite": 10,
+   "staleLowerBoundObs": 0
+  },
+  "disappear/fresh": {
+   "n": 10,
+   "reached": 10,
+   "hi_p50": 11009,
+   "hi_p95": 12342,
+   "hi_max": 12342,
+   "loadStartAfterWrite_p50": 4714,
+   "loadStartAfterWrite_max": 5419,
+   "nLoadsStartingAfterWrite": 9,
+   "staleLowerBoundObs": 0
+  },
+  "disappear/existing": {
+   "n": 10,
+   "reached": 10,
+   "hi_p50": 4816,
+   "hi_p95": 5736,
+   "hi_max": 5736,
+   "loadStartAfterWrite_p50": 2084,
+   "loadStartAfterWrite_max": 3190,
+   "nLoadsStartingAfterWrite": 10,
+   "staleLowerBoundObs": 0
+  }
+ },
+ "writeMs": {
+  "p50": 619,
+  "max": 854
+ },
+ "readbackMs": {
+  "p50": 254,
+  "max": 276
+ }
+}

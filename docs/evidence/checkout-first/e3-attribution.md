@@ -19,7 +19,7 @@ exact threshold is unknown but lies between $24.95 and $629.95).
 | 6 | $24.95 | active | present | guest, customer's email, "Sign in" link shown | $8.00 (no discount) |
 | 7 | $24.95 | active | present | guest, never-seen email | $8.00 (no discount) |
 
-Files: `e3-attrib-*.json`, `e3-signed-in-control.json`, `e3-guest.json` (the invalid first run), `orders-audit.json`,
+Files: `e3-attrib-*.json`, `INVALID-original-e2-e3/e3-signed-in-control.json`, `INVALID-original-e2-e3/e3-guest.json` (the invalid first run), `orders-audit.json`,
 `variants-audit.json`, `store-discounts-audit.json`, `discount-state-*.json`.
 
 ## Corrections to earlier reports (retractions)

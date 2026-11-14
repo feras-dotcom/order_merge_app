@@ -1,0 +1,19 @@
+{
+  "ts": "2026-11-14T08:59:57.060Z",
+  "order": "#1037",
+  "authErrors": [],
+  "fields": {
+    "firstName": true,
+    "lastName": true,
+    "address1": true,
+    "city": true,
+    "provinceCode": true,
+    "zip": true,
+    "countryCode": true
+  },
+  "customerPresent": true,
+  "financialStatus": "PAID",
+  "shipping": [
+    "Standard:8.0->8.0"
+  ]
+}

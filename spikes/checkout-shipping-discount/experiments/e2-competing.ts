@@ -1,3 +1,4 @@
+// INVALID EXPERIMENT (retained for the record): ran on a cart where Standard shipping was natively free and seeded a synthetic record. Do not reuse; see docs/evidence/checkout-first/INVALID-original-e2-e3/README.md
 // e2-competing.ts — two simultaneous checkouts for the SAME customer with ONE
 // seeded record: proves the stateless Function cannot atomically consume a
 // one-use entitlement (both sessions can render the discount).

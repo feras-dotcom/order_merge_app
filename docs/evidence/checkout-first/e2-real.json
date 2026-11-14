@@ -1,0 +1,379 @@
+{
+  "cart": {
+    "variant": "68100323508591",
+    "price": "24.95"
+  },
+  "trials": [
+    {
+      "trial": 0,
+      "startedAt": "2026-11-14T09:14:58.120Z",
+      "clearedRecordCount": 0,
+      "baselineKind": "baseline",
+      "tClick": "2026-11-14T09:15:14.019Z",
+      "tThankYou": "2026-11-14T09:15:16.584Z",
+      "preKind": "baseline",
+      "adminSeenAt": "2026-11-14T09:15:18.184Z",
+      "orderName": "#1038",
+      "orderCreatedAt": "2026-11-14T09:15:16Z",
+      "existingBaselineKind": "baseline",
+      "worker": {
+        "webhookReceivedAt": "2026-11-14T09:15:20.066Z",
+        "fetchStart": "2026-11-14T09:15:24.741Z",
+        "fetchEnd": "2026-11-14T09:15:25.089Z",
+        "writeStart": "2026-11-14T09:15:25.132Z",
+        "writeEnd": "2026-11-14T09:15:25.718Z",
+        "readbackEnd": "2026-11-14T09:15:25.963Z",
+        "orderCreatedAt": "2026-11-14T09:15:16Z",
+        "orderProcessedAt": "2026-11-14T09:15:15Z",
+        "shipping": [
+          {
+            "title": "Standard",
+            "originalMinor": 800,
+            "discountedMinor": 800
+          }
+        ],
+        "customerMatches": true,
+        "record": {
+          "id": "19022783971695",
+          "method": "standard",
+          "left": 1,
+          "exp": "2026-11-17"
+        },
+        "readbackHasRecordForOrder": true
+      },
+      "visible": {
+        "fresh": {
+          "observations": 1,
+          "kinds": [
+            "discounted"
+          ],
+          "reached": true,
+          "lowerBoundMs": null,
+          "firstSeenLoadStartMs": -983,
+          "upperBoundMs": 5436,
+          "evidenceLines": [
+            "[EMAIL]",
+            "Shipping",
+            "Standard ·",
+            "$8.00",
+            "FREE",
+            "Choose a shipping method",
+            "Standard",
+            "$8.00",
+            "FREE",
+            "Express",
+            "$15.00",
+            "Use shipping address as billing address",
+            "$32.95",
+            "$24.95",
+            "Subtotal",
+            "$24.95",
+            "Shipping",
+            "$8.00",
+            "FREE",
+            "MERGESHIP SPIKE: SHIPPING DISCOUNT",
+            "Total",
+            "$32.95",
+            "TOTAL SAVINGS",
+            "$8.00",
+            "Updated total price: 24.95 US dollars"
+          ]
+        },
+        "existing": {
+          "observations": 2,
+          "kinds": [
+            "baseline",
+            "discounted"
+          ],
+          "reached": true,
+          "lowerBoundMs": null,
+          "firstSeenLoadStartMs": 4693,
+          "upperBoundMs": 7465,
+          "evidenceLines": [
+            "[EMAIL]",
+            "Shipping",
+            "Standard ·",
+            "$8.00",
+            "FREE",
+            "Choose a shipping method",
+            "Standard",
+            "$8.00",
+            "FREE",
+            "Express",
+            "$15.00",
+            "Use shipping address as billing address",
+            "$24.95",
+            "$24.95",
+            "Subtotal",
+            "$24.95",
+            "Shipping",
+            "$8.00",
+            "FREE",
+            "MERGESHIP SPIKE: SHIPPING DISCOUNT",
+            "Total",
+            "$24.95",
+            "TOTAL SAVINGS",
+            "$8.00",
+            "Updated shipping method: Standard"
+          ]
+        }
+      },
+      "deltasMs": {
+        "orderCreated_to_webhookReceived": 4066,
+        "webhookReceived_to_writeEnd": 5652,
+        "writeEnd_to_discountVisibleUpper_fresh": 5436,
+        "writeEnd_to_discountVisibleUpper_existing": 7465
+      },
+      "cleanedRecordCount": 0,
+      "endedAt": "2026-11-14T09:15:34.089Z"
+    },
+    {
+      "trial": 1,
+      "startedAt": "2026-11-14T09:15:34.092Z",
+      "clearedRecordCount": 0,
+      "baselineKind": "baseline",
+      "tClick": "2026-11-14T09:15:49.840Z",
+      "tThankYou": "2026-11-14T09:15:52.401Z",
+      "preKind": "baseline",
+      "adminSeenAt": "2026-11-14T09:15:52.756Z",
+      "orderName": "#1039",
+      "orderCreatedAt": "2026-11-14T09:15:51Z",
+      "existingBaselineKind": "baseline",
+      "worker": {
+        "webhookReceivedAt": "2026-11-14T09:15:54.408Z",
+        "fetchStart": "2026-11-14T09:15:58.999Z",
+        "fetchEnd": "2026-11-14T09:15:59.296Z",
+        "writeStart": "2026-11-14T09:15:59.297Z",
+        "writeEnd": "2026-11-14T09:15:59.861Z",
+        "readbackEnd": "2026-11-14T09:16:00.127Z",
+        "orderCreatedAt": "2026-11-14T09:15:51Z",
+        "orderProcessedAt": "2026-11-14T09:15:50Z",
+        "shipping": [
+          {
+            "title": "Standard",
+            "originalMinor": 800,
+            "discountedMinor": 800
+          }
+        ],
+        "customerMatches": true,
+        "record": {
+          "id": "19022784463215",
+          "method": "standard",
+          "left": 1,
+          "exp": "2026-11-17"
+        },
+        "readbackHasRecordForOrder": true
+      },
+      "visible": {
+        "fresh": {
+          "observations": 1,
+          "kinds": [
+            "discounted"
+          ],
+          "reached": true,
+          "lowerBoundMs": null,
+          "firstSeenLoadStartMs": -867,
+          "upperBoundMs": 6132,
+          "evidenceLines": [
+            "[EMAIL]",
+            "Shipping",
+            "Standard ·",
+            "$8.00",
+            "FREE",
+            "Choose a shipping method",
+            "Standard",
+            "$8.00",
+            "FREE",
+            "Express",
+            "$15.00",
+            "Use shipping address as billing address",
+            "$32.95",
+            "$24.95",
+            "$24.95",
+            "Subtotal",
+            "$24.95",
+            "Shipping",
+            "$8.00",
+            "FREE",
+            "MERGESHIP SPIKE: SHIPPING DISCOUNT",
+            "Total",
+            "$32.95",
+            "$24.95",
+            "TOTAL SAVINGS",
+            "$8.00",
+            "Updated total price: 24.95 US dollarsUpdated shipping method: Standard"
+          ]
+        },
+        "existing": {
+          "observations": 2,
+          "kinds": [
+            "baseline",
+            "discounted"
+          ],
+          "reached": true,
+          "lowerBoundMs": null,
+          "firstSeenLoadStartMs": 4797,
+          "upperBoundMs": 7349,
+          "evidenceLines": [
+            "[EMAIL]",
+            "Shipping",
+            "Standard ·",
+            "$8.00",
+            "FREE",
+            "Choose a shipping method",
+            "Standard",
+            "$8.00",
+            "FREE",
+            "Express",
+            "$15.00",
+            "Use shipping address as billing address",
+            "$24.95",
+            "$24.95",
+            "Subtotal",
+            "$24.95",
+            "Shipping",
+            "$8.00",
+            "FREE",
+            "MERGESHIP SPIKE: SHIPPING DISCOUNT",
+            "Total",
+            "$24.95",
+            "TOTAL SAVINGS",
+            "$8.00",
+            "Updated shipping method: Standard"
+          ]
+        }
+      },
+      "deltasMs": {
+        "orderCreated_to_webhookReceived": 3408,
+        "webhookReceived_to_writeEnd": 5453,
+        "writeEnd_to_discountVisibleUpper_fresh": 6132,
+        "writeEnd_to_discountVisibleUpper_existing": 7349
+      },
+      "cleanedRecordCount": 0,
+      "endedAt": "2026-11-14T09:16:08.163Z"
+    },
+    {
+      "trial": 2,
+      "startedAt": "2026-11-14T09:16:08.166Z",
+      "clearedRecordCount": 0,
+      "baselineKind": "baseline",
+      "tClick": "2026-11-14T09:16:23.616Z",
+      "tThankYou": "2026-11-14T09:16:25.685Z",
+      "preKind": "baseline",
+      "adminSeenAt": "2026-11-14T09:16:27.340Z",
+      "orderName": "#1040",
+      "orderCreatedAt": "2026-11-14T09:16:25Z",
+      "existingBaselineKind": "baseline",
+      "worker": {
+        "webhookReceivedAt": "2026-11-14T09:16:29.000Z",
+        "fetchStart": "2026-11-14T09:16:33.710Z",
+        "fetchEnd": "2026-11-14T09:16:34.019Z",
+        "writeStart": "2026-11-14T09:16:34.021Z",
+        "writeEnd": "2026-11-14T09:16:34.566Z",
+        "readbackEnd": "2026-11-14T09:16:34.814Z",
+        "orderCreatedAt": "2026-11-14T09:16:25Z",
+        "orderProcessedAt": "2026-11-14T09:16:24Z",
+        "shipping": [
+          {
+            "title": "Standard",
+            "originalMinor": 800,
+            "discountedMinor": 800
+          }
+        ],
+        "customerMatches": true,
+        "record": {
+          "id": "19022784823663",
+          "method": "standard",
+          "left": 1,
+          "exp": "2026-11-17"
+        },
+        "readbackHasRecordForOrder": true
+      },
+      "visible": {
+        "fresh": {
+          "observations": 1,
+          "kinds": [
+            "discounted"
+          ],
+          "reached": true,
+          "lowerBoundMs": null,
+          "firstSeenLoadStartMs": -860,
+          "upperBoundMs": 5689,
+          "evidenceLines": [
+            "[EMAIL]",
+            "Shipping",
+            "Standard ·",
+            "$8.00",
+            "FREE",
+            "Choose a shipping method",
+            "Standard",
+            "$8.00",
+            "FREE",
+            "Express",
+            "$15.00",
+            "Use shipping address as billing address",
+            "$32.95",
+            "$24.95",
+            "Subtotal",
+            "$24.95",
+            "Shipping",
+            "$8.00",
+            "FREE",
+            "MERGESHIP SPIKE: SHIPPING DISCOUNT",
+            "Total",
+            "$32.95",
+            "TOTAL SAVINGS",
+            "$8.00",
+            "Updated total price: 24.95 US dollars"
+          ]
+        },
+        "existing": {
+          "observations": 2,
+          "kinds": [
+            "baseline",
+            "discounted"
+          ],
+          "reached": true,
+          "lowerBoundMs": null,
+          "firstSeenLoadStartMs": 4842,
+          "upperBoundMs": 7442,
+          "evidenceLines": [
+            "[EMAIL]",
+            "Shipping",
+            "Standard ·",
+            "$8.00",
+            "FREE",
+            "Choose a shipping method",
+            "Standard",
+            "$8.00",
+            "FREE",
+            "Express",
+            "$15.00",
+            "Use shipping address as billing address",
+            "$24.95",
+            "$24.95",
+            "Subtotal",
+            "$24.95",
+            "Shipping",
+            "$8.00",
+            "FREE",
+            "MERGESHIP SPIKE: SHIPPING DISCOUNT",
+            "Total",
+            "$24.95",
+            "TOTAL SAVINGS",
+            "$8.00",
+            "Updated shipping method: Standard"
+          ]
+        }
+      },
+      "deltasMs": {
+        "orderCreated_to_webhookReceived": 4000,
+        "webhookReceived_to_writeEnd": 5566,
+        "writeEnd_to_discountVisibleUpper_fresh": 5689,
+        "writeEnd_to_discountVisibleUpper_existing": 7442
+      },
+      "cleanedRecordCount": 0,
+      "endedAt": "2026-11-14T09:16:42.917Z"
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+> **E2/E3 INVALIDATION NOTICE (2026-11-13):** the original live E2 latency campaign and the first live E3 guest run are INVALID (native free Standard shipping on the $629.95 cart; synthetic seeding). The claimed ~72 s propagation figure is retracted and the guest result was NOT an authorization defect. Valid live evidence: E1 matrix, E6 orders #1001/#1002, and the controlled attribution runs. See docs/evidence/checkout-first/e3-attribution.md and docs/evidence/checkout-first/INVALID-original-e2-e3/README.md.
+
 # Checkout-first shipping discount — feasibility spike
 
 Branch `spike/checkout-first-shipping-discount`, baseline `8178caf`. Offline only: no deploy, no Shopify
