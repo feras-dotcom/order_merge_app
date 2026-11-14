@@ -17,6 +17,7 @@ const onSettings = (over: Partial<MergeSettings> = {}): MergeSettings => ({
   onboardingCompletedAt: EPOCH,
   checkoutDiscountEnabled: true,
   checkoutDiscountEnabledAt: EPOCH,
+  checkoutDiscountWindowHours: 24,
   ...over,
 });
 const onControl = (over: Partial<ControlRow> = {}): ControlRow => ({
@@ -65,6 +66,40 @@ describe("checkoutDiscountGate — six independent levers", () => {
       deps({ settings: async () => onSettings({ mergeWindowHours: 24 }) }),
     );
     expect(g.on).toBe(true);
+  });
+
+  it("window stamp levers: null stamp and a shortened window fail closed", async () => {
+    // Enabled but never stamped => unproven state, off.
+    expect(
+      await checkoutDiscountGate(
+        SHOP,
+        deps({ settings: async () => onSettings({ checkoutDiscountWindowHours: null }) }),
+      ),
+    ).toEqual({ on: false, reason: "window-unstamped" });
+    // Records issued under a 72h window keep granting past a lowered 24h
+    // window unless the discount is deactivated — the gate closes and the
+    // enforcer treats the shop as pending.
+    expect(
+      await checkoutDiscountGate(
+        SHOP,
+        deps({ settings: async () => onSettings({ mergeWindowHours: 24, checkoutDiscountWindowHours: 72 }) }),
+      ),
+    ).toEqual({ on: false, reason: "window-shortened" });
+    // Equal stamp and a raised window stay on.
+    for (const [win, stamp] of [[24, 24], [72, 24]] as const) {
+      const g = await checkoutDiscountGate(
+        SHOP,
+        deps({ settings: async () => onSettings({ mergeWindowHours: win, checkoutDiscountWindowHours: stamp }) }),
+      );
+      expect(g.on).toBe(true);
+    }
+    // The levers apply only while the checkout discount is enabled: a
+    // disabled shop without a stamp reports the flag, not the stamp.
+    const g = await checkoutDiscountGate(
+      SHOP,
+      deps({ settings: async () => onSettings({ checkoutDiscountEnabled: false, checkoutDiscountWindowHours: null }) }),
+    );
+    expect(g).toEqual({ on: false, reason: "shop" });
   });
 
   it("env lever off (default) => off", async () => {

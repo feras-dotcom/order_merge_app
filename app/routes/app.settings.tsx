@@ -16,7 +16,11 @@ import {
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
-import { getSettings, upsertSettings } from "../lib/settings.server";
+import {
+  getSettings,
+  raiseCheckoutDiscountWindowStamp,
+  upsertSettings,
+} from "../lib/settings.server";
 import { enforceShopShutdown } from "../lib/checkout-discount/shutdown-enforcer.server";
 import { getLocationAccess } from "../lib/location-access.server";
 import {
@@ -80,6 +84,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return json({ success: false, error: "Choose a valid merge window." }, { status: 400 });
   }
 
+  // The checkout window stamp must reach the new merge window BEFORE the
+  // window itself is saved — the invariant is stamp >= mergeWindowHours
+  // while the checkout discount is enabled, otherwise a record issued under
+  // a widened window could outlive a later lowering the stamp never saw.
+  // A throw here fails the save like any DB error: nothing is written. A
+  // stamp raised by a save that then fails only overshoots the window —
+  // that direction fails closed (window < stamp forces a verified shutdown
+  // below), never open.
+  await raiseCheckoutDiscountWindowStamp(session.shop, mergeWindowHours);
   await upsertSettings(session.shop, {
     autoMergeEnabled,
     mergeWindowHours,

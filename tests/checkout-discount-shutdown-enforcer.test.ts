@@ -24,6 +24,7 @@ const settings = (over: Partial<MergeSettings> = {}): MergeSettings & { shop: st
   checkoutDiscountEnabled: true,
   checkoutDiscountEnabledAt: new Date("2026-11-01T00:00:00Z"),
   checkoutDiscountNodeId: DID,
+  checkoutDiscountWindowHours: 48,
   ...over,
 });
 
@@ -38,6 +39,24 @@ describe("shopLevelGateOff", () => {
     expect(shopLevelGateOff(settings({ autoMergeEnabled: false }))).toBe("auto-merge");
     expect(shopLevelGateOff(settings({ onboardingCompletedAt: null }))).toBe("onboarding");
     expect(shopLevelGateOff(settings({ mergeWindowHours: 12 }))).toBe("window-unsupported");
+  });
+
+  it("window stamp levers — evaluated only while the checkout discount is enabled", () => {
+    expect(shopLevelGateOff(settings({ checkoutDiscountWindowHours: null }))).toBe("window-unstamped");
+    expect(
+      shopLevelGateOff(settings({ mergeWindowHours: 24, checkoutDiscountWindowHours: 48 })),
+    ).toBe("window-shortened");
+    // Disabled shops never evaluate the stamp: no lever, no pending marker.
+    expect(
+      shopLevelGateOff(
+        settings({ checkoutDiscountEnabled: false, checkoutDiscountWindowHours: null, mergeWindowHours: 6 }),
+      ),
+    ).toBe("window-unsupported"); // <24h still fails regardless of the flag
+    expect(
+      shopLevelGateOff(settings({ checkoutDiscountEnabled: false, checkoutDiscountWindowHours: null })),
+    ).toBe(null);
+    // Raised window (window > stamp) holds.
+    expect(shopLevelGateOff(settings({ mergeWindowHours: 72, checkoutDiscountWindowHours: 48 }))).toBe(null);
   });
 });
 
@@ -94,6 +113,26 @@ describe("enforceShopShutdown", () => {
       },
     });
     expect(seen).toEqual([DID]);
+  });
+
+  it("a window lowered below the stamp (or a missing stamp) makes the shop pending", async () => {
+    for (const over of [
+      { mergeWindowHours: 24 },                    // stamp 48 > 24
+      { checkoutDiscountWindowHours: null },       // enabled but never stamped
+    ] as Partial<MergeSettings>[]) {
+      const seen: string[] = [];
+      const r = await enforceShopShutdown({
+        shop: SHOP,
+        admin: {} as any,
+        getSettings: async () => settings(over),
+        shutdown: async ({ discountId }) => {
+          seen.push(discountId);
+          return { status: "EXPIRED" };
+        },
+      });
+      expect(r).toEqual({ action: "shutdown", status: "EXPIRED" });
+      expect(seen).toEqual([DID]);
+    }
   });
 
   it("NO_DISCOUNT_ID => explicit failed result + FAILED diag, flags untouched", async () => {

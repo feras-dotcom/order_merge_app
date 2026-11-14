@@ -262,6 +262,51 @@ describe.skipIf(!URL)("checkout work store (real Postgres)", () => {
     expect(await store.reopenOutstanding({ ...args, limit: 1 })).toBe(1);
   });
 
+  it("markGrantConsumed: absent row inserts inert DONE; live row untouched; COALESCE; reopen excluded", async () => {
+    // Absent row: a single-statement insert of an inert DONE row.
+    await store.markGrantConsumed(SHOP, oid(50));
+    const inserted = (await store.find(SHOP, oid(50)))!;
+    expect(inserted.status).toBe("DONE");
+    expect(inserted.outcome).toBe("GRANT_CONSUMED");
+    expect(inserted.grantConsumedAt).not.toBe(null);
+    expect(inserted.doneAt).toEqual(inserted.grantConsumedAt);
+
+    // A live PENDING row: only grantConsumedAt is written — lease, status,
+    // gen, attempts and outcome stay exactly as they were.
+    const d = await store.upsertDirty(SHOP, oid(51), "tok-live", TTL, CHECKOUT_DEADLINE_MS);
+    await store.markGrantConsumed(SHOP, oid(51));
+    const live = (await store.find(SHOP, oid(51)))!;
+    expect(live.status).toBe("PENDING");
+    expect(live.gen).toBe(d.item.gen);
+    expect(live.leaseToken).toBe("tok-live");
+    expect(live.leasedUntil).toEqual(d.item.leasedUntil);
+    expect(live.attempts).toBe(d.item.attempts);
+    expect(live.grantConsumedAt).not.toBe(null);
+
+    // COALESCE: a second mark never moves the first timestamp.
+    await db.$executeRaw`UPDATE "CheckoutEligibilityWork" SET "grantConsumedAt" = TIMESTAMP '2020-01-01 00:00:00' WHERE id = ${inserted.id}`;
+    await store.markGrantConsumed(SHOP, oid(50));
+    expect((await store.find(SHOP, oid(50)))!.grantConsumedAt).toEqual(new Date("2020-01-01T00:00:00Z"));
+
+    // reopenOutstanding excludes a durably-consumed PROJECTED row.
+    const p = await store.upsertDirty(SHOP, oid(52), "tok-p", TTL, CHECKOUT_DEADLINE_MS);
+    await store.complete(p.item.id, "tok-p", p.item.gen, "PROJECTED", "ok");
+    await store.markGrantConsumed(SHOP, oid(52));
+    await db.$executeRaw`UPDATE "CheckoutEligibilityWork" SET "doneAt" = ${dbWallPlus(-700_000)} WHERE id = ${p.item.id}`;
+    expect(
+      await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 10, deadlineMs: CHECKOUT_DEADLINE_MS }),
+    ).toBe(0);
+    expect((await store.find(SHOP, oid(52)))!.status).toBe("DONE");
+
+    // upsertDirty/touchExisting preserve the mark on re-dirty.
+    await store.upsertDirty(SHOP, oid(52), "tok-q", TTL, CHECKOUT_DEADLINE_MS);
+    expect((await store.find(SHOP, oid(52)))!.grantConsumedAt).not.toBe(null);
+    expect((await store.find(SHOP, oid(52)))!.status).toBe("PENDING");
+    await store.complete((await store.find(SHOP, oid(52)))!.id, "tok-q", (await store.find(SHOP, oid(52)))!.gen, "PROJECTED", "ok");
+    await store.touchExisting(SHOP, oid(52), "tok-r", TTL, CHECKOUT_DEADLINE_MS);
+    expect((await store.find(SHOP, oid(52)))!.grantConsumedAt).not.toBe(null);
+  });
+
   it("reopenOutstanding is safe under concurrent calls (SKIP LOCKED)", async () => {
     for (let n = 40; n < 46; n++) {
       const r = await store.upsertDirty(SHOP, oid(n), "tok1", TTL, CHECKOUT_DEADLINE_MS);
@@ -319,5 +364,85 @@ describe.skipIf(!URL)("checkout discount node id (real Postgres)", () => {
     expect(s?.checkoutDiscountNodeId).toBe(null);
     expect(s?.checkoutDiscountEnabled).toBe(false);
     expect(s?.checkoutDiscountEnabledAt).toBe(null);
+  });
+});
+
+describe.skipIf(!URL)("checkout discount window stamp (real Postgres)", () => {
+  let db: PrismaClient;
+
+  beforeAll(async () => {
+    await preflightDisposableDatabase(URL!);
+    db = new PrismaClient({ datasources: { db: { url: URL } } });
+  }, 120_000);
+
+  beforeEach(async () => {
+    await db.$executeRawUnsafe(`TRUNCATE "Settings" RESTART IDENTITY CASCADE`);
+  });
+
+  afterAll(async () => {
+    await db?.$disconnect();
+  });
+
+  const stamp = async () =>
+    (await db.settings.findUnique({ where: { shop: SHOP } }))?.checkoutDiscountWindowHours;
+
+  it("enable stamps the mergeWindowHours in force; the INSERT path stamps the 24h default", async () => {
+    const { setCheckoutDiscountEnabled } = await import("../app/lib/settings.server");
+    // INSERT path: no settings row yet — the stamp follows the column default.
+    await setCheckoutDiscountEnabled(SHOP, true, db);
+    let s = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s?.mergeWindowHours).toBe(24);
+    expect(s?.checkoutDiscountWindowHours).toBe(24);
+    // CONFLICT path: an existing row's own mergeWindowHours is stamped.
+    await db.settings.update({ where: { shop: SHOP }, data: { mergeWindowHours: 72, checkoutDiscountEnabled: false, checkoutDiscountWindowHours: null } });
+    await setCheckoutDiscountEnabled(SHOP, true, db);
+    s = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s?.checkoutDiscountWindowHours).toBe(72);
+  });
+
+  it("already-enabled keeps the stamp; disable clears it", async () => {
+    const { setCheckoutDiscountEnabled } = await import("../app/lib/settings.server");
+    await db.settings.create({ data: { shop: SHOP, mergeWindowHours: 48, checkoutDiscountEnabled: true, checkoutDiscountEnabledAt: new Date(), checkoutDiscountWindowHours: 48 } });
+    // Re-enabling while already enabled: the stamp is untouched even though
+    // the window moved meanwhile.
+    await db.settings.update({ where: { shop: SHOP }, data: { mergeWindowHours: 24 } });
+    await setCheckoutDiscountEnabled(SHOP, true, db);
+    expect(await stamp()).toBe(48);
+    await setCheckoutDiscountEnabled(SHOP, false, db);
+    expect(await stamp()).toBe(null);
+    expect((await db.settings.findUnique({ where: { shop: SHOP } }))?.checkoutDiscountEnabled).toBe(false);
+  });
+
+  it("raiseCheckoutDiscountWindowStamp is GREATEST-only on the explicit hours, enabled+stamped only", async () => {
+    const { raiseCheckoutDiscountWindowStamp } = await import("../app/lib/settings.server");
+    await db.settings.create({ data: { shop: SHOP, mergeWindowHours: 24, checkoutDiscountEnabled: true, checkoutDiscountWindowHours: 24 } });
+    // The explicit hours raise the stamp independent of the saved window —
+    // the route calls it BEFORE mergeWindowHours is widened.
+    await raiseCheckoutDiscountWindowStamp(SHOP, 72, db);
+    expect(await stamp()).toBe(72);
+    // GREATEST never lowers: a smaller argument is a no-op.
+    await raiseCheckoutDiscountWindowStamp(SHOP, 48, db);
+    expect(await stamp()).toBe(72);
+    // The row's own mergeWindowHours does not drive the raise.
+    await db.settings.update({ where: { shop: SHOP }, data: { mergeWindowHours: 24 } });
+    await raiseCheckoutDiscountWindowStamp(SHOP, 36, db);
+    expect(await stamp()).toBe(72);
+    // Disabled rows are never touched.
+    await db.settings.update({ where: { shop: SHOP }, data: { checkoutDiscountEnabled: false } });
+    await raiseCheckoutDiscountWindowStamp(SHOP, 96, db);
+    expect(await stamp()).toBe(72);
+    // Unstamped rows are never touched.
+    await db.settings.update({ where: { shop: SHOP }, data: { checkoutDiscountEnabled: true, checkoutDiscountWindowHours: null } });
+    await raiseCheckoutDiscountWindowStamp(SHOP, 96, db);
+    expect(await stamp()).toBe(null);
+  });
+
+  it("resetAutomationForUninstall clears the window stamp", async () => {
+    const { resetAutomationForUninstall } = await import("../app/lib/settings.server");
+    await db.settings.create({ data: { shop: SHOP, checkoutDiscountEnabled: true, checkoutDiscountWindowHours: 72 } });
+    await resetAutomationForUninstall(SHOP, db);
+    const s = await db.settings.findUnique({ where: { shop: SHOP } });
+    expect(s?.checkoutDiscountWindowHours).toBe(null);
+    expect(s?.checkoutDiscountEnabled).toBe(false);
   });
 });

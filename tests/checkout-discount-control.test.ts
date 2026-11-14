@@ -184,6 +184,7 @@ const makeEpoch = (initial: Date | null, nodeId: string | null = null) => {
       checkoutDiscountEnabled: state.enabledAt !== null,
       checkoutDiscountEnabledAt: state.enabledAt,
       checkoutDiscountNodeId: state.nodeId,
+      checkoutDiscountWindowHours: null,
     }),
   };
 };
@@ -615,6 +616,7 @@ const settingsFor = (enabledAt: Date | null): MergeSettings => ({
   onboardingCompletedAt: EPOCH1,
   checkoutDiscountEnabled: enabledAt !== null,
   checkoutDiscountEnabledAt: enabledAt,
+  checkoutDiscountWindowHours: enabledAt !== null ? 72 : null,
   mergeWindowHours: 72,
 });
 const gateDeps = (enabledAt: Date | null): CheckoutGateDeps => ({

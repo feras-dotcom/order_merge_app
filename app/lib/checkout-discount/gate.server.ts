@@ -46,6 +46,17 @@ export function shopLevelGateOff(settings: MergeSettings): string | null {
   if (settings.mergeWindowHours < MIN_CHECKOUT_WINDOW_HOURS) {
     return "window-unsupported";
   }
+  // Window stamp (levers only apply while the checkout discount is on):
+  // the stamp records the highest mergeWindowHours records may have been
+  // issued under. A missing stamp is unproven state — fail closed; a
+  // shortened window means outstanding records could grant beyond the new
+  // window, which forces deactivation via the shutdown enforcer.
+  if (settings.checkoutDiscountEnabled) {
+    if (settings.checkoutDiscountWindowHours == null) return "window-unstamped";
+    if (settings.mergeWindowHours < settings.checkoutDiscountWindowHours) {
+      return "window-shortened";
+    }
+  }
   return null;
 }
 

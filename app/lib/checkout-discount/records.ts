@@ -170,7 +170,7 @@ export function mergeRecords(
   existing: unknown,
   incoming: EligRecord[],
   opts: { todayDate: string; maxRecs?: number; windowId?: string },
-): { doc: EligDoc; serialized: string; garbage: boolean } {
+): { doc: EligDoc; serialized: string; garbage: boolean; refused: string[] } {
   const maxRecs = opts.maxRecs ?? 5;
   const { doc, garbage } = parseElig(existing);
   const byId = new Map<string, EligRecord>();
@@ -185,8 +185,24 @@ export function mergeRecords(
       if (r.left <= 0 || (r.used?.length ?? 0) > 0) consumedElsewhere.set(r.id, r);
       continue;
     }
+    // Everything current-window stays in byId — even an expired tombstone,
+    // whose id must still match an incoming record so the refresh can
+    // preserve its consumed state instead of resurrecting it.
     byId.set(r.id, r);
   }
+  // FAIL-CLOSED capacity: the document never silently drops a live record
+  // or a consumed tombstone. A NEW id is refused while the document already
+  // holds maxRecs unexpired entries (live or tombstone); an existing id
+  // refreshes in place and entries beyond the cap in legacy documents are
+  // kept, never trimmed.
+  const held = () => {
+    let n = 0;
+    for (const e of byId.values()) {
+      if (e.exp >= opts.todayDate && (e.left > 0 || (e.used?.length ?? 0) > 0)) n++;
+    }
+    return n;
+  };
+  const refused: string[] = [];
   for (const r of incoming) {
     if (!validRec(r)) continue;
     const consumed = consumedElsewhere.get(r.id);
@@ -204,6 +220,15 @@ export function mergeRecords(
     }
     const prev = byId.get(r.id);
     if (!prev) {
+      // Dead on arrival (already expired, or left<=0 with no `used` list):
+      // nothing to add — it would be pruned below anyway.
+      if (r.exp < opts.todayDate || (r.left <= 0 && (r.used?.length ?? 0) === 0)) {
+        continue;
+      }
+      if (held() >= maxRecs) {
+        refused.push(r.id);
+        continue;
+      }
       byId.set(r.id, { ...r });
       continue;
     }
@@ -221,14 +246,15 @@ export function mergeRecords(
   // Prune expired and left<=0 records — except that a left<=0 record with a
   // `used` list stays as a tombstone until exp: without it a replayed order
   // webhook could re-add the id and reset a consumed grant (the Function
-  // still requires left>0, so a tombstone grants nothing).
+  // still requires left>0, so a tombstone grants nothing). No slice: every
+  // surviving entry is kept, so consumption evidence can never be evicted.
   const recs = sortRecs(
     [...byId.values()].filter(
       (r) => r.exp >= opts.todayDate && (r.left > 0 || (r.used !== undefined && r.used.length > 0)),
     ),
-  ).slice(0, maxRecs);
+  );
   const next: EligDoc = { v: 1, recs };
-  return { doc: next, serialized: serializeElig(next), garbage };
+  return { doc: next, serialized: serializeElig(next), garbage, refused };
 }
 
 export function consumeRecord(

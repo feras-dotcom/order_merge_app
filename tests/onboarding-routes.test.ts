@@ -7,15 +7,41 @@ import { DEFAULT_SETTINGS, type MergeSettings } from "../app/lib/settings.server
 
 const SHOP = "test.myshopify.com";
 
-const env = vi.hoisted(() => ({
-  settings: null as any,
-  location: { activeLocationCount: 1 as number | null, granted: false },
-  subscribed: true,
-  executeMerge: vi.fn(),
-  processed: vi.fn(async () => ({ id: "work-1" })),
-  processOrderWork: vi.fn(async () => {}),
-  isEnabled: vi.fn(async () => true),
-}));
+const env = vi.hoisted(() => {
+  const e = {
+    settings: null as any,
+    location: { activeLocationCount: 1 as number | null, granted: false },
+    subscribed: true,
+    executeMerge: vi.fn(),
+    processed: vi.fn(async () => ({ id: "work-1" })),
+    processOrderWork: vi.fn(async () => {}),
+    isEnabled: vi.fn(async () => true),
+    /** Records the bind values of every $executeRaw and mirrors the
+     *  window-stamp GREATEST on env.settings, so the real
+     *  raiseCheckoutDiscountWindowStamp works through the fake db. */
+    executeRawCalls: [] as unknown[][],
+    executeRaw: null as any,
+  };
+  e.executeRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    e.executeRawCalls.push(values);
+    const sql = Array.from(strings as unknown as string[]).join("?");
+    if (
+      sql.includes('"checkoutDiscountWindowHours"') &&
+      e.settings?.checkoutDiscountEnabled &&
+      e.settings.checkoutDiscountWindowHours != null
+    ) {
+      e.settings = {
+        ...e.settings,
+        checkoutDiscountWindowHours: Math.max(
+          e.settings.checkoutDiscountWindowHours,
+          Number(values[0]),
+        ),
+      };
+    }
+    return 1;
+  };
+  return e;
+});
 
 vi.mock("../app/shopify.server", () => {
   const redirect = (url: string) => new Response(null, { status: 302, headers: { Location: url } });
@@ -68,6 +94,7 @@ vi.mock("../app/db.server", () => ({
   default: {
     settings: { upsert: async () => ({}) },
     processedWebhook: { create: env.processed },
+    $executeRaw: env.executeRaw,
   },
 }));
 
@@ -368,6 +395,9 @@ describe("app/uninstalled webhook", () => {
         // The recorded discount node id resets too — a reinstall can never
         // aim the shutdown enforcer at a discount it did not verify.
         checkoutDiscountNodeId: null,
+        // The window stamp resets with the flag — a reinstall re-enables
+        // only through prepare-enable, which stamps the then-current window.
+        checkoutDiscountWindowHours: null,
       },
     });
   });

@@ -30,7 +30,8 @@ export type AbsentCode =
   | "ZERO_SHIPPING"
   | "AMBIGUOUS_DISCOUNT"
   | "UNSUPPORTED_CURRENCY"
-  | "WINDOW_TOO_SHORT";
+  | "WINDOW_TOO_SHORT"
+  | "ALREADY_CONSUMED";
 
 export type RetryCode = "RISK_UNKNOWN" | "INCOMPLETE";
 
@@ -70,6 +71,10 @@ export interface ClassifyContext {
   windowId: string;
   now: Date;
   timeZone: string;
+  /** Durable consumed mark on the work row (grantConsumedAt != null): this
+   *  order already granted a checkout, so it can never issue a record
+   *  again — regardless of what the metafield document currently holds. */
+  grantConsumed?: boolean;
 }
 
 const orderIdNum = (orderId: string): string =>
@@ -133,6 +138,11 @@ export function classify(facts: CheckoutFacts, ctx: ClassifyContext): Decision {
     return { kind: "ABSENT", code: "WINDOW_PASSED" };
   }
   if (facts.shippingLines.length !== 1) return { kind: "ABSENT", code: "MULTI_SHIPPING" };
+
+  // Durable consumed evidence outranks eligibility: the metafield tombstone
+  // may have been evicted or pruned, but the work row still knows this order
+  // granted — a second record is never built for it.
+  if (ctx.grantConsumed) return { kind: "ABSENT", code: "ALREADY_CONSUMED" };
 
   // No full shop-local day fits inside the merge window — the record could
   // outlive the window it stands in for, so it must never be written.
