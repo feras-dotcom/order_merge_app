@@ -1,0 +1,11 @@
+query CartDeliveryOptionsDiscountsGenerateRunInput($windowStart: DateTimeWithoutTimezone!, $windowEnd: DateTimeWithoutTimezone!) {
+  cart {
+    buyerIdentity { isAuthenticated customer { metafield(namespace: "$app", key: "ship_elig") { jsonValue } } }
+    deliveryGroups {
+      deliveryAddress { firstName lastName company address1 address2 city provinceCode zip countryCode }
+      deliveryOptions { handle title deliveryMethodType cost { amount currencyCode } }
+    }
+  }
+  discount { discountClasses metafield(namespace: "$app", key: "config") { jsonValue } }
+  shop { localTime { date inWindow: dateTimeBetween(startDateTime: $windowStart, endDateTime: $windowEnd) } }
+}

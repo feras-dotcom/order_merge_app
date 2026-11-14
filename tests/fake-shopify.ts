@@ -1253,6 +1253,8 @@ export class MemoryOperationStore implements OperationStore {
     shippingAdjustmentsEnabled: false,
     shippingAllowShops: [],
     shippingEnabledAt: null,
+    checkoutDiscountEnabled: false,
+    checkoutDiscountAllowShops: [],
     note: null,
   };
   /** Mirrors the MERGESHIP_MUTATIONS env precheck. */
@@ -1777,6 +1779,8 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
     shippingRetainedMinor: null,
     shippingRetainedCurrency: null,
     shippingRolloutAt: null,
+    checkoutDiscountEnabled: false,
+    checkoutDiscountEnabledAt: null,
     ...opts.settings,
   };
   const getSettings = async () => settings;

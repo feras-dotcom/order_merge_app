@@ -4,6 +4,7 @@
 //   npx vite-node scripts/app-control.ts --new-merges on --completion off
 //   npx vite-node scripts/app-control.ts --new-merges on --allow a.myshopify.com,b.myshopify.com
 //   npx vite-node scripts/app-control.ts --shipping on --shipping-allow a.myshopify.com
+//   npx vite-node scripts/app-control.ts --checkout on --checkout-allow a.myshopify.com
 //
 // MERGESHIP_MUTATIONS=enabled is ALSO required for any dispatch — these
 // switches alone do not enable mutations.
@@ -18,7 +19,7 @@ import { isTransientDbError } from "../app/lib/ownership.server";
 
 const usage = () => {
   console.error(
-    "usage: npx vite-node scripts/app-control.ts [--new-merges on|off] [--completion on|off] [--allow shop,...] [--allow-all-shops] [--shipping on|off] [--shipping-allow shop,...]",
+    "usage: npx vite-node scripts/app-control.ts [--new-merges on|off] [--completion on|off] [--allow shop,...] [--allow-all-shops] [--shipping on|off] [--shipping-allow shop,...] [--checkout on|off] [--checkout-allow shop,...]",
   );
   process.exit(2);
 };
@@ -48,7 +49,9 @@ const show = (c: any) =>
       `allowShops=[${(c?.allowShops ?? []).join(", ")}] (empty=ALL)\n` +
       `  shippingAdjustmentsEnabled=${c?.shippingAdjustmentsEnabled}  ` +
       `shippingEnabledAt=${c?.shippingEnabledAt ?? "none"}  ` +
-      `shippingAllowShops=[${(c?.shippingAllowShops ?? []).join(", ")}] (empty=NONE)  ` +
+      `shippingAllowShops=[${(c?.shippingAllowShops ?? []).join(", ")}] (empty=NONE)\n` +
+      `  checkoutDiscountEnabled=${c?.checkoutDiscountEnabled}  ` +
+      `checkoutDiscountAllowShops=[${(c?.checkoutDiscountAllowShops ?? []).join(", ")}] (empty=NONE)  ` +
       `note=${c?.note ?? ""}  updatedAt=${c?.updatedAt}`,
   );
 
@@ -60,15 +63,21 @@ const patch: Record<string, unknown> = {};
 const newMerges = onOff("--new-merges");
 const completion = onOff("--completion");
 const shipping = onOff("--shipping");
+const checkout = onOff("--checkout");
 if (newMerges !== undefined) patch.newMergesEnabled = newMerges;
 if (completion !== undefined) patch.completionEnabled = completion;
 if (shipping !== undefined) patch.shippingAdjustmentsEnabled = shipping;
+if (checkout !== undefined) patch.checkoutDiscountEnabled = checkout;
 if (flags.has("--allow")) {
   patch.allowShops = flags.get("--allow")!.split(",").map((s) => s.trim()).filter(Boolean);
 }
 if (flags.has("--shipping-allow")) {
   // Empty = NO shops — clearing is the safe direction, no confirmation guard.
   patch.shippingAllowShops = flags.get("--shipping-allow")!.split(",").map((s) => s.trim()).filter(Boolean);
+}
+if (flags.has("--checkout-allow")) {
+  // Same inverted semantics: empty checkoutDiscountAllowShops = NO shops.
+  patch.checkoutDiscountAllowShops = flags.get("--checkout-allow")!.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 // An empty allowlist means the switches apply to EVERY shop — clearing a

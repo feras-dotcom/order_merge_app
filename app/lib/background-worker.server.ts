@@ -31,6 +31,12 @@ import {
 } from "./order-work.server";
 import { isSessionNotFound, processOrderWork } from "./order-work-processor.server";
 import { getSettings, type MergeSettings } from "./settings.server";
+import {
+  CHECKOUT_DONE_RETENTION_MS,
+  prismaCheckoutWorkStore,
+  type CheckoutWorkStore,
+} from "./checkout-discount/work.server";
+import { processCheckoutWork } from "./checkout-discount/processor.server";
 
 /** How long a sweep tick works before deferring to the next tick. */
 export const SWEEP_BUDGET_MS = 20_000;
@@ -61,6 +67,10 @@ export interface SweepContext {
   /** Resolves a shop's offline admin session; null = no session (uninstalled). */
   adminFactory: (shop: string) => Promise<AdminClient | null>;
   settings: (shop: string) => Promise<MergeSettings>;
+  /** OPTIONAL — checkout-eligibility work queue (checkout-discount/). Absent
+   *  means the sweep simply skips that step; a throwing store must not stop
+   *  any existing step. */
+  checkoutWork?: CheckoutWorkStore;
   now: () => Date;
   random?: () => number;
   /** Max wall-clock time the op-drive and work loops may use (default 20s). */
@@ -178,12 +188,51 @@ export async function runSweepOnce(ctx: SweepContext): Promise<void> {
     console.error(`[worker] Work-item scan failed: ${msg(err)}`);
   }
 
+  // 4b — Checkout-eligibility work (checkout-discount/): same claim/process
+  //      shape as step 4, in its OWN try/catch — a missing or throwing
+  //      checkoutWork must never stop the merge/refund steps. The processor
+  //      re-checks the gate itself, so a gate-off sweep makes zero checkout
+  //      Admin calls (claimDue/exhaustDue are DB-only).
+  if (ctx.checkoutWork) {
+    try {
+      const exhausted = await ctx.checkoutWork.exhaustDue();
+      if (exhausted) console.log(`[worker] Exhausted ${exhausted} checkout work item(s) → REVIEW.`);
+      while (budgetLeft() > 0) {
+        const [item] = await ctx.checkoutWork.claimDue(1, ctx.deps.leaseTtlMs);
+        if (!item) break;
+        try {
+          await processCheckoutWork({
+            item,
+            token: item.leaseToken!,
+            shop: item.shop,
+            adminFactory: ctx.adminFactory,
+            work: ctx.checkoutWork,
+            now: ctx.now,
+            random: ctx.random,
+          });
+        } catch (err: any) {
+          console.error(`[worker] Checkout work ${item.orderId} (${item.shop}) failed: ${msg(err)}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[worker] Checkout work scan failed: ${msg(err)}`);
+    }
+  }
+
   // 5 — Housekeeping: DONE work rows past retention + stale heartbeats.
   try {
     const purged = await ctx.work.purgeDone(DONE_RETENTION_MS);
     if (purged) console.log(`[worker] Purged ${purged} completed work item(s).`);
   } catch (err: any) {
     console.error(`[worker] Work-item purge failed: ${msg(err)}`);
+  }
+  if (ctx.checkoutWork) {
+    try {
+      const purged = await ctx.checkoutWork.purgeDone(CHECKOUT_DONE_RETENTION_MS);
+      if (purged) console.log(`[worker] Purged ${purged} completed checkout work item(s).`);
+    } catch (err: any) {
+      console.error(`[worker] Checkout work purge failed: ${msg(err)}`);
+    }
   }
   try {
     await ctx.ops.purgeOldInstances(INSTANCE_RETENTION_MS);
@@ -214,6 +263,7 @@ const productionContext = (): SweepContext => {
     journal: prismaMergeJournal,
     ops: prismaOperationStore,
     work: prismaWorkStore(),
+    checkoutWork: prismaCheckoutWorkStore(),
     deps,
     adminFactory: sessionAdminFactory,
     settings: getSettings,

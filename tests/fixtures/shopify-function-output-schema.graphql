@@ -1,0 +1,86 @@
+# Trimmed copy of the published Shopify Functions schema (API 2026-07) —
+# only the input types needed to validate a
+# `cart.delivery-options.discounts.generate.run` Function result. Source:
+# the spike app's generated schema.graphql. The enum is kept EXACTLY:
+# DeliveryDiscountSelectionStrategy has the single value ALL — a Function
+# emitting "FIRST" produces a schema-invalid result that Shopify silently
+# discards (observed live on the spike store).
+
+directive @oneOf on INPUT_OBJECT
+
+scalar Decimal
+
+scalar Handle
+
+input CartDeliveryOptionsDiscountsGenerateRunResult {
+  operations: [DeliveryOperation!]!
+}
+
+input AssociatedDiscountCode {
+  code: String!
+}
+
+input DeliveryDiscountCandidate {
+  associatedDiscountCode: AssociatedDiscountCode
+  message: String
+  targets: [DeliveryDiscountCandidateTarget!]!
+  value: DeliveryDiscountCandidateValue!
+}
+
+input DeliveryDiscountCandidateTarget @oneOf {
+  deliveryGroup: DeliveryGroupTarget
+  deliveryOption: DeliveryOptionTarget
+}
+
+input DeliveryDiscountCandidateValue @oneOf {
+  fixedAmount: FixedAmount
+  percentage: Percentage
+}
+
+enum DeliveryDiscountSelectionStrategy {
+  ALL
+}
+
+input DeliveryDiscountsAddOperation {
+  candidates: [DeliveryDiscountCandidate!]!
+  selectionStrategy: DeliveryDiscountSelectionStrategy!
+}
+
+input DeliveryGroupTarget {
+  id: ID!
+}
+
+input DeliveryOperation @oneOf {
+  deliveryDiscountsAdd: DeliveryDiscountsAddOperation
+  enteredDiscountCodesAccept: EnteredDiscountCodesAcceptOperation
+  enteredDiscountCodesReject: EnteredDiscountCodesRejectOperation
+}
+
+input DeliveryOptionTarget {
+  handle: Handle!
+}
+
+input DiscountCode {
+  code: String!
+}
+
+input EnteredDiscountCodesAcceptOperation {
+  codes: [DiscountCode!]!
+}
+
+input EnteredDiscountCodesRejectOperation {
+  codes: [RejectedDiscountCode!]!
+  message: String!
+}
+
+input FixedAmount {
+  amount: Decimal!
+}
+
+input Percentage {
+  value: Decimal!
+}
+
+input RejectedDiscountCode {
+  code: String!
+}

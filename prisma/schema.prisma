@@ -45,6 +45,14 @@ model Settings {
   // before the CURRENT membership epoch can never produce intents, so
   // allowlisting a shop never retroactively qualifies its history.
   shippingRolloutAt           DateTime?
+
+  // ── Checkout-first shipping discount (checkout-discount/; off by default) ──
+  // Off until the merchant opts in AND every other gate lever holds.
+  checkoutDiscountEnabled   Boolean   @default(false)
+  // Enable-epoch: only orders created on/after this timestamp may produce
+  // eligibility records, so enabling never qualifies historical orders.
+  // Writable ONLY via setCheckoutDiscountEnabled.
+  checkoutDiscountEnabledAt DateTime?
 }
 
 // The durable work item for an ORDERS_CREATE event: PENDING until a terminal
@@ -73,6 +81,34 @@ model ProcessedWebhook {
 
   @@unique([shop, orderId])
   @@index([createdAt])
+  @@index([status, retryAfter])
+}
+
+// The durable work item for the checkout-eligibility webhooks
+// (orders/paid, orders/cancelled, orders/fulfilled, orders/partially_fulfilled):
+// a delivery only marks the order dirty (gen = gen + 1, status = PENDING) and
+// the processor reconciles the desired projection state from fresh Admin data.
+// Unique (shop, orderId) deduplicates deliveries; `gen` fences completion so a
+// newer event that arrived mid-processing re-queues instead of being lost.
+// Only shop, order GID and outcome codes — no PII columns.
+model CheckoutEligibilityWork {
+  id          String    @id @default(cuid())
+  shop        String
+  orderId     String
+  gen         Int       @default(1)
+  status      String    @default("PENDING")
+  attempts    Int       @default(0)
+  retryAfter  DateTime?
+  leaseToken  String?
+  leasedUntil DateTime?
+  outcome     String?
+  lastReason  String?
+  deadlineAt  DateTime?
+  doneAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  @@unique([shop, orderId])
   @@index([status, retryAfter])
 }
 
@@ -218,6 +254,10 @@ model AppControl {
   // transition, cleared on disable. Combines created before the CURRENT
   // enabled epoch can never produce intents.
   shippingEnabledAt DateTime?
+  // ── Checkout-discount controls — separate kill switch and rollout. ──
+  // INVERTED allowlist semantics: empty checkoutDiscountAllowShops = NO shops.
+  checkoutDiscountEnabled   Boolean  @default(false)
+  checkoutDiscountAllowShops String[] @default([]) // empty = NO shops
   note              String?
   updatedAt         DateTime @updatedAt
 }

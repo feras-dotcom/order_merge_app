@@ -361,6 +361,10 @@ describe("app/uninstalled webhook", () => {
         shippingAdjustmentEnabled: false,
         shippingAdjustmentEnabledAt: null,
         shippingRolloutAt: null,
+        // The checkout-discount opt-in and its enable epoch reset the same
+        // way — a reinstall can never silently resume the feature.
+        checkoutDiscountEnabled: false,
+        checkoutDiscountEnabledAt: null,
       },
     });
   });

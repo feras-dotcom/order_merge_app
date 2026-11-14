@@ -123,6 +123,10 @@ export interface ControlRow {
   shippingAllowShops: string[];
   /** Kill-switch epoch: stamped on false→true, cleared on disable. */
   shippingEnabledAt: Date | null;
+  // Checkout-discount controls — separate kill switch and rollout allowlist.
+  // INVERTED semantics: empty checkoutDiscountAllowShops = NO shops.
+  checkoutDiscountEnabled: boolean;
+  checkoutDiscountAllowShops: string[];
   note: string | null;
 }
 
@@ -778,6 +782,13 @@ export function makeOperationStore(db: PrismaClient): OperationStore {
       if (patch.allowShops !== undefined) sets.push(Prisma.sql`"allowShops" = ${patch.allowShops}`);
       if (patch.shippingAllowShops !== undefined)
         sets.push(Prisma.sql`"shippingAllowShops" = ${patch.shippingAllowShops}`);
+      // Checkout-discount controls: plain columns (the per-shop enable epoch
+      // lives on Settings, not here) — still set inside the same
+      // FOR UPDATE transaction so a disable linearizes against gate reads.
+      if (patch.checkoutDiscountEnabled !== undefined)
+        sets.push(Prisma.sql`"checkoutDiscountEnabled" = ${patch.checkoutDiscountEnabled}`);
+      if (patch.checkoutDiscountAllowShops !== undefined)
+        sets.push(Prisma.sql`"checkoutDiscountAllowShops" = ${patch.checkoutDiscountAllowShops}`);
       if (patch.note !== undefined) sets.push(Prisma.sql`"note" = ${patch.note}`);
       const touchesShipping =
         patch.shippingAdjustmentsEnabled !== undefined ||

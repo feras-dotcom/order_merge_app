@@ -27,6 +27,11 @@ export interface MergeSettings {
   /** Rollout-membership epoch — writable ONLY by setControl when the shop is
    *  added to / removed from AppControl.shippingAllowShops. */
   shippingRolloutAt: Date | null;
+  /** Checkout-first shipping discount opt-in (checkout-discount/). */
+  checkoutDiscountEnabled: boolean;
+  /** Enable-epoch: writable ONLY via setCheckoutDiscountEnabled — orders
+   *  created before it can never produce eligibility records. */
+  checkoutDiscountEnabledAt: Date | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
@@ -43,6 +48,8 @@ export const DEFAULT_SETTINGS: MergeSettings = {
   shippingRetainedMinor: null,
   shippingRetainedCurrency: null,
   shippingRolloutAt: null,
+  checkoutDiscountEnabled: false,
+  checkoutDiscountEnabledAt: null,
 };
 
 /**
@@ -64,7 +71,11 @@ export async function upsertSettings(
   update: Partial<
     Omit<
       MergeSettings,
-      "shippingAdjustmentEnabled" | "shippingAdjustmentEnabledAt" | "shippingRolloutAt"
+      | "shippingAdjustmentEnabled"
+      | "shippingAdjustmentEnabledAt"
+      | "shippingRolloutAt"
+      | "checkoutDiscountEnabled"
+      | "checkoutDiscountEnabledAt"
     >
   >,
 ): Promise<MergeSettings> {
@@ -101,6 +112,31 @@ export async function setShippingAdjustmentEnabled(
 }
 
 /**
+ * The ONLY write path for Settings.checkoutDiscountEnabled / the enable
+ * epoch. Same semantics as setShippingAdjustmentEnabled: enabling stamps a
+ * fresh epoch on a false→true transition (idempotent while already enabled),
+ * disabling clears it — orders created before the current epoch can never
+ * produce eligibility records.
+ */
+export async function setCheckoutDiscountEnabled(
+  shop: string,
+  enabled: boolean,
+  client: PrismaClient = db,
+): Promise<void> {
+  await client.$executeRaw`
+    INSERT INTO "Settings" ("id", "shop", "checkoutDiscountEnabled", "checkoutDiscountEnabledAt")
+    VALUES (${crypto.randomUUID()}, ${shop}, ${enabled},
+      CASE WHEN ${enabled} THEN ${DB_WALL} ELSE NULL END)
+    ON CONFLICT ("shop") DO UPDATE SET
+      "checkoutDiscountEnabled" = EXCLUDED."checkoutDiscountEnabled",
+      "checkoutDiscountEnabledAt" = CASE
+        WHEN NOT EXCLUDED."checkoutDiscountEnabled" THEN NULL
+        WHEN "Settings"."checkoutDiscountEnabled" THEN "Settings"."checkoutDiscountEnabledAt"
+        ELSE ${DB_WALL}
+      END`;
+}
+
+/**
  * Uninstall reset: a reinstall is a new install — automation, onboarding and
  * the shipping opt-in (including its epoch) must not silently resume. The
  * rollout-membership epoch is cleared too: even if the shop domain is still
@@ -122,6 +158,8 @@ export async function resetAutomationForUninstall(
       shippingAdjustmentEnabled: false,
       shippingAdjustmentEnabledAt: null,
       shippingRolloutAt: null,
+      checkoutDiscountEnabled: false,
+      checkoutDiscountEnabledAt: null,
     },
   });
 }
