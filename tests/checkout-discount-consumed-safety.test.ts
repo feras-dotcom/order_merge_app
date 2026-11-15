@@ -120,6 +120,10 @@ const settingsFor = (enabledAt: Date | null): MergeSettings => ({
   checkoutDiscountNodeId: "gid://shopify/DiscountAutomaticNode/99",
   checkoutDiscountWindowHours: enabledAt !== null ? env.stampHours : null,
   mergeWindowHours: env.windowHours,
+  // Pilot approval matching the shipping fixtures ("Standard Shipping" $8 USD).
+  checkoutDiscountMethod: enabledAt !== null ? "standard shipping" : null,
+  checkoutDiscountMaxShippingMinor: enabledAt !== null ? 800 : null,
+  checkoutDiscountCurrency: enabledAt !== null ? "USD" : null,
 });
 const gateDeps = (): CheckoutGateDeps => ({
   env: (n) => (n === "MERGESHIP_CHECKOUT_DISCOUNT" ? "enabled" : undefined),
@@ -292,9 +296,10 @@ describe("durable consumed evidence", () => {
     expect(rec.left).toBe(0);
     // The consumed mark is written once — a replay never moves it.
     expect((await work.find(SHOP, OIDA))!.grantConsumedAt).toEqual(mark);
-    // A replayed grant order finds no living record — the overdraw branch,
-    // still fail-closed (no second consumption, no second record).
-    expect((await work.find(SHOP, OIDB))?.outcome).toBe("CONSUMED_NO_RECORD");
+    // A replayed grant order recognizes its own tombstone (`used` carries
+    // its order number) — it re-settles CONSUMED against the same record,
+    // never the overdraw branch and never a second consumption.
+    expect((await work.find(SHOP, OIDB))?.outcome).toBe("CONSUMED");
   });
 
   it("enable-epoch rotation: a consumed order can never re-issue under the new window", async () => {
@@ -413,9 +418,10 @@ describe("durable consumed evidence", () => {
     const rec = parseElig(elig.stored(CUST)).doc.recs.find((r) => r.id === "1001")!;
     expect(rec.used).toEqual(["2002"]);
     expect((await work.find(SHOP, OIDA))!.grantConsumedAt).toEqual(markA);
-    // The retried grant finds no living record — the overdraw branch — but
-    // the consumption is still exactly once and the evidence intact.
-    expect((await work.find(SHOP, OIDB))?.outcome).toBe("CONSUMED_NO_RECORD");
+    // The retried grant recognizes its own consumption — the durable
+    // consumedRecordId mark (or the used tombstone) identifies record 1001 —
+    // so it settles CONSUMED, never CONSUMED_NO_RECORD, exactly once.
+    expect((await work.find(SHOP, OIDB))?.outcome).toBe("CONSUMED");
     expect(discounts(fnInput(elig.stored(CUST), WIN1))).toBe(false);
   });
 });

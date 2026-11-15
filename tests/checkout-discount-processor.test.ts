@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { CHECKOUT_DISCOUNT_MESSAGE } from "../app/lib/checkout-discount/config";
 import { destKey } from "../app/lib/checkout-discount/dest-key";
 import { processCheckoutWork } from "../app/lib/checkout-discount/processor.server";
+import { classify, type CheckoutFacts } from "../app/lib/checkout-discount/classify";
 import { parseElig, serializeElig, type EligRecord } from "../app/lib/checkout-discount/records";
 import {
   CHECKOUT_DEADLINE_MS,
@@ -48,6 +49,12 @@ const SETTINGS: MergeSettings = {
   checkoutDiscountEnabledAt: EPOCH,
   checkoutDiscountWindowHours: 72,
   mergeWindowHours: 72,
+  // Pilot approval: "Standard Shipping" $8.00 USD is the fixture's shipping
+  // line — an exact-cap match, so every pre-existing ISSUE/CONSUME case
+  // still qualifies.
+  checkoutDiscountMethod: "standard shipping",
+  checkoutDiscountMaxShippingMinor: 800,
+  checkoutDiscountCurrency: "USD",
 };
 const GATE: CheckoutGateDeps = {
   env: (n) => (n === "MERGESHIP_CHECKOUT_DISCOUNT" ? "enabled" : undefined),
@@ -449,6 +456,174 @@ describe("processCheckoutWork — CONSUME", () => {
   });
 });
 
+describe("processCheckoutWork — CONSUME reprocessing safety (one order, one record)", () => {
+  const OID3 = "gid://shopify/Order/3003";
+  const consumedOrder = (over: Record<string, unknown> = {}) =>
+    adminOrder({
+      id: OID2,
+      name: "#2002",
+      shippingLines: { nodes: [grantedLine("0.00", "8.00")] },
+      discountApplications: grantedApps(),
+      ...over,
+    });
+  const recA = () => baseRec();                        // record from order 1001
+  const recC = () => baseRec({ id: "3003" });          // a second outstanding record
+
+  /** Re-deliver (touch/upsert semantics of any topic re-touching the row) and
+   *  reprocess the same order. */
+  const redeliver = async (orderId: string, admin: FakeAdmin, work: CheckoutWorkStore) => {
+    const d = await work.upsertDirty(SHOP, orderId, `tok-re-${orderId}`, LEASE, CHECKOUT_DEADLINE_MS);
+    await processCheckoutWork({
+      item: d.item, token: d.item.leaseToken!, shop: SHOP, admin: admin as any, work, now,
+      sleep: async () => {}, random: () => 0.5, gate: GATE, diag,
+    });
+    return (await work.find(SHOP, orderId))!;
+  };
+
+  it("reprocessing a consumed order must not consume a second outstanding record", async () => {
+    const admin = makeAdmin({ orders: { [OID2]: consumedOrder() } });
+    await seed(admin, [recA(), recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    await drive(OID2, admin, work);
+    const doc1 = eligDoc(admin);
+    expect(doc1.recs.find((r) => r.id === "1001")?.used).toEqual(["2002"]);
+
+    // Any webhook re-touch reopens the row; the record that ALREADY carried
+    // this order must win — never the next matching record.
+    const row = await redeliver(OID2, admin, work);
+    expect(row.outcome).toBe("CONSUMED");
+    const c = eligDoc(admin).recs.find((r) => r.id === "3003")!;
+    expect(c.left).toBe(1);
+    expect(c.used).toBeUndefined();
+  });
+
+  it("a pruned tombstone: the durable row marker still pins the consumed record", async () => {
+    const orders: Record<string, unknown> = { [OID2]: consumedOrder() };
+    const admin = makeAdmin({ orders });
+    await seed(admin, [recA(), recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    await drive(OID2, admin, work);
+
+    // A's tombstone is pruned from the document (expired evictions are real)
+    // AND the order no longer looks eligible — yet classify still reports
+    // CONSUME because grant detection precedes the FULFILLED check.
+    await seed(admin, [recC()]);
+    orders[OID2] = consumedOrder({
+      displayFulfillmentStatus: "FULFILLED",
+      fulfillments: [{ id: "gid://shopify/Fulfillment/1" }],
+    });
+    const row = await redeliver(OID2, admin, work);
+    expect(row.outcome).toBe("CONSUMED");
+    const c = eligDoc(admin).recs.find((r) => r.id === "3003")!;
+    expect(c.left).toBe(1);
+    expect(c.used).toBeUndefined();
+  });
+
+  it("crash after marking but before the document write: retry consumes the SAME record", async () => {
+    const admin = makeAdmin({ orders: { [OID2]: consumedOrder() } });
+    admin.failWrites = 1; // first CAS commit crashes
+    await seed(admin, [recA(), recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    const row1 = await drive(OID2, admin, work);
+    expect(row1.status).toBe("PENDING"); // retried
+    clock += 60_000;
+    const [claimed] = await work.claimDue(1, LEASE);
+    await processCheckoutWork({
+      item: claimed, token: claimed.leaseToken!, shop: SHOP, admin: admin as any, work, now,
+      sleep: async () => {}, random: () => 0.5, gate: GATE, diag,
+    });
+    expect(settle(await work.find(SHOP, OID2))).toBe("DONE/CONSUMED");
+    expect(eligDoc(admin).recs.find((r) => r.id === "1001")?.used).toEqual(["2002"]);
+    expect(eligDoc(admin).recs.find((r) => r.id === "3003")?.left).toBe(1);
+  });
+
+  it("crash after the document write but before settle: retry is still a no-op consume", async () => {
+    const admin = makeAdmin({ orders: { [OID2]: consumedOrder() } });
+    await seed(admin, [recA(), recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    let failComplete = true;
+    const flaky: CheckoutWorkStore = {
+      ...work,
+      complete: (...a: Parameters<typeof work.complete>) =>
+        failComplete
+          ? ((failComplete = false), Promise.reject(new Error("settle crash")))
+          : work.complete(...a),
+    };
+    const { item } = await work.upsertDirty(SHOP, OID2, "tok-b", LEASE, CHECKOUT_DEADLINE_MS);
+    await processCheckoutWork({
+      item, token: "tok-b", shop: SHOP, admin: admin as any, work: flaky, now,
+      sleep: async () => {}, random: () => 0.5, gate: GATE, diag,
+    });
+    expect((await work.find(SHOP, OID2))!.status).toBe("PENDING");
+    clock += 60_000;
+    const [claimed] = await work.claimDue(1, LEASE);
+    await processCheckoutWork({
+      item: claimed, token: claimed.leaseToken!, shop: SHOP, admin: admin as any, work, now,
+      sleep: async () => {}, random: () => 0.5, gate: GATE, diag,
+    });
+    expect(settle(await work.find(SHOP, OID2))).toBe("DONE/CONSUMED");
+    expect(eligDoc(admin).recs.find((r) => r.id === "1001")?.used).toEqual(["2002"]);
+    expect(eligDoc(admin).recs.find((r) => r.id === "3003")?.left).toBe(1);
+  });
+
+  it("two consumers keep their own records across reprocessing", async () => {
+    const admin = makeAdmin({
+      orders: { [OID2]: consumedOrder(), [OID3]: consumedOrder({ id: OID3, name: "#3003" }) },
+    });
+    await seed(admin, [recA(), recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    await drive(OID2, admin, work); // consumes A (lowest id wins)
+    await drive(OID3, admin, work); // consumes C
+    await redeliver(OID2, admin, work);
+    await redeliver(OID3, admin, work);
+    expect(eligDoc(admin).recs.find((r) => r.id === "1001")?.used).toEqual(["2002"]);
+    expect(eligDoc(admin).recs.find((r) => r.id === "3003")?.used).toEqual(["3003"]);
+    expect(settle(await work.find(SHOP, OID2))).toBe("DONE/CONSUMED");
+    expect(settle(await work.find(SHOP, OID3))).toBe("DONE/CONSUMED");
+  });
+
+  it("replay storm: five redeliveries still consume exactly one record", async () => {
+    const admin = makeAdmin({ orders: { [OID2]: consumedOrder() } });
+    await seed(admin, [recA(), recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    await drive(OID2, admin, work);
+    for (let i = 0; i < 4; i++) await redeliver(OID2, admin, work);
+    expect((await work.find(SHOP, OID2))!.outcome).toBe("CONSUMED");
+    const c = eligDoc(admin).recs.find((r) => r.id === "3003")!;
+    expect(c.left).toBe(1);
+    expect(c.used).toBeUndefined();
+    expect(eligDoc(admin).recs.find((r) => r.id === "1001")?.used).toEqual(["2002"]);
+  });
+
+  it("a work row without the marker falls back to the used tombstone (pre-fix rows)", async () => {
+    const admin = makeAdmin({ orders: { [OID2]: consumedOrder() } });
+    // As if consumed before the durable marker existed: tombstone present,
+    // consumedRecordId unset on the (fresh) work row.
+    await seed(admin, [{ ...recA(), left: 0, used: ["2002"] }, recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    const row = await drive(OID2, admin, work);
+    expect(row.outcome).toBe("CONSUMED");
+    const c = eligDoc(admin).recs.find((r) => r.id === "3003")!;
+    expect(c.left).toBe(1);
+    expect(c.used).toBeUndefined();
+  });
+
+  it("a consumer row can never reach ISSUE (grant evidence edited away)", async () => {
+    const orders: Record<string, unknown> = { [OID2]: consumedOrder() };
+    const admin = makeAdmin({ orders });
+    await seed(admin, [recA(), recC()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    await drive(OID2, admin, work);
+
+    // The discount is edited off the order: the durable marker still stops
+    // it from ever ISSUING a record of its own (no free-shipping chains).
+    orders[OID2] = adminOrder({ id: OID2, name: "#2002" });
+    const row = await redeliver(OID2, admin, work);
+    expect(row.outcome).toBe("ALREADY_CONSUMED");
+    expect(eligDoc(admin).recs.some((r) => r.id === "2002")).toBe(false);
+  });
+});
+
 describe("processCheckoutWork — ABSENT/RETRY classification", () => {
   const absent = async (over: Record<string, unknown>, expectCode: string, opts: { seeded?: EligRecord[] } = {}) => {
     const admin = makeAdmin({ orders: { [OID1]: adminOrder(over) } });
@@ -576,6 +751,137 @@ describe("processCheckoutWork — ABSENT/RETRY classification", () => {
     const work = memoryCheckoutWorkStore(() => clock);
     const row = await drive(OID1, admin, work);
     expect(settle(row)).toBe("DONE/ORDER_GONE");
+  });
+});
+
+describe("pilot method approval (Task B bound)", () => {
+  const APPROVED = { method: "standard shipping", maxMinor: 800n, currency: "USD" };
+  const facts = (over: Partial<CheckoutFacts> = {}): CheckoutFacts => ({
+    orderId: OID1,
+    createdAt: "2026-11-10T10:00:00Z",
+    cancelledAt: null,
+    closed: false,
+    financialStatus: "PAID",
+    fulfillmentStatus: "UNFULFILLED",
+    fulfillmentCount: 0,
+    riskLevel: "LOW",
+    currencyCode: "USD",
+    supportedCurrency: true,
+    customerId: CUST,
+    shippingAddress: ADDR,
+    shippingLines: [
+      { title: "Standard Shipping", originalMinor: "800", discountedMinor: "800", discountAllocations: [] },
+    ],
+    discountApplications: [],
+    ...over,
+  });
+  const ctx = (over: Record<string, unknown> = {}) => ({
+    enabledAt: EPOCH,
+    mergeWindowHours: 72,
+    windowId: WIN,
+    now: new Date("2026-11-10T12:00:00Z"),
+    timeZone: "UTC",
+    approved: APPROVED,
+    ...over,
+  });
+  const withLine = (title: string, minor = "800", currency = "USD"): Partial<CheckoutFacts> => ({
+    currencyCode: currency,
+    shippingLines: [
+      { title, originalMinor: minor, discountedMinor: minor, discountAllocations: [] },
+    ],
+  });
+
+  it("the approved method qualifies — exact cap, case and whitespace normalized", () => {
+    for (const title of ["Standard Shipping", "STANDARD  SHIPPING", "  standard shipping "]) {
+      expect(classify(facts(withLine(title)), ctx()).kind).toBe("ISSUE");
+    }
+  });
+
+  it.each(["Express", "S3 Test Shipping", "Standard Shipping Plus"])(
+    "an unapproved method (%s) is ABSENT METHOD_NOT_APPROVED",
+    (title) => {
+      const d = classify(facts(withLine(title)), ctx());
+      expect(d).toEqual({ kind: "ABSENT", code: "METHOD_NOT_APPROVED" });
+    },
+  );
+
+  it("a shipping cost above the cap is ABSENT SHIPPING_UNBOUNDED", () => {
+    expect(classify(facts(withLine("Standard Shipping", "801")), ctx())).toEqual({
+      kind: "ABSENT",
+      code: "SHIPPING_UNBOUNDED",
+    });
+  });
+
+  it("a currency other than the approved one is ABSENT SHIPPING_UNBOUNDED", () => {
+    expect(classify(facts(withLine("Standard Shipping", "800", "EUR")), ctx())).toEqual({
+      kind: "ABSENT",
+      code: "SHIPPING_UNBOUNDED",
+    });
+  });
+
+  it("no approval at all fails closed — SHIPPING_UNBOUNDED, never silently unbounded", () => {
+    const d = classify(facts(), ctx({ approved: undefined }));
+    expect(d).toEqual({ kind: "ABSENT", code: "SHIPPING_UNBOUNDED" });
+  });
+
+  it("an order reprocessed under a revoked approval gets its stale record revoked", async () => {
+    // A record was issued while "Standard Shipping" was approved; the same
+    // order now ships a method the approval does not cover — ABSENT revokes
+    // the unused record.
+    const admin = makeAdmin({
+      orders: {
+        [OID1]: adminOrder({
+          shippingLines: { nodes: [shippingLine({ title: "Express" })] },
+        }),
+      },
+    });
+    await seed(admin, [baseRec()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    const row = await drive(OID1, admin, work);
+    expect(row.status).toBe("DONE");
+    expect(row.lastReason ?? row.outcome).toContain("METHOD_NOT_APPROVED");
+    expect(eligDoc(admin).recs.find((r) => r.id === "1001")).toBeUndefined();
+    expect(diagLog.some((e) => e.kind === "REVOKED")).toBe(true);
+  });
+
+  it("a grant over the approved cap settles CONSUMED_OVER_CAP — the record is still spent", async () => {
+    // Approved cap is 800; the grant allocated 900 on a "Standard Shipping"
+    // $9.00 line — the record IS consumed but the outcome reports overdraw.
+    const admin = makeAdmin({
+      orders: {
+        [OID1]: adminOrder(),
+        [OID2]: {
+          ...adminOrder({ id: OID2, name: "#2002" }),
+          shippingLines: {
+            nodes: [
+              shippingLine({
+                originalPriceSet: { shopMoney: { amount: "9.00", currencyCode: "USD" } },
+                discountedPriceSet: { shopMoney: { amount: "0.00", currencyCode: "USD" } },
+                discountAllocations: [
+                  {
+                    allocatedAmountSet: { shopMoney: { amount: "9.00", currencyCode: "USD" } },
+                    discountApplication: {
+                      __typename: "AutomaticDiscountApplication",
+                      targetType: "SHIPPING_LINE",
+                      title: CHECKOUT_DISCOUNT_MESSAGE,
+                    },
+                  },
+                ],
+              }),
+            ],
+          },
+          discountApplications: grantedApps(),
+        },
+      },
+    });
+    await seed(admin, [baseRec()]);
+    const work = memoryCheckoutWorkStore(() => clock);
+    const row = await drive(OID2, admin, work);
+    expect(settle(row)).toBe("DONE/CONSUMED_OVER_CAP");
+    const rec = eligDoc(admin).recs.find((r) => r.id === "1001")!;
+    expect(rec.used).toEqual(["2002"]);
+    expect(rec.left).toBe(0);
+    expect(diagLog.some((e) => e.kind === "OVERDRAW" && e.code === "OVER_CAP")).toBe(true);
   });
 });
 

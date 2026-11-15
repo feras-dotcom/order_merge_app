@@ -304,7 +304,8 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
     windowId: gate.windowId,
     now: nowDate,
     timeZone,
-    grantConsumed: item.grantConsumedAt != null,
+    grantConsumed: item.grantConsumedAt != null || item.consumedRecordId != null,
+    approved: gate.approved,
   });
 
   // (4) The location rule only gates ISSUE — an ISSUE candidate that fails
@@ -407,40 +408,55 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
         await settle("CUSTOMER_GONE", "consumed order has no customer", "OVERDRAW", "NO_CUSTOMER");
         return;
       }
-      // The Function-equivalent selection decides WHICH record granted this
-      // checkout — never consume a record it could not have matched.
+      // WHICH record granted this checkout? Durable evidence decides BEFORE
+      // the Function-equivalent selection — a replay must never select (and
+      // consume) a second matching record:
+      //  (a) this row's consumedRecordId, persisted by an earlier pass;
+      //  (b) a record whose `used` already carries this order (rows settled
+      //      before the marker existed, or a marker lost to old code);
+      //  (c) selection — only for a first-time consumption.
       const current = await readDoc(adminGql, customerId);
-      const match = selectRecordForCheckout(current, {
-        win: gate.windowId,
-        dest: decision.match.dest,
-        method: decision.match.method,
-        cur: decision.match.cur,
-        today,
-      });
-      if (!match) {
+      let recordId: string | null = item.consumedRecordId;
+      if (recordId === null) {
+        const { doc } = parseElig(current);
+        recordId =
+          doc.recs.find((r) => (r.used ?? []).includes(decision.orderIdNum))?.id ??
+          selectRecordForCheckout(current, {
+            win: gate.windowId,
+            dest: decision.match.dest,
+            method: decision.match.method,
+            cur: decision.match.cur,
+            today,
+          })?.id ??
+          null;
+      }
+      if (!recordId) {
         // The signature of simultaneous checkouts (D3/§5): a granted order
         // no living record can explain.
         await settle("CONSUMED_NO_RECORD", "grant with no matching record", "OVERDRAW", "NO_MATCHING_RECORD");
         return;
       }
       if (!(await renew())) return;
-      // Durable consumed mark BEFORE the document write: the metafield
-      // tombstone can be evicted or pruned, but this row can never lose the
+      // Durable marks BEFORE the document write: the metafield tombstone
+      // can be evicted or pruned, but these rows can never lose the
       // evidence — a crash here retries; a crash after the write still
-      // leaves the record spent and the next pass re-marks. Only a real
-      // match is marked; an overdraw with no record marks nothing.
-      await work.markGrantConsumed(shop, `gid://shopify/Order/${match.id}`);
+      // leaves the record spent and the next pass re-marks. consumedRecordId
+      // is first-value-wins: if another pass stored a different id first,
+      // that id is the truth and the rest of this pass settles against it.
+      // Only a real match is marked; an overdraw with no record marks nothing.
+      const chosenId = await work.markConsumedRecord(item.id, token, recordId);
+      await work.markGrantConsumed(shop, `gid://shopify/Order/${chosenId}`);
       await writeProjection(
         adminGql,
         customerId,
         (cur) => {
-          const c = consumeRecord(cur, { recordId: match.id, byOrderId: decision.orderIdNum }, { todayDate: today });
+          const c = consumeRecord(cur, { recordId: chosenId, byOrderId: decision.orderIdNum }, { todayDate: today });
           return c.changed ? { serialized: c.serialized } : null;
         },
         { sleep, random },
       );
       const verified = await verify(adminGql, customerId, (doc) => {
-        const rec = doc.recs.find((r) => r.id === match.id);
+        const rec = doc.recs.find((r) => r.id === chosenId);
         // Verified when the tombstone carries this order, or the record is
         // already gone (pruned expired — it can grant nothing either way).
         return rec === undefined || (rec.used ?? []).includes(decision.orderIdNum);
@@ -449,11 +465,14 @@ export async function processCheckoutWork(args: ProcessCheckoutWorkArgs): Promis
         await retry("VERIFY_MISMATCH", "consumption read-back mismatch");
         return;
       }
+      // Post-hoc bound at consumption: the record IS consumed either way,
+      // but a grant beyond the approved cap reports overdraw.
+      const overCap = BigInt(decision.allocatedMinor) > gate.approved.maxMinor;
       await settle(
-        "CONSUMED",
-        `record ${match.id} consumed; allocated ${decision.allocatedMinor}`,
-        "CONSUMED",
-        "ALLOCATION",
+        overCap ? "CONSUMED_OVER_CAP" : "CONSUMED",
+        `record ${chosenId} consumed; allocated ${decision.allocatedMinor}`,
+        overCap ? "OVERDRAW" : "CONSUMED",
+        overCap ? "OVER_CAP" : "ALLOCATION",
       );
       return;
     }
