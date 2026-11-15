@@ -131,7 +131,11 @@ const PRICE_LABEL_RE = /^(original price|discounted price|free)$/i;
  *  A struck-through original is never an option's amount (FREE or 0.00 =>
  *  free, amountMinor 0). Each priced line is paired with the nearest
  *  preceding line that is neither a price, an estimate nor a price label. */
-export function extractOptions(shippingLines: string[]): OptionVerdict[] {
+export function extractOptions(rawLines: string[]): OptionVerdict[] {
+  // innerText renders the screen-reader labels as their own lines
+  // ("Original price" / "$8.00" / "Discounted price" / "FREE"): drop the
+  // label-only lines so the value lines pair up as struck original + discount.
+  const shippingLines = rawLines.filter((l) => !/^s*(original|discounted) prices*$/i.test(l));
   const hasPrice = (l: string) => PRICE_RE.test(l) || /free/i.test(l);
   const isMarker = (l: string) => PRICE_LABEL_RE.test(l.trim());
   const bareTitle = (l: string) =>

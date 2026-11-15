@@ -451,4 +451,13 @@ describe("extractOptions — innerText label-free discounted shapes", () => {
     expect(opts[1]).toMatchObject({ title: "Standard", amountMinor: 800 });
     expect(opts[2]).toMatchObject({ title: "Express", amountMinor: 1500 });
   });
+
+  it("parses the live innerText shape with label-only lines on their own line", () => {
+    const opts = extractOptions(["shipping method", "S3 Test Shipping", "Wed, Nov 18–Thu, Nov 19", "$4.00", "Standard", "Fri, Nov 20–Tue, Nov 24", "Original price", "$8.00", "Discounted price", "FREE", "Express", "Wed, Nov 18–Thu, Nov 19", "$15.00"]);
+    expect(opts).toEqual([
+      { title: "S3 Test Shipping", amountMinor: 400, free: false },
+      { title: "Standard", amountMinor: 0, free: true },
+      { title: "Express", amountMinor: 1500, free: false },
+    ]);
+  });
 });
