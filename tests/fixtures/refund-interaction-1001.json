@@ -1,0 +1,96 @@
+{
+  "order": {
+    "id": "gid://shopify/Order/19017500066159",
+    "name": "#1001",
+    "test": true,
+    "cancelledAt": null,
+    "closedAt": null,
+    "closed": false,
+    "displayFinancialStatus": "PAID",
+    "currencyCode": "USD",
+    "presentmentCurrencyCode": "USD",
+    "taxesIncluded": false,
+    "totalRefundedShippingSet": {
+      "presentmentMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "totalRefundedSet": {
+      "presentmentMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "shippingLines": {
+      "nodes": [
+        {
+          "title": "Standard",
+          "originalPriceSet": {
+            "presentmentMoney": {
+              "amount": "8.0",
+              "currencyCode": "USD"
+            }
+          },
+          "discountedPriceSet": {
+            "presentmentMoney": {
+              "amount": "0.0",
+              "currencyCode": "USD"
+            }
+          },
+          "taxLines": [],
+          "discountAllocations": [
+            {
+              "allocatedAmountSet": {
+                "presentmentMoney": {
+                  "amount": "8.0",
+                  "currencyCode": "USD"
+                }
+              },
+              "discountApplication": {
+                "__typename": "AutomaticDiscountApplication",
+                "title": "MergeShip spike: shipping discount"
+              }
+            }
+          ]
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false
+      }
+    },
+    "refunds": [],
+    "transactions": [
+      {
+        "id": "gid://shopify/OrderTransaction/20915583811951",
+        "kind": "AUTHORIZATION",
+        "status": "SUCCESS",
+        "gateway": "bogus",
+        "test": true,
+        "amountSet": {
+          "presentmentMoney": {
+            "amount": "9.95",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": null
+      },
+      {
+        "id": "gid://shopify/OrderTransaction/20915584008559",
+        "kind": "CAPTURE",
+        "status": "SUCCESS",
+        "gateway": "bogus",
+        "test": true,
+        "amountSet": {
+          "presentmentMoney": {
+            "amount": "9.95",
+            "currencyCode": "USD"
+          }
+        },
+        "parentTransaction": {
+          "id": "gid://shopify/OrderTransaction/20915583811951"
+        }
+      }
+    ]
+  }
+}
