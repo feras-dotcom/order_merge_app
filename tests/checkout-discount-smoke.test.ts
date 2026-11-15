@@ -283,3 +283,117 @@ describe("runSmoke driver", () => {
     expect(new LoginRequiredError()).toBeInstanceOf(Error);
   });
 });
+
+// ── saved-address checkout shapes (live-found DOM layout) ────────────────
+
+describe("extractOptions — discounted/original-price shapes", () => {
+  it("one-line discounted option: struck original ignored, FREE wins", () => {
+    const opts = extractOptions([
+      "Standard",
+      "Fri, Nov 20–Tue, Nov 24",
+      "Original price $8.00 Discounted price FREE",
+      "Express",
+      "Fri, Nov 20–Mon, Nov 23",
+      "$15.00",
+    ]);
+    const std = opts.find((o) => o.title === "Standard")!;
+    expect(std).toMatchObject({ amountMinor: 0, free: true });
+    expect(opts.find((o) => /express/i.test(o.title))).toMatchObject({ amountMinor: 1500, free: false });
+  });
+
+  it("split discounted option: Original price / Discounted price / FREE", () => {
+    const opts = extractOptions([
+      "Standard",
+      "Fri, Nov 20–Tue, Nov 24",
+      "Original price $8.00",
+      "Discounted price",
+      "FREE",
+      "Express Shipping $15.00",
+    ]);
+    const std = opts.find((o) => o.title === "Standard")!;
+    expect(std).toMatchObject({ amountMinor: 0, free: true });
+    expect(opts.find((o) => /express/i.test(o.title))).toMatchObject({ amountMinor: 1500, free: false });
+    // the struck-through $8.00 must never surface as an option amount
+    expect(opts.some((o) => o.amountMinor === 800)).toBe(false);
+  });
+
+  it("selected-option summary shape: 'Shipping Original price $8.00 Discounted price FREE'", () => {
+    const opts = extractOptions([
+      "Standard",
+      "Fri, Nov 20–Tue, Nov 24",
+      "Original price $8.00",
+      "Discounted price",
+      "FREE",
+      "Shipping Original price $8.00 Discounted price FREE",
+      "Express",
+      "$15.00",
+    ]);
+    const std = opts.find((o) => o.title === "Standard")!;
+    expect(std).toMatchObject({ amountMinor: 0, free: true });
+    expect(opts.find((o) => /express/i.test(o.title))).toMatchObject({ amountMinor: 1500, free: false });
+  });
+
+  it("plain priced options are unchanged", () => {
+    const opts = extractOptions(["S3 Test Shipping $4.00", "Standard $8.00", "Express $15.00"]);
+    expect(opts[0]).toMatchObject({ amountMinor: 400, free: false });
+    expect(opts[1]).toMatchObject({ amountMinor: 800, free: false });
+    expect(opts[2]).toMatchObject({ amountMinor: 1500, free: false });
+  });
+
+  it("a partially discounted option reports the discounted amount, not the original", () => {
+    const opts = extractOptions([
+      "Standard",
+      "Original price $8.00 Discounted price $4.00",
+    ]);
+    expect(opts[0]).toMatchObject({ amountMinor: 400, free: false });
+  });
+});
+
+// ── collapsed-panel expand + method selection (fake locators) ────────────
+
+describe("browser shipping-panel helpers", () => {
+  type Loc = ReturnType<typeof fakeLoc>;
+  function fakeLoc(state: { radios: number; disabled: boolean; visible?: boolean; clicks?: string[] }) {
+    const nth = (i: number) => ({
+      click: async () => { state.clicks?.push(`click-${i}`); },
+      isDisabled: async () => state.disabled,
+      isVisible: async () => state.visible ?? true,
+      isChecked: async () => true,
+      check: async (opts?: { force?: boolean }) => { state.clicks?.push(`check-${i}-${opts?.force}`); },
+    });
+    return { count: async () => state.radios, allInnerTexts: async () => [] as string[], nth };
+  }
+  function fakePage(state: { radios: number; disabled: boolean; visible?: boolean; clicks?: string[] }, evalOut: (fn: (a: unknown) => unknown) => unknown) {
+    return {
+      locator: () => fakeLoc(state) as unknown as Loc & { nth: (i: number) => ReturnType<ReturnType<typeof fakeLoc>["nth"]> },
+      evaluate: async (fn: (a: unknown) => unknown, arg?: unknown) => evalOut(fn),
+      waitForTimeout: async () => {},
+    } as never;
+  }
+
+  it("ensureShippingOptionsExpanded clicks the Shipping toggle once when radios are disabled", async () => {
+    const { ensureShippingOptionsExpanded } = await import("../scripts/smoke/browser");
+    const clicks: string[] = [];
+    const state = { radios: 0, disabled: true, clicks };
+    // radios unusable forever → the helper clicks once then gives up at waitMs
+    const page = fakePage(state, () => -1);
+    await ensureShippingOptionsExpanded(page, 30);
+    expect(clicks.filter((c) => c === "click-1")).toHaveLength(1);
+    // a second call with usable radios never toggles
+    state.radios = 1; state.disabled = false;
+    clicks.length = 0;
+    await ensureShippingOptionsExpanded(page, 30);
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("selectShippingOption force-checks the matching radio and verifies", async () => {
+    const { selectShippingOption } = await import("../scripts/smoke/browser");
+    const clicks: string[] = [];
+    const state = { radios: 2, disabled: false, clicks };
+    const page = fakePage(state, (fn) =>
+      String(fn).includes("querySelectorAll") ? 1 : true,
+    );
+    expect(await selectShippingOption(page, "Standard")).toBe(true);
+    expect(clicks).toContain("check-1-true");
+  });
+});

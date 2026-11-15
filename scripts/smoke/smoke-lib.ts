@@ -113,16 +113,51 @@ const PRICE_RE = /\$?\s*([\d,]+\.\d{2})/;
 const ESTIMATE_RE =
   /(mon|tue|wed|thu|fri|sat|sun)[a-z]*\s*,?|business days|\d+\s*(?:-|–|—|to)\s*\w+|^\d+\s*days?/i;
 
+const DISCOUNTED_RE = /discounted price/i;
+const ORIGINAL_RE = /original price/i;
+// Label rows that never carry an option title — the struck-through original,
+// the discounted-price marker and a lone FREE.
+const PRICE_LABEL_RE = /^(original price|discounted price|free)$/i;
+
 /** Parse scraped shipping-block lines into {title, amountMinor, free}.
- *  Handles both one-line ("Standard $8.00") and three-line (title /
- *  estimate / "$8.00") checkout layouts: each price line is paired with the
- *  nearest preceding line that is neither a price nor a date estimate. */
+ *  Handles "Standard $8.00", the three-line layout (title / estimate /
+ *  "$8.00"), and the discounted layout: "Original price $8.00 Discounted
+ *  price FREE" on one line, or split as title / estimate / "Original price
+ *  $8.00" / "Discounted price" / "FREE". A struck-through "Original price"
+ *  is never an option's amount — the "Discounted price" value (FREE or
+ *  0.00 => free, amountMinor 0) is. Each priced line is paired with the
+ *  nearest preceding line that is neither a price, an estimate nor a
+ *  price label. */
 export function extractOptions(shippingLines: string[]): OptionVerdict[] {
   const hasPrice = (l: string) => PRICE_RE.test(l) || /free/i.test(l);
+  const isMarker = (l: string) => PRICE_LABEL_RE.test(l.trim());
+  const minorOf = (m: RegExpExecArray | null) =>
+    m ? Math.round(parseFloat(m[1].replace(/,/g, "")) * 100) : null;
+  const titleBefore = (i: number): string => {
+    for (let j = i - 1; j >= 0; j--) {
+      const cand = shippingLines[j];
+      if (hasPrice(cand) || ESTIMATE_RE.test(cand) || isMarker(cand)) continue;
+      return cand;
+    }
+    return "";
+  };
   const out: OptionVerdict[] = [];
   for (let i = 0; i < shippingLines.length; i++) {
     const line = shippingLines[i];
     if (!hasPrice(line)) continue;
+    if (DISCOUNTED_RE.test(line)) {
+      // The discounted value follows "Discounted price" on this line or the
+      // next ("…Discounted price FREE" | "Discounted price\nFREE").
+      const tail = line.replace(/^.*?discounted price/i, "").trim();
+      const value = tail || shippingLines[i + 1] || "";
+      const minor = minorOf(PRICE_RE.exec(value));
+      const free = /free/i.test(value) || minor === 0;
+      out.push({ title: titleBefore(i), amountMinor: free ? 0 : minor, free });
+      continue;
+    }
+    // A bare "Original price $8.00" is a struck-through original — the real
+    // amount comes from its "Discounted price" companion line.
+    if (ORIGINAL_RE.test(line)) continue;
     const amountMatch = PRICE_RE.exec(line);
     const inlineTitle = line
       .replace(PRICE_RE, "")
@@ -130,17 +165,12 @@ export function extractOptions(shippingLines: string[]): OptionVerdict[] {
       .replace(/[·\-–—]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-    let title = inlineTitle;
-    for (let j = i - 1; !title && j >= 0; j--) {
-      const cand = shippingLines[j];
-      if (hasPrice(cand) || ESTIMATE_RE.test(cand)) continue;
-      title = cand;
-    }
     const free =
-      /free/i.test(line) || (amountMatch !== null && parseFloat(amountMatch[1].replace(/,/g, "")) === 0);
+      /free/i.test(line) ||
+      (amountMatch !== null && parseFloat(amountMatch[1].replace(/,/g, "")) === 0);
     out.push({
-      title,
-      amountMinor: amountMatch ? Math.round(parseFloat(amountMatch[1].replace(/,/g, "")) * 100) : null,
+      title: inlineTitle || titleBefore(i),
+      amountMinor: minorOf(amountMatch) ?? (free ? 0 : null),
       free,
     });
   }
@@ -449,7 +479,13 @@ export async function runSmoke(deps: SmokeDriverDeps): Promise<SmokeOutcome> {
     const ctx = await deps.browser.connect();
     try {
       const page = await ctx.newPage();
-      const { buildCartAndCheckout, fillAddress, scrapeCheckout } = await import("./browser");
+      const {
+        buildCartAndCheckout,
+        fillAddress,
+        scrapeCheckout,
+        ensureShippingOptionsExpanded,
+        selectShippingOption,
+      } = await import("./browser");
       for (let attempt = 0; attempt < 2; attempt++) {
         await buildCartAndCheckout(page, `https://${args.store}`, args.variantNumeric);
         await page.waitForTimeout(3000);
@@ -463,6 +499,11 @@ export async function runSmoke(deps: SmokeDriverDeps): Promise<SmokeOutcome> {
       }
       await fillAddress(page, address);
       await page.waitForTimeout(4000);
+      // Saved-address checkout renders the options collapsed — expand the
+      // Shipping row once, then select the --method option (the discount row
+      // only renders for the selected option, in EVERY scenario).
+      await ensureShippingOptionsExpanded(page);
+      await selectShippingOption(page, methodTitle);
       const scraped = await scrapeCheckout(page);
       if (deps.shot) await deps.shot(page, name);
       // Guest checkout = the persisted profile is not signed in. The Function
@@ -472,7 +513,19 @@ export async function runSmoke(deps: SmokeDriverDeps): Promise<SmokeOutcome> {
         out.loginRequired = true;
         throw new LoginRequiredError();
       }
-      const observed = observeScrape(scraped, { methodTitle, expressBaselineMinor });
+      let observed = observeScrape(scraped, { methodTitle, expressBaselineMinor });
+      // S2 can race the Function's propagation to the delivery UI — rescore
+      // a few times before failing (the scrape is read-only).
+      if (name === "S2-granted") {
+        for (
+          let r = 0;
+          r < 4 && !verdictFor(name, observed, expressBaselineMinor);
+          r++
+        ) {
+          await sleep(4000);
+          observed = observeScrape(await scrapeCheckout(page), { methodTitle, expressBaselineMinor });
+        }
+      }
       return {
         scenario: name,
         pass: verdictFor(name, observed, expressBaselineMinor),
