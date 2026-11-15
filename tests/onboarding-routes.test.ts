@@ -398,6 +398,11 @@ describe("app/uninstalled webhook", () => {
         // The window stamp resets with the flag — a reinstall re-enables
         // only through prepare-enable, which stamps the then-current window.
         checkoutDiscountWindowHours: null,
+        // The pilot method approval resets too — a reinstall re-approves
+        // only through prepare-enable.
+        checkoutDiscountMethod: null,
+        checkoutDiscountMaxShippingMinor: null,
+        checkoutDiscountCurrency: null,
       },
     });
   });

@@ -25,6 +25,9 @@ const settings = (over: Partial<MergeSettings> = {}): MergeSettings & { shop: st
   checkoutDiscountEnabledAt: new Date("2026-11-01T00:00:00Z"),
   checkoutDiscountNodeId: DID,
   checkoutDiscountWindowHours: 48,
+  checkoutDiscountMethod: "standard shipping",
+  checkoutDiscountMaxShippingMinor: 800,
+  checkoutDiscountCurrency: "USD",
   ...over,
 });
 

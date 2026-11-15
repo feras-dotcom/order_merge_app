@@ -44,6 +44,15 @@ export interface MergeSettings {
    *  merge window below it fails the checkout gate and forces a shutdown.
    *  Writable ONLY via the dedicated writers, never upsertSettings. */
   checkoutDiscountWindowHours: number | null;
+  /** Pilot method approval (operator-set via prepare-enable, no merchant
+   *  UI): the ONLY normalized shipping-method title a record may grant.
+   *  Writable ONLY via setCheckoutDiscountEnabled. */
+  checkoutDiscountMethod: string | null;
+  /** Approved bound: maximum original shipping cost a record may discount,
+   *  integer minor units of checkoutDiscountCurrency. */
+  checkoutDiscountMaxShippingMinor: number | null;
+  /** The approved bound's currency (ISO code, uppercase). */
+  checkoutDiscountCurrency: string | null;
 }
 
 export const DEFAULT_SETTINGS: MergeSettings = {
@@ -64,7 +73,19 @@ export const DEFAULT_SETTINGS: MergeSettings = {
   checkoutDiscountEnabledAt: null,
   checkoutDiscountNodeId: null,
   checkoutDiscountWindowHours: null,
+  checkoutDiscountMethod: null,
+  checkoutDiscountMaxShippingMinor: null,
+  checkoutDiscountCurrency: null,
 };
+
+/** The operator-approved shipping-method bound written atomically with the
+ *  checkout enable epoch (prepare-enable). `method` is stored NORMALIZED
+ *  (normMethod); maxShippingMinor is integer minor units of `currency`. */
+export interface CheckoutMethodApproval {
+  method: string;
+  maxShippingMinor: number;
+  currency: string;
+}
 
 /**
  * Returns the saved settings for a shop, or the defaults if no row exists yet.
@@ -92,6 +113,9 @@ export async function upsertSettings(
       | "checkoutDiscountEnabledAt"
       | "checkoutDiscountNodeId"
       | "checkoutDiscountWindowHours"
+      | "checkoutDiscountMethod"
+      | "checkoutDiscountMaxShippingMinor"
+      | "checkoutDiscountCurrency"
     >
   >,
 ): Promise<MergeSettings> {
@@ -138,16 +162,25 @@ export async function setCheckoutDiscountEnabled(
   shop: string,
   enabled: boolean,
   client: PrismaClient = db,
+  approval?: CheckoutMethodApproval | null,
 ): Promise<void> {
   // The window stamp moves with the flag: a false→true transition stamps
   // the mergeWindowHours in force at enable time, enabling again keeps the
   // existing stamp (idempotent while enabled), disabling clears it. The
-  // INSERT path stamps 24 — the mergeWindowHours column default.
+  // INSERT path stamps 24 — the mergeWindowHours column default. The pilot
+  // method approval moves the same way: written with the flag (enabling
+  // without approval stores NULLs — the gate fails closed), disabling
+  // always clears all three.
+  const method = enabled ? approval?.method ?? null : null;
+  const maxMinor = enabled ? approval?.maxShippingMinor ?? null : null;
+  const currency = enabled ? approval?.currency ?? null : null;
   await client.$executeRaw`
-    INSERT INTO "Settings" ("id", "shop", "checkoutDiscountEnabled", "checkoutDiscountEnabledAt", "checkoutDiscountWindowHours")
+    INSERT INTO "Settings" ("id", "shop", "checkoutDiscountEnabled", "checkoutDiscountEnabledAt", "checkoutDiscountWindowHours",
+      "checkoutDiscountMethod", "checkoutDiscountMaxShippingMinor", "checkoutDiscountCurrency")
     VALUES (${crypto.randomUUID()}, ${shop}, ${enabled},
       CASE WHEN ${enabled} THEN ${DB_WALL} ELSE NULL END,
-      CASE WHEN ${enabled} THEN 24 ELSE NULL END)
+      CASE WHEN ${enabled} THEN 24 ELSE NULL END,
+      ${method}, ${maxMinor}, ${currency})
     ON CONFLICT ("shop") DO UPDATE SET
       "checkoutDiscountEnabled" = EXCLUDED."checkoutDiscountEnabled",
       "checkoutDiscountEnabledAt" = CASE
@@ -159,6 +192,18 @@ export async function setCheckoutDiscountEnabled(
         WHEN NOT EXCLUDED."checkoutDiscountEnabled" THEN NULL
         WHEN "Settings"."checkoutDiscountEnabled" THEN "Settings"."checkoutDiscountWindowHours"
         ELSE "Settings"."mergeWindowHours"
+      END,
+      "checkoutDiscountMethod" = CASE
+        WHEN NOT EXCLUDED."checkoutDiscountEnabled" THEN NULL
+        ELSE EXCLUDED."checkoutDiscountMethod"
+      END,
+      "checkoutDiscountMaxShippingMinor" = CASE
+        WHEN NOT EXCLUDED."checkoutDiscountEnabled" THEN NULL
+        ELSE EXCLUDED."checkoutDiscountMaxShippingMinor"
+      END,
+      "checkoutDiscountCurrency" = CASE
+        WHEN NOT EXCLUDED."checkoutDiscountEnabled" THEN NULL
+        ELSE EXCLUDED."checkoutDiscountCurrency"
       END`;
 }
 
@@ -228,6 +273,9 @@ export async function resetAutomationForUninstall(
       checkoutDiscountEnabledAt: null,
       checkoutDiscountNodeId: null,
       checkoutDiscountWindowHours: null,
+      checkoutDiscountMethod: null,
+      checkoutDiscountMaxShippingMinor: null,
+      checkoutDiscountCurrency: null,
     },
   });
 }

@@ -11,6 +11,8 @@ import type { ControlRow } from "../app/lib/operation-store.server";
 const SHOP = "shop.myshopify.com";
 const EPOCH = new Date("2026-11-01T00:00:00Z");
 
+const APPROVAL = { method: "standard shipping", maxMinor: 800n, currency: "USD" } as const;
+
 const onSettings = (over: Partial<MergeSettings> = {}): MergeSettings => ({
   ...DEFAULT_SETTINGS,
   autoMergeEnabled: true,
@@ -18,6 +20,9 @@ const onSettings = (over: Partial<MergeSettings> = {}): MergeSettings => ({
   checkoutDiscountEnabled: true,
   checkoutDiscountEnabledAt: EPOCH,
   checkoutDiscountWindowHours: 24,
+  checkoutDiscountMethod: APPROVAL.method,
+  checkoutDiscountMaxShippingMinor: 800,
+  checkoutDiscountCurrency: APPROVAL.currency,
   ...over,
 });
 const onControl = (over: Partial<ControlRow> = {}): ControlRow => ({
@@ -42,14 +47,49 @@ const deps = (over: Partial<CheckoutGateDeps> = {}): CheckoutGateDeps => ({
 });
 
 describe("checkoutDiscountGate — six independent levers", () => {
-  it("all levers on => on, carrying the enable epoch, merge window and epoch-derived windowId", async () => {
+  it("all levers on => on, carrying the enable epoch, merge window, epoch-derived windowId and the approval", async () => {
     const g = await checkoutDiscountGate(SHOP, deps());
     expect(g).toEqual({
       on: true,
       enabledAt: EPOCH,
       mergeWindowHours: 24,
       windowId: `w${EPOCH.getTime()}`,
+      approved: APPROVAL,
     });
+  });
+
+  it("enabled without a valid method approval => off, reason method-unconfigured", async () => {
+    for (const over of [
+      { checkoutDiscountMethod: null },
+      { checkoutDiscountMethod: "" },
+      { checkoutDiscountMaxShippingMinor: null },
+      { checkoutDiscountMaxShippingMinor: 0 },
+      { checkoutDiscountMaxShippingMinor: -5 },
+      { checkoutDiscountCurrency: null },
+      { checkoutDiscountCurrency: "XXX" },
+      { checkoutDiscountCurrency: "usd" },
+    ] as Partial<MergeSettings>[]) {
+      const g = await checkoutDiscountGate(
+        SHOP,
+        deps({ settings: async () => onSettings(over) }),
+      );
+      expect(g).toEqual({ on: false, reason: "method-unconfigured" });
+    }
+    // The lever only applies while the flag is on: a disabled shop reports
+    // the flag, never the missing approval.
+    const g = await checkoutDiscountGate(
+      SHOP,
+      deps({
+        settings: async () =>
+          onSettings({
+            checkoutDiscountEnabled: false,
+            checkoutDiscountMethod: null,
+            checkoutDiscountMaxShippingMinor: null,
+            checkoutDiscountCurrency: null,
+          }),
+      }),
+    );
+    expect(g).toEqual({ on: false, reason: "shop" });
   });
 
   it("a merge window shorter than a full local day => off, reason window-unsupported", async () => {

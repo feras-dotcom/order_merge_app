@@ -45,6 +45,10 @@ const SETTINGS: MergeSettings = {
   checkoutDiscountEnabledAt: EPOCH,
   checkoutDiscountWindowHours: 72,
   mergeWindowHours: 72,
+  // Pilot approval matching the "Standard Shipping" $8.00 USD fixture.
+  checkoutDiscountMethod: "standard shipping",
+  checkoutDiscountMaxShippingMinor: 800,
+  checkoutDiscountCurrency: "USD",
 };
 const GATE: CheckoutGateDeps = {
   env: (n) => (n === "MERGESHIP_CHECKOUT_DISCOUNT" ? "enabled" : undefined),

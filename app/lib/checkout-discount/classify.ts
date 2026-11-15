@@ -31,6 +31,8 @@ export type AbsentCode =
   | "AMBIGUOUS_DISCOUNT"
   | "UNSUPPORTED_CURRENCY"
   | "WINDOW_TOO_SHORT"
+  | "METHOD_NOT_APPROVED"
+  | "SHIPPING_UNBOUNDED"
   | "ALREADY_CONSUMED";
 
 export type RetryCode = "RISK_UNKNOWN" | "INCOMPLETE";
@@ -75,6 +77,12 @@ export interface ClassifyContext {
    *  order already granted a checkout, so it can never issue a record
    *  again — regardless of what the metafield document currently holds. */
   grantConsumed?: boolean;
+  /** Pilot method approval from the settings row the gate already loaded.
+   *  When set, only exactly that normalized method, in that currency, with
+   *  an original shipping cost within the cap qualifies. `undefined` means
+   *  approval is absent — classify then fails closed, because an enabled
+   *  gate without approval is a misconfiguration. */
+  approved?: { method: string; maxMinor: bigint; currency: string };
 }
 
 const orderIdNum = (orderId: string): string =>
@@ -138,6 +146,22 @@ export function classify(facts: CheckoutFacts, ctx: ClassifyContext): Decision {
     return { kind: "ABSENT", code: "WINDOW_PASSED" };
   }
   if (facts.shippingLines.length !== 1) return { kind: "ABSENT", code: "MULTI_SHIPPING" };
+
+  // Pilot bound — only the operator-approved method within the approved
+  // cost cap qualifies. An enabled feature without approval is a
+  // misconfiguration and fails closed the same way.
+  const shipLine = facts.shippingLines[0];
+  if (!ctx.approved) {
+    // An enabled feature without approval is a misconfiguration — the gate
+    // refuses first (method-unconfigured); classify fails closed too.
+    return { kind: "ABSENT", code: "SHIPPING_UNBOUNDED" };
+  }
+  if (normMethod(shipLine?.title) !== ctx.approved.method) {
+    return { kind: "ABSENT", code: "METHOD_NOT_APPROVED" };
+  }
+  if (facts.currencyCode !== ctx.approved.currency || BigInt(shipLine.originalMinor) > ctx.approved.maxMinor) {
+    return { kind: "ABSENT", code: "SHIPPING_UNBOUNDED" };
+  }
 
   // Durable consumed evidence outranks eligibility: the metafield tombstone
   // may have been evicted or pruned, but the work row still knows this order

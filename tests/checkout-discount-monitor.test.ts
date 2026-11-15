@@ -25,6 +25,9 @@ const onSettings = (over: Partial<MergeSettings> = {}): MergeSettings => ({
   checkoutDiscountEnabledAt: EPOCH1,
   checkoutDiscountNodeId: DID,
   checkoutDiscountWindowHours: 24,
+  checkoutDiscountMethod: "standard shipping",
+  checkoutDiscountMaxShippingMinor: 800,
+  checkoutDiscountCurrency: "USD",
   ...over,
 });
 

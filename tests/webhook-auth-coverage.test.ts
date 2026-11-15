@@ -94,6 +94,7 @@ const GATE_ON: CheckoutGateResult = {
   enabledAt: new Date("2026-10-01T00:00:00Z"),
   mergeWindowHours: 24,
   windowId: "w-test",
+  approved: { method: "standard shipping", maxMinor: 800n, currency: "USD" },
 };
 
 describe("webhook-auth coverage (static)", () => {

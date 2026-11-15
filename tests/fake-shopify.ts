@@ -1783,6 +1783,9 @@ export function makeHarness(orders: FakeOrder[], opts: { settings?: Partial<Merg
     checkoutDiscountEnabledAt: null,
     checkoutDiscountNodeId: null,
     checkoutDiscountWindowHours: null,
+    checkoutDiscountMethod: null,
+    checkoutDiscountMaxShippingMinor: null,
+    checkoutDiscountCurrency: null,
     ...opts.settings,
   };
   const getSettings = async () => settings;

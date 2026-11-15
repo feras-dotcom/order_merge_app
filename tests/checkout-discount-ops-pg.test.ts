@@ -137,6 +137,9 @@ describe.skipIf(!URL)("checkout report/monitor SQL (real Postgres)", () => {
       checkoutDiscountEnabledAt: EPOCH1,
       checkoutDiscountNodeId: "gid://shopify/DiscountAutomaticNode/1",
       checkoutDiscountWindowHours: 24,
+      checkoutDiscountMethod: "standard",
+      checkoutDiscountMaxShippingMinor: 800,
+      checkoutDiscountCurrency: "USD",
       ...over,
     }) as any;
   const monitorDeps = (settings: any) => ({

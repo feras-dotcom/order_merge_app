@@ -9,7 +9,7 @@
 //
 //   npx vite-node scripts/checkout-discount-control.ts status         --shop <store> --discount-id <gid>
 //   npx vite-node scripts/checkout-discount-control.ts shutdown       --shop <store> --discount-id <gid> --apply
-//   npx vite-node scripts/checkout-discount-control.ts prepare-enable --shop <store> --discount-id <gid> --apply
+//   npx vite-node scripts/checkout-discount-control.ts prepare-enable --shop <store> --discount-id <gid> --method "Standard" --max-shipping 8.00 --currency USD --apply
 //   npx vite-node scripts/checkout-discount-control.ts activate       --shop <store> --discount-id <gid> --window-id <w<epochMs>> --apply
 //   npx vite-node scripts/checkout-discount-control.ts create         --shop <store> [--function-id <gid>] [--percentage <0<p<=100>] [--window-days 14] [--apply]
 //   npx vite-node scripts/checkout-discount-control.ts preflight      --shop <store>
@@ -35,10 +35,13 @@ const expectedWindowId = opt("window-id");
 const functionId = opt("function-id");
 const percentage = opt("percentage");
 const windowDays = opt("window-days");
+const method = opt("method");
+const maxShipping = opt("max-shipping");
+const currency = opt("currency");
 const apply = argv.includes("--apply");
 
 const usage =
-  "usage: npx vite-node scripts/checkout-discount-control.ts <status|shutdown|prepare-enable|activate|create|preflight> --shop <store> [--discount-id <gid>] [--window-id <id>] [--function-id <gid>] [--percentage <p>] [--window-days <n>] [--apply]\n" +
+  "usage: npx vite-node scripts/checkout-discount-control.ts <status|shutdown|prepare-enable|activate|create|preflight> --shop <store> [--discount-id <gid>] [--window-id <id>] [--function-id <gid>] [--percentage <p>] [--window-days <n>] [--method <title>] [--max-shipping <decimal>] [--currency <ISO>] [--apply]\n" +
   "  --discount-id is optional for status/shutdown/activate (defaults to the recorded\n" +
   "  checkoutDiscountNodeId; a supplied id must match it) and REQUIRED for prepare-enable\n" +
   "  (prepare-enable records it). create and preflight take no --discount-id.";
@@ -53,6 +56,12 @@ if (
 }
 if (cmd === "prepare-enable" && !suppliedDiscountId) {
   console.error("prepare-enable requires --discount-id <gid> (the discount it records)");
+  process.exit(2);
+}
+if (cmd === "prepare-enable" && (!method || !maxShipping || !currency)) {
+  console.error(
+    "prepare-enable requires --method <title> --max-shipping <decimal> --currency <ISO> (the pilot method approval it records)",
+  );
   process.exit(2);
 }
 if (cmd === "activate" && !expectedWindowId) {
@@ -119,6 +128,9 @@ process.exit(
     functionId,
     percentage,
     windowDays: windowDays !== undefined ? Number(windowDays) : undefined,
+    method,
+    maxShipping,
+    currency,
     control,
   }),
 );

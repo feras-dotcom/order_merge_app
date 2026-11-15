@@ -164,16 +164,30 @@ const makeDiscountAdmin = (init: {
 /** Fake setEnabled/readEnabledAt/recordDiscountId/readSettings quartet:
  *  enable stamps a fresh epoch on a false→true transition exactly like
  *  setCheckoutDiscountEnabled; nodeId mirrors checkoutDiscountNodeId. */
-const makeEpoch = (initial: Date | null, nodeId: string | null = null) => {
+/** The approval every prepare-enable call in this file passes — a plain
+ *  ground method with an $8.00 USD cap. */
+const APPROVAL = { method: "Standard", maxShippingMinor: 800, currency: "USD" };
+
+const makeEpoch = (initial: Date | null, nodeId: string | null = null, seeded = initial !== null) => {
   const state = {
     enabledAt: initial as Date | null,
     nodeId: nodeId as string | null,
+    // A prepared epoch normally carries its approval; `seeded:false`
+    // models the misconfigured shop (flag on, approval absent).
+    approval: (seeded
+      ? { method: "standard shipping", maxShippingMinor: 800, currency: "USD" }
+      : null) as { method: string; maxShippingMinor: number; currency: string } | null,
     tick: Date.parse("2026-11-15T00:00:00Z"),
   };
   return {
     state,
-    setEnabled: async (_shop: string, enabled: boolean) => {
+    setEnabled: async (
+      _shop: string,
+      enabled: boolean,
+      approval: { method: string; maxShippingMinor: number; currency: string } | null = null,
+    ) => {
       state.enabledAt = enabled ? (state.enabledAt ?? new Date(state.tick++)) : null;
+      state.approval = enabled ? approval : null;
     },
     readEnabledAt: async () => state.enabledAt,
     recordDiscountId: async (_shop: string, id: string | null) => {
@@ -185,6 +199,9 @@ const makeEpoch = (initial: Date | null, nodeId: string | null = null) => {
       checkoutDiscountEnabledAt: state.enabledAt,
       checkoutDiscountNodeId: state.nodeId,
       checkoutDiscountWindowHours: null,
+      checkoutDiscountMethod: state.approval?.method ?? null,
+      checkoutDiscountMaxShippingMinor: state.approval?.maxShippingMinor ?? null,
+      checkoutDiscountCurrency: state.approval?.currency ?? null,
     }),
   };
 };
@@ -193,6 +210,7 @@ const deps = (admin: any, epoch: ReturnType<typeof makeEpoch>) => ({
   admin,
   shop: SHOP,
   discountId: DID,
+  ...APPROVAL,
   setEnabled: epoch.setEnabled,
   readEnabledAt: epoch.readEnabledAt,
   recordDiscountId: epoch.recordDiscountId,
@@ -234,6 +252,16 @@ describe("shutdownCheckoutDiscount", () => {
     const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
     expect(r.status).toBe("EXPIRED");
     expect(epoch.state.enabledAt).toBe(null);
+  });
+
+  it("shutdown clears the method approval with the other flags", async () => {
+    const admin = makeDiscountAdmin({ status: "ACTIVE" });
+    const epoch = makeEpoch(new Date("2026-11-01T00:00:00Z"));
+    expect(epoch.state.approval).not.toBe(null); // seeded by the prepared epoch
+    const r = await shutdownCheckoutDiscount(deps(admin as any, epoch) as any);
+    expect(r.status).toBe("EXPIRED");
+    expect(epoch.state.enabledAt).toBe(null);
+    expect(epoch.state.approval).toBe(null);
   });
 
   it("a missing config metafield does not block shutdown", async () => {
@@ -396,6 +424,68 @@ describe("prepareEnable", () => {
     expect(epoch.state.nodeId).toBe(null);
   });
 
+  it.each([
+    ["missing method", { method: undefined }],
+    ["empty after normalization", { method: "   " }],
+    ["expedited lookalike (express)", { method: "Express" }],
+    ["expedited lookalike (next day)", { method: "Next Day Air" }],
+    ["expedited lookalike (2-day)", { method: "2 Day Shipping" }],
+    ["missing currency", { currency: undefined }],
+    ["lowercase currency", { currency: "usd" }],
+    ["unsupported currency", { currency: "XXX" }],
+    ["missing cap", { maxShippingMinor: undefined }],
+    ["zero cap", { maxShippingMinor: 0 }],
+    ["negative cap", { maxShippingMinor: -800 }],
+    ["fractional cap", { maxShippingMinor: 8.5 }],
+    ["absurd cap", { maxShippingMinor: 3_000_000_000 }],
+  ])("refuses BEFORE any write: %s", async (_name, bad) => {
+    const admin = makeDiscountAdmin({ status: "EXPIRED" });
+    const epoch = makeEpoch(null);
+    await expect(
+      prepareEnable({ ...deps(admin as any, epoch), ...bad } as any),
+    ).rejects.toThrow(DiscountConfigError);
+    // Nothing was enabled, recorded, or even read — validation precedes
+    // the discount read.
+    expect(epoch.state.enabledAt).toBe(null);
+    expect(epoch.state.approval).toBe(null);
+    expect(epoch.state.nodeId).toBe(null);
+    expect(admin.state.updateCalls).toBe(0);
+    expect(admin.state.calls).toBe(0); // no Admin call was made at all
+  });
+
+  it("stores the approval atomically with the flag — normalized method, integer minor, ISO currency", async () => {
+    const admin = makeDiscountAdmin({ status: "EXPIRED" });
+    const epoch = makeEpoch(null);
+    await prepareEnable({
+      ...deps(admin as any, epoch),
+      method: "  STANDARD   Shipping ",
+      maxShippingMinor: 800,
+      currency: "USD",
+    } as any);
+    expect(epoch.state.approval).toEqual({
+      method: "standard shipping",
+      maxShippingMinor: 800,
+      currency: "USD",
+    });
+  });
+
+  it("a second prepare-enable re-approves (the old bound is replaced)", async () => {
+    const admin = makeDiscountAdmin({ status: "EXPIRED" });
+    const epoch = makeEpoch(null);
+    await prepareEnable(deps(admin as any, epoch) as any);
+    await prepareEnable({
+      ...deps(admin as any, epoch),
+      method: "Economy",
+      maxShippingMinor: 400,
+      currency: "USD",
+    } as any);
+    expect(epoch.state.approval).toEqual({
+      method: "economy",
+      maxShippingMinor: 400,
+      currency: "USD",
+    });
+  });
+
   it("derives w<epochMs>, writes it into the config, records the node id and leaves the discount inactive", async () => {
     const admin = makeDiscountAdmin({ status: "EXPIRED" });
     const epoch = makeEpoch(null);
@@ -420,6 +510,7 @@ describe("activateCheckoutDiscount", () => {
       enabledAt: NOW,
       mergeWindowHours: 24,
       windowId,
+      approved: { method: "standard shipping", maxMinor: 800n, currency: "USD" },
     }) as const;
   const actDeps = (admin: any, epoch: ReturnType<typeof makeEpoch>, over: Record<string, unknown> = {}) => ({
     ...deps(admin, epoch),
@@ -432,6 +523,17 @@ describe("activateCheckoutDiscount", () => {
   const ready = (config: Record<string, unknown> = {}, nodeId: string | null = DID) => ({
     admin: makeDiscountAdmin({ status: "EXPIRED", config: baseConfig({ windowId: "w1", ...config }) }),
     epoch: makeEpoch(new Date("2026-11-15T00:00:00Z"), nodeId),
+  });
+
+  it("refuses when the shop settings carry no valid approval", async () => {
+    // Flag on + node id recorded but the approval columns are NULL — an
+    // enable that never ran the new prepare-enable.
+    const { admin, epoch } = ready();
+    epoch.state.approval = null;
+    await expect(activateCheckoutDiscount(actDeps(admin, epoch) as any)).rejects.toThrow(
+      /method approval/,
+    );
+    expect(admin.state.activateCalls).toBe(0);
   });
 
   it("refuses when no discount node id is recorded — run prepare-enable first", async () => {
@@ -618,6 +720,9 @@ const settingsFor = (enabledAt: Date | null): MergeSettings => ({
   checkoutDiscountEnabledAt: enabledAt,
   checkoutDiscountWindowHours: enabledAt !== null ? 72 : null,
   mergeWindowHours: 72,
+  checkoutDiscountMethod: enabledAt !== null ? "standard shipping" : null,
+  checkoutDiscountMaxShippingMinor: enabledAt !== null ? 800 : null,
+  checkoutDiscountCurrency: enabledAt !== null ? "USD" : null,
 });
 const gateDeps = (enabledAt: Date | null): CheckoutGateDeps => ({
   env: (n) => (n === "MERGESHIP_CHECKOUT_DISCOUNT" ? "enabled" : undefined),

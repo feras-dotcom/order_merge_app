@@ -12,6 +12,7 @@
 import { isOnboardingComplete } from "../onboarding";
 import { getSettings, type MergeSettings } from "../settings.server";
 import { prismaOperationStore } from "../operation-store.server";
+import { getCurrencyPrecision } from "../money";
 import { MIN_CHECKOUT_WINDOW_HOURS, checkoutDiscountWindowId } from "./config";
 
 export interface CheckoutGateDeps {
@@ -24,8 +25,33 @@ export interface CheckoutGateDeps {
 }
 
 export type CheckoutGateResult =
-  | { on: true; enabledAt: Date; mergeWindowHours: number; windowId: string }
+  | {
+      on: true;
+      enabledAt: Date;
+      mergeWindowHours: number;
+      windowId: string;
+      /** Pilot method approval, from the settings row the gate already
+       *  read — classify and consumption enforce this bound. */
+      approved: { method: string; maxMinor: bigint; currency: string };
+    }
   | { on: false; reason: string; unknown?: true };
+
+/** The operator-approved pilot bound on the settings row, or null when any
+ *  part is absent or invalid: normalized method title, maximum original
+ *  shipping cost in integer minor units, and a supported ISO currency.
+ *  Shared by the gate (lever), the shutdown enforcer (same predicate) and
+ *  preflight — an enabled flag without a valid approval fails closed. */
+export function methodApprovalFromSettings(
+  settings: MergeSettings,
+): { method: string; maxMinor: bigint; currency: string } | null {
+  const method = settings.checkoutDiscountMethod;
+  const maxMinor = settings.checkoutDiscountMaxShippingMinor;
+  const currency = settings.checkoutDiscountCurrency;
+  if (typeof method !== "string" || method === "") return null;
+  if (typeof maxMinor !== "number" || !Number.isSafeInteger(maxMinor) || maxMinor <= 0) return null;
+  if (typeof currency !== "string" || getCurrencyPrecision(currency) === null) return null;
+  return { method, maxMinor: BigInt(maxMinor), currency };
+}
 
 const defaultDeps = (): CheckoutGateDeps => ({
   env: (n) => process.env[n],
@@ -56,6 +82,10 @@ export function shopLevelGateOff(settings: MergeSettings): string | null {
     if (settings.mergeWindowHours < settings.checkoutDiscountWindowHours) {
       return "window-shortened";
     }
+    // Pilot method approval: enabled without a valid method/cap/currency is
+    // a misconfiguration — fail closed and let the shutdown enforcer
+    // deactivate (same handling as window-unstamped).
+    if (methodApprovalFromSettings(settings) === null) return "method-unconfigured";
   }
   return null;
 }
@@ -90,6 +120,9 @@ export async function checkoutDiscountGate(
       enabledAt,
       mergeWindowHours: settings.mergeWindowHours,
       windowId: checkoutDiscountWindowId(enabledAt),
+      // Non-null: shopLevelGateOff above already refused a missing or
+      // invalid approval while the flag is on.
+      approved: methodApprovalFromSettings(settings)!,
     };
   } catch {
     return { on: false, reason: "read-error", unknown: true };

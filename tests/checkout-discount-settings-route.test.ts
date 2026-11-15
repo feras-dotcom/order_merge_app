@@ -49,7 +49,11 @@ vi.mock("../app/lib/settings.server", async (importOriginal) => {
       env.settings = { ...env.settings, ...update };
       return env.settings;
     },
-    setCheckoutDiscountEnabled: async (_shop: string, enabled: boolean) => {
+    setCheckoutDiscountEnabled: async (
+      _shop: string,
+      enabled: boolean,
+      approval: { method: string; maxShippingMinor: number; currency: string } | null = null,
+    ) => {
       env.settings = {
         ...env.settings,
         checkoutDiscountEnabled: enabled,
@@ -61,6 +65,11 @@ vi.mock("../app/lib/settings.server", async (importOriginal) => {
               ? env.settings.checkoutDiscountWindowHours
               : env.settings.mergeWindowHours)
           : null,
+        // Mirror the real writer: each enable write replaces the approval
+        // (a fresh prepare-enable always re-approves); disable clears.
+        checkoutDiscountMethod: enabled ? (approval?.method ?? null) : null,
+        checkoutDiscountMaxShippingMinor: enabled ? (approval?.maxShippingMinor ?? null) : null,
+        checkoutDiscountCurrency: enabled ? (approval?.currency ?? null) : null,
       };
       return env.settings.checkoutDiscountEnabledAt;
     },
@@ -262,6 +271,9 @@ beforeEach(() => {
     checkoutDiscountEnabledAt: EPOCH1,
     checkoutDiscountNodeId: DID,
     checkoutDiscountWindowHours: 48,
+    checkoutDiscountMethod: "standard shipping",
+    checkoutDiscountMaxShippingMinor: 800,
+    checkoutDiscountCurrency: "USD",
   };
   env.calls = [];
   env.raiseError = null;

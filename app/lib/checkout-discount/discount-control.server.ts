@@ -19,9 +19,16 @@ import {
   getSettings,
   setCheckoutDiscountEnabled,
   setCheckoutDiscountNodeId,
+  type CheckoutMethodApproval,
   type MergeSettings,
 } from "../settings.server";
-import { checkoutDiscountGate, type CheckoutGateResult } from "./gate.server";
+import {
+  checkoutDiscountGate,
+  methodApprovalFromSettings,
+  type CheckoutGateResult,
+} from "./gate.server";
+import { normMethod } from "./dest-key";
+import { getCurrencyPrecision } from "../money";
 import { CHECKOUT_DISCOUNT_MESSAGE, checkoutDiscountWindowId } from "./config";
 
 export class ShutdownNotVerifiedError extends Error {}
@@ -180,6 +187,55 @@ export interface CheckoutDiscountState {
 const NO_TZ_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
 const DECIMAL = /^[0-9]+(\.[0-9]+)?$/;
 
+/** Safety net against an operator typo: the REAL restriction is exact
+ *  normalized-title matching in classify, but a method whose title even
+ *  looks expedited is never approvable for the pilot. */
+const EXPEDITED_METHOD = /\b(express|expedit\w*|overnight|rush|priority|next day|same day|two day|2 day|air)\b/;
+
+const MAX_APPROVED_SHIPPING_MINOR = 2_000_000_000;
+
+/** Validate the pilot method approval for prepare-enable: every value is
+ *  required and is refused BEFORE any write. Returns the NORMALIZED triple
+ *  stored on Settings (method via normMethod — the same normalization
+ *  classify and the Function apply, so `Standard ` and `STANDARD` are the
+ *  same method). */
+export function validateMethodApproval(input: {
+  method: unknown;
+  maxShippingMinor: unknown;
+  currency: unknown;
+}): CheckoutMethodApproval {
+  const normalized = normMethod(
+    typeof input.method === "string" ? input.method : null,
+  );
+  if (!normalized) {
+    throw new DiscountConfigError("method is required — pass the exact shipping method title to approve");
+  }
+  if (EXPEDITED_METHOD.test(normalized)) {
+    throw new DiscountConfigError(
+      `method "${normalized}" looks expedited — only a plain ground/economy method is approvable for the pilot`,
+    );
+  }
+  if (
+    typeof input.currency !== "string" ||
+    !/^[A-Z]{3}$/.test(input.currency) ||
+    getCurrencyPrecision(input.currency) === null
+  ) {
+    throw new DiscountConfigError("currency must be a supported ISO code (3 uppercase letters)");
+  }
+  const max = input.maxShippingMinor;
+  if (
+    typeof max !== "number" ||
+    !Number.isSafeInteger(max) ||
+    max <= 0 ||
+    max > MAX_APPROVED_SHIPPING_MINOR
+  ) {
+    throw new DiscountConfigError(
+      `max-shipping must be a positive integer minor-unit amount (<= ${MAX_APPROVED_SHIPPING_MINOR})`,
+    );
+  }
+  return { method: normalized, maxShippingMinor: max, currency: input.currency };
+}
+
 /** Config validation shared by every control path (E1): percentage is a
  *  STRING decimal ("100.0" — a numeric 100 is silently ignored by the
  *  Function), windowStart/windowEnd are DateTimeWithoutTimezone values
@@ -272,14 +328,20 @@ export interface CheckoutControlDeps {
   admin: AdminClient;
   shop: string;
   discountId: string;
-  setEnabled?: (shop: string, enabled: boolean) => Promise<void>;
+  setEnabled?: (shop: string, enabled: boolean, approval?: CheckoutMethodApproval | null) => Promise<void>;
   gate?: (shop: string) => Promise<CheckoutGateResult>;
 }
 
 const doSetEnabled = async (
   deps: Pick<CheckoutControlDeps, "shop" | "setEnabled">,
   enabled: boolean,
-) => (deps.setEnabled ?? setCheckoutDiscountEnabled)(deps.shop, enabled);
+  approval?: CheckoutMethodApproval | null,
+) =>
+  (deps.setEnabled ?? ((s, e, a) => setCheckoutDiscountEnabled(s, e, undefined, a)))(
+    deps.shop,
+    enabled,
+    approval,
+  );
 
 /** Shutdown order (E): NEVER depends on the config metafield — it may be
  *  missing or malformed and must not block stopping checkout discounting.
@@ -343,16 +405,26 @@ export async function shutdownCheckoutDiscount(
 
 /** Stage the discount config for a fresh enable (E): requires the discount
  *  to be currently INACTIVE, flips the app flag (stamping a fresh enable
- *  epoch), derives `windowId = w<epochMs>` from the read-back epoch, merges
- *  it into the discount's existing config via discountAutomaticAppUpdate
- *  and re-reads it. The discount is LEFT INACTIVE; activate is a separate
- *  step. */
+ *  epoch AND the pilot method approval atomically in the same write —
+ *  a fresh prepare-enable always re-approves), derives `windowId =
+ *  w<epochMs>` from the read-back epoch, merges it into the discount's
+ *  existing config via discountAutomaticAppUpdate and re-reads it. The
+ *  discount is LEFT INACTIVE; activate is a separate step. */
 export async function prepareEnable(
   deps: CheckoutControlDeps & {
+    method: unknown;
+    maxShippingMinor: unknown;
+    currency: unknown;
     readEnabledAt?: (shop: string) => Promise<Date | null>;
     recordDiscountId?: (shop: string, id: string | null) => Promise<void>;
   },
 ): Promise<{ windowId: string; enabledAt: Date }> {
+  // Approval validation BEFORE any write — a refusal mutates nothing.
+  const approval = validateMethodApproval({
+    method: deps.method,
+    maxShippingMinor: deps.maxShippingMinor,
+    currency: deps.currency,
+  });
   const current = await readCheckoutDiscount(deps.admin, deps.discountId);
   if (!current) throw new DiscountStateError("checkout discount not found");
   if (current.status === "ACTIVE" || current.status === "SCHEDULED") {
@@ -380,7 +452,7 @@ export async function prepareEnable(
       "discount config message does not match CHECKOUT_DISCOUNT_MESSAGE — refusing to enable",
     );
   }
-  await doSetEnabled(deps, true);
+  await doSetEnabled(deps, true, approval);
   const readEpoch =
     deps.readEnabledAt ??
     (async (shop: string) => (await getSettings(shop)).checkoutDiscountEnabledAt);
@@ -488,6 +560,11 @@ export async function activateCheckoutDiscount(
   if (settings.checkoutDiscountNodeId !== deps.discountId) {
     throw new DiscountStateError(
       `discount id ${deps.discountId} does not match the recorded ${settings.checkoutDiscountNodeId} — refusing to activate an unrelated discount`,
+    );
+  }
+  if (methodApprovalFromSettings(settings) === null) {
+    throw new DiscountStateError(
+      "no valid method approval on the shop settings — run prepare-enable first",
     );
   }
   const gate = await (deps.gate ?? ((s: string) => checkoutDiscountGate(s)))(deps.shop);

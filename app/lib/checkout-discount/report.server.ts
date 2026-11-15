@@ -7,11 +7,12 @@
 //
 // Overdraw — SHARED WITH THE MONITOR: the processor settles a grant it
 // cannot reconcile as OVERDRAW (processor.server.ts settle calls with
-// kind "OVERDRAW"): outcome CONSUMED_NO_RECORD is definitive overdraw;
-// outcome CUSTOMER_GONE is shared between the ISSUE refuse ("order has no
-// customer") and the CONSUME overdraw ("consumed order has no customer")
-// paths, so only the consumed reason counts — matched on the exact
-// lastReason string the processor writes.
+// kind "OVERDRAW"): outcomes CONSUMED_NO_RECORD and CONSUMED_OVER_CAP (the
+// consumed grant exceeded the approved cap — the record is still spent)
+// are definitive overdraw; outcome CUSTOMER_GONE is shared between the
+// ISSUE refuse ("order has no customer") and the CONSUME overdraw
+// ("consumed order has no customer") paths, so only the consumed reason
+// counts — matched on the exact lastReason string the processor writes.
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { gqlData, type AdminClient } from "../graphql.server";
@@ -22,7 +23,7 @@ import { CHECKOUT_DISCOUNT_MESSAGE } from "./config";
 /** Overdraw predicate shared by report + monitor (one implementation —
  *  see the header note). `since` bounds to rows updated in the window. */
 export const OVERDRAW_WHERE = Prisma.sql`
-  ("outcome" = 'CONSUMED_NO_RECORD'
+  ("outcome" IN ('CONSUMED_NO_RECORD', 'CONSUMED_OVER_CAP')
    OR ("outcome" = 'CUSTOMER_GONE' AND "lastReason" = 'consumed order has no customer'))`;
 
 export async function countOverdraw(

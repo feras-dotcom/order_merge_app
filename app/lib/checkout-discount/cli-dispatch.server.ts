@@ -5,6 +5,7 @@
 // shutdown/prepare-enable/activate fall through and execute).
 
 import type { AdminClient } from "../graphql.server";
+import { parseShopMoney } from "../money";
 import type {
   activateCheckoutDiscount,
   createCheckoutDiscount,
@@ -36,6 +37,12 @@ export interface DispatchDeps {
   functionId?: string;
   percentage?: string;
   windowDays?: number;
+  /** prepare-enable approval: exact method title, decimal max shipping
+   *  amount and ISO currency — converted to minor units here, validated
+   *  (and refused before any write) inside prepareEnable. */
+  method?: string;
+  maxShipping?: string;
+  currency?: string;
   control: CheckoutDiscountControl;
   log?: (line: string) => void;
   errorLog?: (line: string) => void;
@@ -110,7 +117,26 @@ export async function runCheckoutDiscountCommand(deps: DispatchDeps): Promise<nu
       const r = await control.shutdownCheckoutDiscount({ admin, shop, discountId: discountId! });
       log(JSON.stringify({ action: "shutdown", ...r }));
     } else if (cmd === "prepare-enable") {
-      const r = await control.prepareEnable({ admin, shop, discountId: discountId! });
+      // Decimal → minor units with the approved currency's precision; an
+      // overprecise / non-numeric / out-of-range flag dies here, before the
+      // mutation call, with the standard error line.
+      const maxShipping = parseShopMoney({
+        amount: deps.maxShipping,
+        currencyCode: deps.currency,
+      });
+      if (!maxShipping) {
+        throw new Error(
+          `invalid --max-shipping ${deps.maxShipping ?? "<missing>"} for --currency ${deps.currency ?? "<missing>"}`,
+        );
+      }
+      const r = await control.prepareEnable({
+        admin,
+        shop,
+        discountId: discountId!,
+        method: deps.method,
+        maxShippingMinor: Number(maxShipping.minorUnits),
+        currency: deps.currency,
+      });
       log(
         JSON.stringify({
           action: "prepare-enable",

@@ -92,8 +92,12 @@ describe("runCheckoutDiscountCommand --apply", () => {
       expect(m).not.toHaveBeenCalled();
   });
 
-  it("prepare-enable runs once with admin/shop/discountId", async () => {
-    const { deps, control } = makeDeps();
+  it("prepare-enable runs once with admin/shop/discountId + the approval converted to minor units", async () => {
+    const { deps, control } = makeDeps({
+      method: "Standard",
+      maxShipping: "8.00",
+      currency: "USD",
+    });
     const code = await runCheckoutDiscountCommand({ ...deps, cmd: "prepare-enable", apply: true });
     expect(code).toBe(0);
     expect(control.prepareEnable).toHaveBeenCalledTimes(1);
@@ -101,7 +105,22 @@ describe("runCheckoutDiscountCommand --apply", () => {
       admin: deps.admin,
       shop: deps.shop,
       discountId: deps.discountId,
+      method: "Standard",
+      maxShippingMinor: 800,
+      currency: "USD",
     });
+  });
+
+  it("prepare-enable with an unconvertible --max-shipping exits 1 and mutates nothing", async () => {
+    const { deps, control, errorLog } = makeDeps({
+      method: "Standard",
+      maxShipping: "8.001",
+      currency: "USD",
+    });
+    const code = await runCheckoutDiscountCommand({ ...deps, cmd: "prepare-enable", apply: true });
+    expect(code).toBe(1);
+    expect(errorLog.mock.calls[0][0]).toMatch(/^error: /);
+    expect(control.prepareEnable).not.toHaveBeenCalled();
   });
 
   it("activate runs once with the expectedWindowId", async () => {
