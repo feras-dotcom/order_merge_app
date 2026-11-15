@@ -214,6 +214,28 @@ export function checkoutWorkStoreContract(make: () => { store: CheckoutWorkStore
       expect(await store.reopenOutstanding({ olderThanMs: 600_000, maxAgeMs: 8 * 24 * 3600_000, limit: 50, deadlineMs: DEADLINE })).toBe(0);
     });
 
+    it("markConsumedRecord: first value wins, lease-fenced, never cleared", async () => {
+      const { store } = make();
+      const d = await store.upsertDirty(SHOP, OID, "tok1", TTL, DEADLINE);
+      expect(await store.markConsumedRecord(d.item.id, "tok1", "1001")).toBe("1001");
+      expect((await store.find(SHOP, OID))!.consumedRecordId).toBe("1001");
+      // A second call never overwrites — the caller settles against the
+      // returned first value.
+      expect(await store.markConsumedRecord(d.item.id, "tok1", "3003")).toBe("1001");
+      // Lease-fenced like renew().
+      await expect(store.markConsumedRecord(d.item.id, "tok-wrong", "9999")).rejects.toThrow(
+        OwnershipLostError,
+      );
+      // Nothing clears it: touchExisting, a fresh dirty mark, complete.
+      await store.touchExisting(SHOP, OID, "tok2", TTL, DEADLINE);
+      expect((await store.find(SHOP, OID))!.consumedRecordId).toBe("1001");
+      await store.upsertDirty(SHOP, OID, "tok3", TTL, DEADLINE);
+      expect((await store.find(SHOP, OID))!.consumedRecordId).toBe("1001");
+      const live = (await store.find(SHOP, OID))!;
+      await store.complete(live.id, live.leaseToken!, live.gen, "CONSUMED", "ok");
+      expect((await store.find(SHOP, OID))!.consumedRecordId).toBe("1001");
+    });
+
     it("reopenOutstanding honours the limit and a second call takes the rest", async () => {
       const { store, setClock } = make();
       const t0 = Date.now();

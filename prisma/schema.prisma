@@ -65,6 +65,15 @@ model Settings {
   // Writable ONLY via setCheckoutDiscountEnabled /
   // raiseCheckoutDiscountWindowStamp.
   checkoutDiscountWindowHours Int?
+  // Pilot method approval (operator-set, no merchant UI): the ONLY
+  // normalized shipping-method title a record may grant, the maximum
+  // original shipping cost it may discount (integer minor units) and its
+  // currency. Written atomically with the enable epoch by
+  // setCheckoutDiscountEnabled(true, approval) and cleared on disable —
+  // a fresh prepare-enable always re-approves.
+  checkoutDiscountMethod           String?
+  checkoutDiscountMaxShippingMinor Int?
+  checkoutDiscountCurrency         String?
 }
 
 // The durable work item for an ORDERS_CREATE event: PENDING until a terminal
@@ -122,6 +131,11 @@ model CheckoutEligibilityWork {
   // document's tombstone (which the record cap can evict and expiry prunes),
   // so a replay/recheck can never issue a second grant for the order.
   grantConsumedAt DateTime?
+  // On the CONSUMER order's row: which eligibility record granted its
+  // checkout. Written before the document write, first value wins, never
+  // cleared — a replay/recheck must settle against exactly that record
+  // instead of selecting (and consuming) another matching one.
+  consumedRecordId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @default(now()) @updatedAt
 

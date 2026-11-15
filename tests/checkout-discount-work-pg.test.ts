@@ -307,6 +307,33 @@ describe.skipIf(!URL)("checkout work store (real Postgres)", () => {
     expect((await store.find(SHOP, oid(52)))!.grantConsumedAt).not.toBe(null);
   });
 
+  it("markConsumedRecord: first value wins, lease-fenced, never cleared", async () => {
+    const d = await store.upsertDirty(SHOP, oid(60), "tok-c", TTL, CHECKOUT_DEADLINE_MS);
+    // Persists the id and returns it.
+    expect(await store.markConsumedRecord(d.item.id, "tok-c", "1001")).toBe("1001");
+    expect((await store.find(SHOP, oid(60)))!.consumedRecordId).toBe("1001");
+    // A second call does not overwrite — the FIRST value wins and is
+    // returned so the caller settles against it.
+    expect(await store.markConsumedRecord(d.item.id, "tok-c", "3003")).toBe("1001");
+    // A wrong lease token loses ownership — no silent write.
+    await expect(store.markConsumedRecord(d.item.id, "tok-wrong", "9999")).rejects.toThrow(
+      OwnershipLostError,
+    );
+    // Nothing clears it: touchExisting, a fresh upsertDirty, complete.
+    await store.touchExisting(SHOP, oid(60), "tok-c2", TTL, CHECKOUT_DEADLINE_MS);
+    expect((await store.find(SHOP, oid(60)))!.consumedRecordId).toBe("1001");
+    await store.upsertDirty(SHOP, oid(60), "tok-c3", TTL, CHECKOUT_DEADLINE_MS);
+    expect((await store.find(SHOP, oid(60)))!.consumedRecordId).toBe("1001");
+    const live = (await store.find(SHOP, oid(60)))!;
+    await store.complete(live.id, live.leaseToken!, live.gen, "CONSUMED", "ok");
+    expect((await store.find(SHOP, oid(60)))!.consumedRecordId).toBe("1001");
+    // An expired lease is not owned.
+    await db.$executeRaw`UPDATE "CheckoutEligibilityWork" SET "leasedUntil" = ${dbWallPlus(-1)} WHERE id = ${d.item.id}`;
+    await expect(
+      store.markConsumedRecord(d.item.id, "tok-c", "7777"),
+    ).rejects.toThrow(OwnershipLostError);
+  });
+
   it("reopenOutstanding is safe under concurrent calls (SKIP LOCKED)", async () => {
     for (let n = 40; n < 46; n++) {
       const r = await store.upsertDirty(SHOP, oid(n), "tok1", TTL, CHECKOUT_DEADLINE_MS);

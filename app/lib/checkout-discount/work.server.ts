@@ -32,6 +32,7 @@ export type CheckoutWorkOutcome =
   | "REVOKED"
   | "CONSUMED"
   | "CONSUMED_NO_RECORD"
+  | "CONSUMED_OVER_CAP"
   | "GRANT_CONSUMED"
   | "CAPACITY"
   | "ORDER_GONE"
@@ -61,6 +62,11 @@ export interface CheckoutWorkItem {
    *  tombstone it can never be evicted or pruned, so no replay, recheck or
    *  window change can issue a second grant for the order. */
   grantConsumedAt: Date | null;
+  /** On a CONSUMER order's row: the eligibility record id that granted its
+   *  checkout, persisted before the metafield document write. First value
+   *  wins and nothing clears it — a replay or recheck settles against that
+   *  record instead of selecting (and consuming) a second matching one. */
+  consumedRecordId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -108,6 +114,13 @@ export interface CheckoutWorkStore {
    *  only gains grantConsumedAt (COALESCE keeps the first timestamp) — its
    *  lease, status, gen, attempts and outcome are never touched. */
   markGrantConsumed(shop: string, orderId: string): Promise<void>;
+  /** Durable "which record" mark on the CONSUMER order's own row, written
+   *  BEFORE the metafield document write. First value wins — returns the id
+   *  now stored on the row (a pre-existing different id wins, so callers
+   *  must settle against the RETURNED id). Lease-fenced like renew():
+   *  OwnershipLostError when the caller no longer owns the row. Never
+   *  cleared by touchExisting/upsertDirty/reopen/complete. */
+  markConsumedRecord(id: string, token: string, recordId: string): Promise<string>;
   /** Missed-webhook reconciliation: re-opens recently PROJECTED rows as
    *  PENDING (due now, attempts 0, fresh deadline, lease cleared) so the
    *  processor re-reads the order's live state and applies the same
@@ -240,6 +253,21 @@ export function prismaCheckoutWorkStore(db: PrismaClient = defaultDb): CheckoutW
         ON CONFLICT ("shop", "orderId") DO UPDATE SET
           "grantConsumedAt" =
             COALESCE("CheckoutEligibilityWork"."grantConsumedAt", ${DB_WALL})`;
+    },
+    async markConsumedRecord(id, token, recordId) {
+      return withOwnershipTx(db, async (tx) => {
+        await lockRow(tx, id);
+        const rows = await tx.$queryRaw<{ consumedRecordId: string | null }[]>`
+          UPDATE "CheckoutEligibilityWork"
+          SET "consumedRecordId" = COALESCE("consumedRecordId", ${recordId}),
+              "updatedAt" = ${DB_WALL}
+          WHERE "id" = ${id} AND "leaseToken" = ${token}
+            AND "leasedUntil" >= ${DB_WALL} AND "status" = 'PENDING'
+          RETURNING "consumedRecordId"`;
+        if (rows.length === 0)
+          throw new OwnershipLostError(`Checkout work ${id} is owned by another worker.`);
+        return rows[0].consumedRecordId!;
+      });
     },
     async reopenOutstanding({ olderThanMs, maxAgeMs, limit, deadlineMs }) {
       return db.$executeRaw`
@@ -411,6 +439,7 @@ export function memoryCheckoutWorkStore(clock: () => number): CheckoutWorkStore 
           deadlineAt: new Date(clock() + deadlineMs),
           doneAt: null,
           grantConsumedAt: null,
+          consumedRecordId: null,
           createdAt: now(),
           updatedAt: now(),
         };
@@ -473,6 +502,7 @@ export function memoryCheckoutWorkStore(clock: () => number): CheckoutWorkStore 
           deadlineAt: null,
           doneAt: now(),
           grantConsumedAt: now(),
+          consumedRecordId: null,
           createdAt: now(),
           updatedAt: now(),
         });
@@ -481,6 +511,16 @@ export function memoryCheckoutWorkStore(clock: () => number): CheckoutWorkStore 
       // Conflict branch: grantConsumedAt only — first timestamp wins, the
       // lease/status/gen/attempts/outcome of an active row stay untouched.
       existing.grantConsumedAt ??= now();
+    },
+    async markConsumedRecord(id, token, recordId) {
+      const r = findById(id);
+      if (!owns(r, id, token)) {
+        throw new OwnershipLostError(`Checkout work ${id} is owned by another worker.`);
+      }
+      // First value wins; the caller settles against the returned id.
+      r.consumedRecordId ??= recordId;
+      r.updatedAt = now();
+      return r.consumedRecordId;
     },
     async reopenOutstanding({ olderThanMs, maxAgeMs, limit, deadlineMs }) {
       const dueRows = [...rows.values()]
