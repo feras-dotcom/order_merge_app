@@ -108,6 +108,7 @@ export interface OptionVerdict {
 }
 
 const PRICE_RE = /\$?\s*([\d,]+\.\d{2})/;
+const PRICE_RE_G = /\$?\s*([\d,]+\.\d{2})/g;
 // Delivery-estimate lines ("Fri, Nov 20–Tue, Nov 24", "3 business days")
 // are skipped when pairing a price line back to its option title.
 const ESTIMATE_RE =
@@ -121,18 +122,37 @@ const PRICE_LABEL_RE = /^(original price|discounted price|free)$/i;
 
 /** Parse scraped shipping-block lines into {title, amountMinor, free}.
  *  Handles "Standard $8.00", the three-line layout (title / estimate /
- *  "$8.00"), and the discounted layout: "Original price $8.00 Discounted
- *  price FREE" on one line, or split as title / estimate / "Original price
- *  $8.00" / "Discounted price" / "FREE". A struck-through "Original price"
- *  is never an option's amount — the "Discounted price" value (FREE or
- *  0.00 => free, amountMinor 0) is. Each priced line is paired with the
- *  nearest preceding line that is neither a price, an estimate nor a
- *  price label. */
+ *  "$8.00"), and the discounted layouts:
+ *   - "Original price $8.00 Discounted price FREE" (one line or split),
+ *   - innerText's label-free shape: the struck original and the discounted
+ *     value on CONSECUTIVE bare lines ("$8.00" then "FREE" / "$8.00" then
+ *     "$4.00") or in one bare line ("$8.00 FREE" / "$8.00 $4.00") — the
+ *     LAST bare value is the option's real amount.
+ *  A struck-through original is never an option's amount (FREE or 0.00 =>
+ *  free, amountMinor 0). Each priced line is paired with the nearest
+ *  preceding line that is neither a price, an estimate nor a price label. */
 export function extractOptions(shippingLines: string[]): OptionVerdict[] {
   const hasPrice = (l: string) => PRICE_RE.test(l) || /free/i.test(l);
   const isMarker = (l: string) => PRICE_LABEL_RE.test(l.trim());
-  const minorOf = (m: RegExpExecArray | null) =>
+  const bareTitle = (l: string) =>
+    l
+      .replace(PRICE_RE_G, "")
+      .replace(/free/gi, "")
+      .replace(/[·\-–—]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  // A line carrying only prices/free markers (no title) — e.g. "$8.00",
+  // "FREE", "$8.00 FREE". The label words make it an explicit-label line.
+  const isBarePrice = (l: string) =>
+    hasPrice(l) && !ORIGINAL_RE.test(l) && !DISCOUNTED_RE.test(l) && bareTitle(l) === "";
+  const minorOf = (m: RegExpMatchArray | null) =>
     m ? Math.round(parseFloat(m[1].replace(/,/g, "")) * 100) : null;
+  const lastToken = (l: string) => {
+    const all = [...l.matchAll(PRICE_RE_G)];
+    return all.length ? all[all.length - 1] : null;
+  };
+  const isFree = (l: string, last: RegExpMatchArray | null) =>
+    /free/i.test(l) || (last !== null && parseFloat(last[1].replace(/,/g, "")) === 0);
   const titleBefore = (i: number): string => {
     for (let j = i - 1; j >= 0; j--) {
       const cand = shippingLines[j];
@@ -150,27 +170,29 @@ export function extractOptions(shippingLines: string[]): OptionVerdict[] {
       // next ("…Discounted price FREE" | "Discounted price\nFREE").
       const tail = line.replace(/^.*?discounted price/i, "").trim();
       const value = tail || shippingLines[i + 1] || "";
-      const minor = minorOf(PRICE_RE.exec(value));
-      const free = /free/i.test(value) || minor === 0;
-      out.push({ title: titleBefore(i), amountMinor: free ? 0 : minor, free });
+      const last = lastToken(value);
+      const free = isFree(value, last);
+      out.push({ title: titleBefore(i), amountMinor: free ? 0 : minorOf(last), free });
       continue;
     }
     // A bare "Original price $8.00" is a struck-through original — the real
     // amount comes from its "Discounted price" companion line.
     if (ORIGINAL_RE.test(line)) continue;
-    const amountMatch = PRICE_RE.exec(line);
-    const inlineTitle = line
-      .replace(PRICE_RE, "")
-      .replace(/free/i, "")
-      .replace(/[·\-–—]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    const free =
-      /free/i.test(line) ||
-      (amountMatch !== null && parseFloat(amountMatch[1].replace(/,/g, "")) === 0);
+    // Struck original + discounted value on consecutive bare lines
+    // ("$8.00" / "FREE") — merge the run; its last line holds the amount.
+    let valueLine = line;
+    if (isBarePrice(line)) {
+      while (i + 1 < shippingLines.length && isBarePrice(shippingLines[i + 1])) {
+        i += 1;
+        valueLine = shippingLines[i];
+      }
+    }
+    const last = lastToken(valueLine);
+    const free = isFree(valueLine, last);
+    const inlineTitle = bareTitle(line);
     out.push({
       title: inlineTitle || titleBefore(i),
-      amountMinor: minorOf(amountMatch) ?? (free ? 0 : null),
+      amountMinor: free ? 0 : minorOf(last),
       free,
     });
   }
@@ -513,6 +535,7 @@ export async function runSmoke(deps: SmokeDriverDeps): Promise<SmokeOutcome> {
         out.loginRequired = true;
         throw new LoginRequiredError();
       }
+      let lastLines = scraped.optionLines;
       let observed = observeScrape(scraped, { methodTitle, expressBaselineMinor });
       // S2 can race the Function's propagation to the delivery UI — rescore
       // a few times before failing (the scrape is read-only).
@@ -523,7 +546,9 @@ export async function runSmoke(deps: SmokeDriverDeps): Promise<SmokeOutcome> {
           r++
         ) {
           await sleep(4000);
-          observed = observeScrape(await scrapeCheckout(page), { methodTitle, expressBaselineMinor });
+          const re = await scrapeCheckout(page);
+          lastLines = re.optionLines;
+          observed = observeScrape(re, { methodTitle, expressBaselineMinor });
         }
       }
       return {
@@ -534,6 +559,11 @@ export async function runSmoke(deps: SmokeDriverDeps): Promise<SmokeOutcome> {
           standardFree: observed.standardFree,
           expressAmountMinor: observed.expressAmountMinor,
           messageShown: observed.messageShown,
+          // S2 diagnostics: the raw shipping-block lines (titles/prices only)
+          // so a failed verdict shows exactly what innerText yielded.
+          ...(name === "S2-granted"
+            ? { optionLines: lastLines.filter((l) => typeof l === "string").slice(0, 30) }
+            : {}),
         },
       };
     } finally {

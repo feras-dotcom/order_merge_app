@@ -397,3 +397,58 @@ describe("browser shipping-panel helpers", () => {
     expect(clicks).toContain("check-1-true");
   });
 });
+
+// innerText drops the Original/Discounted labels — the struck original and
+// the discounted value arrive as plain lines (live S2 failure shape).
+describe("extractOptions — innerText label-free discounted shapes", () => {
+  it("realistic block: bare struck line followed by bare FREE", () => {
+    const opts = extractOptions([
+      "Shipping method",
+      "S3 Test Shipping",
+      "Wed, Nov 18–Thu, Nov 19",
+      "$4.00",
+      "Standard",
+      "Fri, Nov 20–Tue, Nov 24",
+      "$8.00",
+      "FREE",
+      "Express",
+      "Wed, Nov 18–Thu, Nov 19",
+      "$15.00",
+    ]);
+    const s3 = opts.find((o) => /s3 test shipping/i.test(o.title))!;
+    const std = opts.find((o) => o.title === "Standard")!;
+    const exp = opts.find((o) => /express/i.test(o.title))!;
+    expect(s3).toMatchObject({ amountMinor: 400, free: false });
+    expect(std).toMatchObject({ amountMinor: 0, free: true });
+    expect(exp).toMatchObject({ amountMinor: 1500, free: false });
+    // the neighboring option's $4.00 must not leak into Standard
+    expect(opts.filter((o) => o.title === "Standard")).toHaveLength(1);
+  });
+
+  it("bare struck line followed by a bare discounted price", () => {
+    const opts = extractOptions(["Standard", "$8.00", "$4.00"]);
+    expect(opts).toEqual([{ title: "Standard", amountMinor: 400, free: false }]);
+  });
+
+  it("one bare line with two price tokens — last wins", () => {
+    const opts = extractOptions(["Standard", "$8.00 $4.00"]);
+    expect(opts).toEqual([{ title: "Standard", amountMinor: 400, free: false }]);
+  });
+
+  it("one bare line price + FREE token — free wins over the original", () => {
+    const opts = extractOptions(["Standard", "$8.00 FREE"]);
+    expect(opts).toEqual([{ title: "Standard", amountMinor: 0, free: true }]);
+  });
+
+  it("titled line carrying struck + discounted tokens — last wins", () => {
+    const opts = extractOptions(["Standard $8.00 FREE"]);
+    expect(opts).toEqual([{ title: "Standard", amountMinor: 0, free: true }]);
+  });
+
+  it("consecutive undiscounted options are not merged", () => {
+    const opts = extractOptions(["S3 Test Shipping", "$4.00", "Standard", "$8.00", "Express", "$15.00"]);
+    expect(opts[0]).toMatchObject({ title: "S3 Test Shipping", amountMinor: 400 });
+    expect(opts[1]).toMatchObject({ title: "Standard", amountMinor: 800 });
+    expect(opts[2]).toMatchObject({ title: "Express", amountMinor: 1500 });
+  });
+});
