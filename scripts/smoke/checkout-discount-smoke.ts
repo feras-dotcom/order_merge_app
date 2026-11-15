@@ -7,7 +7,12 @@
 //   npx vite-node scripts/smoke/checkout-discount-smoke.ts \
 //     --store <x.myshopify.com> --client-id <id> --env-file <path> \
 //     --discount-id <gid> --workspace <dir> [--customer <gid>] \
-//     [--out <dir>] [--apply]
+//     [--out <dir>] [--variant <numericId>] [--admin-via railway] \
+//     [--railway-bin <path>] [--railway-cwd <dir>] [--apply]
+//
+// --admin-via railway proxies Admin GraphQL through `railway ssh` for PCs
+// outside the app's Admin IP allowlist; the env file then needs only
+// SHOPIFY_API_KEY (the token grant runs in the service container).
 //
 // Guards (exit 2): store must end .myshopify.com, the env file's
 // SHOPIFY_API_KEY must equal --client-id, shop plan must be
@@ -17,7 +22,7 @@
 // titles, booleans only (no emails/names/checkout URLs).
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { loadEnvFile, makeAdmin, makeRedactor } from "./lib";
+import { loadEnvFile, makeAdmin, makeRailwayAdmin, makeRedactor } from "./lib";
 import { makeBrowserFactory } from "./browser";
 import { LoginRequiredError, evaluateGuards, parseArgs, runSmoke } from "./smoke-lib";
 
@@ -44,7 +49,19 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const { admin, adminGraphql } = makeAdmin({ store: args.store, credentials: creds, redactor: red });
+  // --admin-via railway: Admin GraphQL is proxied through `railway ssh` (the
+  // call originates from the Railway service IP, inside the app's Admin IP
+  // allowlist); the env file's SHOPIFY_API_SECRET is not needed locally —
+  // the token grant happens in the container's env.
+  const { admin, adminGraphql } =
+    args.adminVia === "railway"
+      ? makeRailwayAdmin({
+          store: args.store,
+          railwayBin: args.railwayBin,
+          cwd: args.railwayCwd ?? process.cwd(),
+          redactor: red,
+        })
+      : makeAdmin({ store: args.store, credentials: creds, redactor: red });
   const factory = makeBrowserFactory(args.workspace);
   // Prefer CDP attach to a running operator Chrome; fall back to launching
   // the persistent signed-in profile when no CDP endpoint is up.

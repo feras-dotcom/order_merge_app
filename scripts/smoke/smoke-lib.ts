@@ -25,6 +25,9 @@ export interface SmokeArgs {
   customer?: string; // gid or numeric id of the signed-in customer
   variantNumeric: string;
   methodTitle: string;
+  adminVia?: "railway"; // route Admin GraphQL through `railway ssh` (IP allowlist)
+  railwayBin?: string;
+  railwayCwd?: string;
 }
 
 export function parseArgs(argv: string[]): { ok: true; args: SmokeArgs } | { ok: false; error: string } {
@@ -37,12 +40,16 @@ export function parseArgs(argv: string[]): { ok: true; args: SmokeArgs } | { ok:
   const envFile = opt("--env-file");
   const discountId = opt("--discount-id");
   const workspace = opt("--workspace");
+  const adminVia = opt("--admin-via");
   if (!store || !clientId || !envFile || !discountId || !workspace) {
     return {
       ok: false,
       error:
-        "usage: checkout-discount-smoke --store <x.myshopify.com> --client-id <id> --env-file <path> --discount-id <gid> --workspace <dir> [--out <dir>] [--customer <gid>] [--variant <numericId>] [--apply]",
+        "usage: checkout-discount-smoke --store <x.myshopify.com> --client-id <id> --env-file <path> --discount-id <gid> --workspace <dir> [--out <dir>] [--customer <gid>] [--variant <numericId>] [--admin-via railway] [--railway-bin <path>] [--railway-cwd <dir>] [--apply]",
     };
+  }
+  if (adminVia !== undefined && adminVia !== "railway") {
+    return { ok: false, error: `--admin-via only supports "railway" (got "${adminVia}")` };
   }
   return {
     ok: true,
@@ -57,6 +64,9 @@ export function parseArgs(argv: string[]): { ok: true; args: SmokeArgs } | { ok:
       customer: opt("--customer"),
       variantNumeric: opt("--variant") ?? "68100323508591",
       methodTitle: opt("--method") ?? "Standard",
+      adminVia: adminVia as "railway" | undefined,
+      railwayBin: opt("--railway-bin"),
+      railwayCwd: opt("--railway-cwd"),
     },
   };
 }
