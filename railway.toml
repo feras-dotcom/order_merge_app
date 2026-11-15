@@ -1,0 +1,7 @@
+# Railway config-as-code is deprecated and only honored until 2026-12-01;
+# the same two settings can be set in the service settings
+# (Deploy -> Health check). Builder, start command, restart policy and
+# replica count keep their dashboard values and are deliberately not set here.
+[deploy]
+healthcheckPath = "/healthz"
+healthcheckTimeout = 180

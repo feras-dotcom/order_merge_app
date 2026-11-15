@@ -93,6 +93,53 @@ const M_UPDATE = `#graphql
     }
   }`;
 
+// Validated against Admin 2026-04 (Shopify AI Toolkit): the app's deployed
+// Functions — apiType "discount" + appKey (the extension handle) identify
+// ours; appKey null/ambiguous/missing => never guess an id.
+const Q_FUNCTIONS = `#graphql
+  query CheckoutDiscountFunctions {
+    shopifyFunctions(first: 25) {
+      nodes {
+        id
+        apiType
+        title
+        app { id }
+        appKey
+      }
+    }
+  }`;
+
+// Validated against Admin 2026-04: discountNodes (the non-deprecated root;
+// automaticDiscountNodes is deprecated) filtered to app-owned automatic
+// discounts, each carrying its $app:config so an existing MergeShip discount
+// is found by message before a second one is ever created.
+const Q_APP_DISCOUNTS = `#graphql
+  query CheckoutAppDiscounts {
+    discountNodes(first: 50, query: "discount_type:automatic_app") {
+      nodes {
+        id
+        discount {
+          __typename
+          ... on DiscountAutomaticApp {
+            title
+            status
+            appDiscountType { functionId app { id } }
+          }
+        }
+        metafield(namespace: "$app", key: "config") { jsonValue }
+      }
+    }
+  }`;
+
+// Validated against Admin 2026-04 (same shape the live spike used).
+const M_CREATE = `#graphql
+  mutation CheckoutDiscountCreate($input: DiscountAutomaticAppInput!) {
+    discountAutomaticAppCreate(automaticAppDiscount: $input) {
+      automaticAppDiscount { discountId status }
+      userErrors { field message }
+    }
+  }`;
+
 export interface CheckoutDiscountConfig {
   v: number;
   windowId: string;
@@ -491,3 +538,195 @@ export async function activateCheckoutDiscount(
 }
 
 export { CHECKOUT_DISCOUNT_MESSAGE };
+
+/** The extension handle of the deployed shipping-discount Function — the
+ *  `appKey` shopifyFunctions reports for it (the spike passed the handle
+ *  itself as functionId; resolving it by apiType+appKey makes a rename or
+ *  a second discount Function unguessable instead of silently wrong). */
+export const CHECKOUT_FUNCTION_APP_KEY = "checkout-shipping-discount";
+
+interface FunctionsData {
+  shopifyFunctions?: {
+    nodes?: {
+      id?: string;
+      apiType?: string;
+      title?: string;
+      appKey?: string | null;
+      app?: { id?: string } | null;
+    }[];
+  } | null;
+}
+
+/** Resolve the Function id for discountAutomaticAppCreate. An explicit
+ *  `functionId` wins (operator override); otherwise the app's discount
+ *  Function is found by apiType + appKey. Zero or more than one match is an
+ *  error — an id is never guessed. */
+export async function resolveCheckoutFunctionId(
+  admin: AdminClient,
+  functionId?: string,
+): Promise<string> {
+  if (functionId) return functionId;
+  const data = await gqlData<FunctionsData>(admin, "List shopify functions", Q_FUNCTIONS, {});
+  const matches = (data?.shopifyFunctions?.nodes ?? []).filter(
+    (f) => f?.apiType === "discount" && f?.appKey === CHECKOUT_FUNCTION_APP_KEY,
+  );
+  if (matches.length === 0) {
+    throw new DiscountStateError(
+      `no discount Function with appKey ${CHECKOUT_FUNCTION_APP_KEY} deployed — pass --function-id`,
+    );
+  }
+  if (matches.length > 1) {
+    throw new DiscountStateError(
+      `${matches.length} discount Functions match appKey ${CHECKOUT_FUNCTION_APP_KEY} — pass --function-id`,
+    );
+  }
+  return matches[0].id!;
+}
+
+interface AppDiscountsData {
+  discountNodes?: {
+    nodes?: {
+      id?: string;
+      discount?: {
+        __typename?: string;
+        status?: string;
+        appDiscountType?: { functionId?: string; app?: { id?: string } | null } | null;
+      } | null;
+      metafield?: { jsonValue?: unknown } | null;
+    }[];
+  } | null;
+}
+
+/** An existing app-owned automatic discount carrying our exact config
+ *  message is THIS discount — creating a second one is never needed. */
+export async function findExistingCheckoutDiscount(
+  admin: AdminClient,
+): Promise<{ id: string; status: string } | null> {
+  const data = await gqlData<AppDiscountsData>(admin, "List app discounts", Q_APP_DISCOUNTS, {});
+  for (const node of data?.discountNodes?.nodes ?? []) {
+    if (node?.discount?.__typename !== "DiscountAutomaticApp") continue;
+    let message: string | null = null;
+    try {
+      message = validateCheckoutConfig(node.metafield?.jsonValue).message;
+    } catch {
+      continue; // a discount whose config is not ours is not a match
+    }
+    if (message === CHECKOUT_DISCOUNT_MESSAGE) {
+      return { id: node.id!, status: node.discount.status ?? "UNKNOWN" };
+    }
+  }
+  return null;
+}
+
+/** Create the checkout shipping discount (R1): resolves the Function id,
+ *  proves no MergeShip discount already exists, creates it with the inert
+ *  `w-unset` windowId (records carry `w<epochMs>` — `w-unset` can never
+ *  match, so even an accidental activation grants nothing until
+ *  prepare-enable rewrites the config), then IMMEDIATELY deactivates and
+ *  verifies. The command only succeeds with a verified-EXPIRED discount —
+ *  an unverifiable deactivation throws with the id + the shutdown command. */
+export async function createCheckoutDiscount(
+  deps: {
+    admin: AdminClient;
+    shop: string;
+    functionId?: string;
+    percentage?: string;
+    windowDays?: number;
+    now?: () => Date;
+    shopTimezone?: string;
+  },
+): Promise<{ id: string; status: string; created: boolean }> {
+  const now = deps.now?.() ?? new Date();
+  const percentage = deps.percentage ?? "100.0";
+  if (!DECIMAL.test(percentage) || !(Number(percentage) > 0 && Number(percentage) <= 100)) {
+    throw new DiscountStateError(
+      `percentage must be a decimal string in (0, 100] (the Function requires a string) — got ${JSON.stringify(percentage)}`,
+    );
+  }
+  const windowDays = deps.windowDays ?? 14;
+  if (!Number.isFinite(windowDays) || windowDays <= 0) {
+    throw new DiscountStateError(`windowDays must be positive — got ${windowDays}`);
+  }
+
+  const existing = await findExistingCheckoutDiscount(deps.admin);
+  if (existing) return { id: existing.id, status: existing.status, created: false };
+
+  const functionId = await resolveCheckoutFunctionId(deps.admin, deps.functionId);
+  const tz = deps.shopTimezone ?? (await shopIanaTimezone(deps.admin));
+  const config = {
+    v: 1,
+    windowId: "w-unset",
+    percentage,
+    message: CHECKOUT_DISCOUNT_MESSAGE,
+    windowStart: shopLocalNow(now, tz),
+    windowEnd: shopLocalNow(new Date(now.getTime() + windowDays * 86_400_000), tz),
+  };
+  const res = await gqlData<{
+    discountAutomaticAppCreate?: {
+      automaticAppDiscount?: { discountId?: string; status?: string } | null;
+      userErrors?: { field?: string[] | null; message: string }[];
+    } | null;
+  }>(deps.admin, "Create checkout discount", M_CREATE, {
+    input: {
+      title: "MergeShip checkout shipping discount",
+      functionId,
+      discountClasses: ["SHIPPING"],
+      combinesWith: {
+        orderDiscounts: false,
+        productDiscounts: false,
+        shippingDiscounts: false,
+      },
+      startsAt: new Date(now.getTime() - 3_600_000).toISOString(),
+      metafields: [
+        {
+          namespace: "$app",
+          key: "config",
+          type: "json",
+          value: JSON.stringify(config),
+        },
+      ],
+    },
+  });
+  const created = res?.discountAutomaticAppCreate;
+  const errs = created?.userErrors ?? [];
+  if (errs.length) {
+    throw new DiscountStateError(`create userErrors: ${JSON.stringify(errs)}`);
+  }
+  const id = created?.automaticAppDiscount?.discountId;
+  if (!id) {
+    throw new DiscountStateError(
+      `discountAutomaticAppCreate returned no discountId: ${JSON.stringify(created)}`,
+    );
+  }
+
+  // Deactivate + verify — the command must never leave an ACTIVE discount.
+  try {
+    await gqlData(deps.admin, "Deactivate checkout discount", M_DEACTIVATE, { id });
+  } catch {
+    // the status read below is the authority; a transport error here is
+    // only a failure if verification still reports ACTIVE.
+  }
+  let status: string | null = null;
+  try {
+    const data = await gqlData<{
+      automaticDiscountNode?: {
+        automaticDiscount?: { __typename?: string; status?: string } | null;
+      } | null;
+    }>(deps.admin, "Verify checkout discount status", Q_STATUS, { id });
+    const node = data?.automaticDiscountNode;
+    if (node?.automaticDiscount?.__typename === "DiscountAutomaticApp") {
+      status = node.automaticDiscount.status ?? null;
+    } else if (!node) {
+      status = "DELETED";
+    }
+  } catch {
+    status = null;
+  }
+  if (status !== "EXPIRED" && status !== "DELETED") {
+    throw new ShutdownNotVerifiedError(
+      `created discount ${id} could not be verified deactivated (status ${status ?? "unreadable"}) — run: ` +
+        `npx vite-node scripts/checkout-discount-control.ts shutdown --shop ${deps.shop} --discount-id ${id} --apply`,
+    );
+  }
+  return { id, status, created: true };
+}
