@@ -24,6 +24,31 @@ const REQUIRED_TOPICS = [
   "ORDERS_RISK_ASSESSMENT_CHANGED",
 ];
 
+/** API enum name -> Shopify topic string (mirrors the declaration mapping
+ *  in preflight.server.ts; the drift-guard test proves them against the
+ *  real bundled file). */
+const TOPIC_OF: Record<string, string> = {
+  ORDERS_PAID: "orders/paid",
+  ORDERS_UPDATED: "orders/updated",
+  ORDERS_CANCELLED: "orders/cancelled",
+  ORDERS_FULFILLED: "orders/fulfilled",
+  ORDERS_PARTIALLY_FULFILLED: "orders/partially_fulfilled",
+  REFUNDS_CREATE: "refunds/create",
+  ORDERS_RISK_ASSESSMENT_CHANGED: "orders/risk_assessment_changed",
+};
+
+/** A declaration TOML covering `topics` with exact `/webhooks/<topic>`
+ *  URIs — the shape the bundled shopify.app.checkout-first.toml carries. */
+const declaringToml = (topics: string[], uriFor?: (t: string) => string) =>
+  topics
+    .map(
+      (t) =>
+        `  [[webhooks.subscriptions]]\n  uri = "${uriFor ? uriFor(t) : `/webhooks/${t}`}"\n  topics = [ "${t}" ]\n`,
+    )
+    .join("\n");
+
+const DECLARED_ALL = declaringToml(Object.values(TOPIC_OF));
+
 const allOnSettings = (over: Partial<MergeSettings> = {}): MergeSettings => ({
   ...DEFAULT_SETTINGS,
   autoMergeEnabled: true,
@@ -34,6 +59,9 @@ const allOnSettings = (over: Partial<MergeSettings> = {}): MergeSettings => ({
   checkoutDiscountEnabledAt: EPOCH1,
   checkoutDiscountNodeId: DID,
   checkoutDiscountWindowHours: 24,
+  checkoutDiscountMethod: "standard shipping",
+  checkoutDiscountMaxShippingMinor: 800,
+  checkoutDiscountCurrency: "USD",
   ...over,
 });
 
@@ -156,6 +184,9 @@ const deps = (over: Partial<PreflightDeps> = {}, adminInit: AdminInit = {}): Pre
     checkoutDiscountAllowShops: [SHOP],
   }),
   appUrl: APP_URL,
+  // A controlled declaration — tests never read the real bundled file
+  // except the drift guard.
+  readConfig: () => DECLARED_ALL,
   ...over,
 });
 
@@ -168,6 +199,8 @@ describe("runPreflight", () => {
     const fails = Object.values(checks).filter((c) => c.ok === false);
     expect(fails).toEqual([]);
     expect(checks["scopes"].detail).toBe("OK");
+    expect(checks["webhooks"].detail).toBe("OK_API");
+    expect(checks["method-approval"].detail).toBe("OK");
     expect(checks["discount"].detail).toBe("STATUS_EXPIRED");
     expect(checks["protected-data"].detail).toBe("OK");
   });
@@ -179,22 +212,97 @@ describe("runPreflight", () => {
     expect(Object.values(checks).filter((c) => c.ok === false).map((c) => c.check)).toEqual(["scopes"]);
   });
 
-  it("missing webhook topics fails only `webhooks`", async () => {
+  it("a topic missing in BOTH the API listing and the declaration fails `webhooks`", async () => {
     const checks = byCheck(
-      await runPreflight(deps({}, { topics: REQUIRED_TOPICS.slice(1).map((topic) => ({ topic })) })),
+      await runPreflight(
+        deps(
+          { readConfig: () => declaringToml(Object.values(TOPIC_OF).slice(1)) },
+          { topics: REQUIRED_TOPICS.slice(1).map((topic) => ({ topic })) },
+        ),
+      ),
     );
     expect(checks["webhooks"].ok).toBe(false);
     expect(checks["webhooks"].detail).toBe("MISSING_1_TOPICS");
   });
 
-  it("a webhook on another URL does not count", async () => {
+  it("a webhook on another URL does not count (and a wrong declaration URI does not either)", async () => {
     const checks = byCheck(
       await runPreflight(
-        deps({}, { topics: REQUIRED_TOPICS.map((topic) => ({ topic, uri: "https://other.example.com/hook" })) }),
+        deps(
+          { readConfig: () => declaringToml(Object.values(TOPIC_OF), (t) => `/other/${t}`) },
+          { topics: REQUIRED_TOPICS.map((topic) => ({ topic, uri: "https://other.example.com/hook" })) },
+        ),
       ),
     );
     expect(checks["webhooks"].ok).toBe(false);
     expect(checks["webhooks"].detail).toBe(`MISSING_${REQUIRED_TOPICS.length}_TOPICS`);
+  });
+
+  it("declaration-only satisfaction passes as OK_DECLARED with the release warning", async () => {
+    const checks = await runPreflight(deps({}, { topics: [] }));
+    const m = byCheck(checks);
+    expect(m["webhooks"].ok).toBe(true);
+    expect(m["webhooks"].detail).toBe("OK_DECLARED");
+    expect(m["webhooks-release"]).toEqual({
+      check: "webhooks-release",
+      ok: "warn",
+      detail: "VERIFY_RELEASED_VERSION",
+    });
+  });
+
+  it("API-only satisfaction passes as OK_API with no release warning", async () => {
+    const checks = await runPreflight(
+      deps({ readConfig: () => { throw new Error("unreadable"); } }),
+    );
+    const m = byCheck(checks);
+    expect(m["webhooks"].ok).toBe(true);
+    expect(m["webhooks"].detail).toBe("OK_API");
+    expect(m["webhooks-release"]).toBeUndefined();
+  });
+
+  it("mixed API + declaration satisfaction passes as OK_DECLARED with the release warning", async () => {
+    const checks = await runPreflight(
+      deps(
+        // The declaration covers every topic; the API covers only the last
+        // three — the first four are satisfied by the declaration alone.
+        {},
+        { topics: REQUIRED_TOPICS.slice(4).map((topic) => ({ topic })) },
+      ),
+    );
+    const m = byCheck(checks);
+    expect(m["webhooks"].ok).toBe(true);
+    expect(m["webhooks"].detail).toBe("OK_DECLARED");
+    expect(m["webhooks-release"]).toEqual({
+      check: "webhooks-release",
+      ok: "warn",
+      detail: "VERIFY_RELEASED_VERSION",
+    });
+  });
+
+  it("an unreadable declaration with incomplete API subscriptions fails DECLARATION_UNREADABLE", async () => {
+    const checks = byCheck(
+      await runPreflight(
+        deps(
+          { readConfig: () => { throw new Error("ENOENT"); } },
+          { topics: REQUIRED_TOPICS.slice(1).map((topic) => ({ topic })) },
+        ),
+      ),
+    );
+    expect(checks["webhooks"].ok).toBe(false);
+    expect(checks["webhooks"].detail).toBe("DECLARATION_UNREADABLE");
+  });
+
+  it("the REAL bundled shopify.app.checkout-first.toml declares all required topics (drift guard)", async () => {
+    const real = (await import("node:fs")).readFileSync(
+      (await import("node:path")).join(process.cwd(), "shopify.app.checkout-first.toml"),
+      "utf8",
+    );
+    const checks = await runPreflight(
+      deps({ readConfig: () => real }, { topics: [] }),
+    );
+    const m = byCheck(checks);
+    expect(m["webhooks"].ok).toBe(true);
+    expect(m["webhooks"].detail).toBe("OK_DECLARED");
   });
 
   it("no recorded discount id fails `discount` without an Admin call", async () => {
@@ -294,5 +402,21 @@ describe("runPreflight", () => {
     expect(m["scopes"].ok).toBe(false);
     expect(m["webhooks"].ok).toBe(false);
     expect(m["admin-read"].detail).toBe("ADMIN_READ_FAILED");
+  });
+
+  it("method-approval: unset or invalid approval fails only `method-approval`", async () => {
+    for (const over of [
+      { checkoutDiscountMethod: null },
+      { checkoutDiscountMaxShippingMinor: null },
+      { checkoutDiscountCurrency: null },
+      { checkoutDiscountMaxShippingMinor: 0 },
+      { checkoutDiscountCurrency: "usd" },
+    ] as Partial<MergeSettings>[]) {
+      const checks = byCheck(
+        await runPreflight(deps({ settings: async () => allOnSettings(over) })),
+      );
+      expect(checks["method-approval"].ok).toBe(false);
+      expect(checks["method-approval"].detail).toBe("UNSET");
+    }
   });
 });

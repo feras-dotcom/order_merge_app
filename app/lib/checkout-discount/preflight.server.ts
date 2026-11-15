@@ -4,23 +4,87 @@
 // 2026-04 documents; the shop-local levers reuse the gate pieces with no
 // Admin call. Output carries codes/booleans/counts only — never customer
 // data, names or the config message.
+import fs from "node:fs";
+import path from "node:path";
 import { gqlData, type AdminClient } from "../graphql.server";
 import { getSettings, type MergeSettings } from "../settings.server";
 import { prismaOperationStore } from "../operation-store.server";
 import { isOnboardingComplete } from "../onboarding";
+import { methodApprovalFromSettings } from "./gate.server";
 import { CHECKOUT_DISCOUNT_MESSAGE, MIN_CHECKOUT_WINDOW_HOURS } from "./config";
 import { readCheckoutDiscount, DiscountConfigError } from "./discount-control.server";
 
 const REQUIRED_SCOPES = ["write_customers", "write_discounts"] as const;
+
+/** Required webhook deliveries: the Admin enum name (webhookSubscriptions
+ *  reports this) mapped to the Shopify topic string the bundled
+ *  shopify.app.checkout-first.toml declares, with the exact route the
+ *  declaration's `uri` must equal — `/webhooks/<topic>`. A topic is
+ *  satisfied by EITHER source: the Admin listing only ever shows
+ *  shop-scoped API subscriptions, so app-scoped TOML declarations never
+ *  appear there and must be checked against the bundled file. */
 const REQUIRED_TOPICS = [
-  "ORDERS_PAID",
-  "ORDERS_UPDATED",
-  "ORDERS_CANCELLED",
-  "ORDERS_FULFILLED",
-  "ORDERS_PARTIALLY_FULFILLED",
-  "REFUNDS_CREATE",
-  "ORDERS_RISK_ASSESSMENT_CHANGED",
+  { api: "ORDERS_PAID", topic: "orders/paid" },
+  { api: "ORDERS_UPDATED", topic: "orders/updated" },
+  { api: "ORDERS_CANCELLED", topic: "orders/cancelled" },
+  { api: "ORDERS_FULFILLED", topic: "orders/fulfilled" },
+  { api: "ORDERS_PARTIALLY_FULFILLED", topic: "orders/partially_fulfilled" },
+  { api: "REFUNDS_CREATE", topic: "refunds/create" },
+  { api: "ORDERS_RISK_ASSESSMENT_CHANGED", topic: "orders/risk_assessment_changed" },
 ] as const;
+
+export interface DeclaredWebhookSub {
+  uri: string;
+  topics: string[];
+}
+
+/** Parse the `[[webhooks.subscriptions]]` blocks of an app TOML — a small
+ *  line parser, no dependency. Each block's `uri` and `topics` (single or
+ *  multi-line array) are captured; [webhooks.privacy_compliance] and every
+ *  other section are ignored. */
+export function parseDeclaredWebhooks(text: string): DeclaredWebhookSub[] {
+  const subs: DeclaredWebhookSub[] = [];
+  let cur: DeclaredWebhookSub | null = null;
+  let inTopics = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    if (/^\[\[webhooks\.subscriptions\]\]/.test(line)) {
+      cur = { uri: "", topics: [] };
+      subs.push(cur);
+      inTopics = false;
+      continue;
+    }
+    if (line.startsWith("[")) {
+      cur = null;
+      inTopics = false;
+      continue;
+    }
+    if (!cur) continue;
+    if (inTopics) {
+      for (const m of line.matchAll(/"([^"]*)"/g)) cur.topics.push(m[1]);
+      if (line.includes("]")) inTopics = false;
+      continue;
+    }
+    const uri = line.match(/^uri\s*=\s*"([^"]*)"/);
+    if (uri) {
+      cur.uri = uri[1];
+      continue;
+    }
+    const topics = line.match(/^topics\s*=\s*\[(.*)$/);
+    if (topics) {
+      for (const m of topics[1].matchAll(/"([^"]*)"/g)) cur.topics.push(m[1]);
+      if (!topics[1].includes("]")) inTopics = true;
+    }
+  }
+  return subs;
+}
+
+const defaultReadConfig = (): string =>
+  fs.readFileSync(
+    path.join(process.cwd(), "shopify.app.checkout-first.toml"),
+    "utf8",
+  );
 
 // Validated against Admin 2026-04 (webhookSubscriptions.uri — endpoint is
 // deprecated; plan.publicDisplayName — displayName is deprecated).
@@ -69,6 +133,9 @@ export interface PreflightDeps {
   /** The app base URL a webhook subscription must point at
    *  (process.env.SHOPIFY_APP_URL by default). */
   appUrl?: string;
+  /** Returns the bundled shopify.app.checkout-first.toml text (injected for
+   *  tests; default reads <cwd>/shopify.app.checkout-first.toml). */
+  readConfig?: () => string;
 }
 
 interface PreflightData {
@@ -122,18 +189,60 @@ export async function runPreflight(deps: PreflightDeps): Promise<PreflightCheck[
   });
 
   const subs = preflightData?.webhookSubscriptions?.nodes ?? [];
+  // Bundled app-scope declaration: a required topic is satisfied by EITHER
+  // an API subscription for appUrl OR a declaration whose topic ↔ uri is
+  // exactly `/webhooks/<topic>`. A declaration the app cannot read or parse
+  // satisfies nothing.
+  let declared: DeclaredWebhookSub[] | null = null;
+  try {
+    const parsed = parseDeclaredWebhooks(
+      (deps.readConfig ?? defaultReadConfig)(),
+    );
+    declared = parsed.length > 0 ? parsed : null;
+  } catch {
+    declared = null;
+  }
+  const apiSatisfied = new Set(
+    REQUIRED_TOPICS.filter((t) =>
+      subs.some((n) => n?.topic === t.api && (n?.uri ?? "").startsWith(appUrl)),
+    ).map((t) => t.api),
+  );
   const missingTopics = REQUIRED_TOPICS.filter(
-    (t) => !subs.some((n) => n?.topic === t && (n?.uri ?? "").startsWith(appUrl)),
+    (t) =>
+      !apiSatisfied.has(t.api) &&
+      !(declared ?? []).some(
+        (d) => d.topics.includes(t.topic) && d.uri === `/webhooks/${t.topic}`,
+      ),
   );
   checks.push({
     check: "webhooks",
-    ok: adminError !== null ? false : missingTopics.length === 0,
-    detail: adminError !== null
-      ? `ADMIN_READ_FAILED`
-      : missingTopics.length
-        ? `MISSING_${missingTopics.length}_TOPICS`
-        : "OK",
+    ok:
+      adminError !== null
+        ? false
+        : declared === null
+          ? apiSatisfied.size === REQUIRED_TOPICS.length
+          : missingTopics.length === 0,
+    detail:
+      adminError !== null
+        ? `ADMIN_READ_FAILED`
+        : declared === null && apiSatisfied.size < REQUIRED_TOPICS.length
+          ? `DECLARATION_UNREADABLE`
+          : missingTopics.length
+            ? `MISSING_${missingTopics.length}_TOPICS`
+            : apiSatisfied.size === REQUIRED_TOPICS.length
+              ? "OK_API"
+              : "OK_DECLARED",
   });
+  // Declaration-satisfied topics only prove the BUNDLED config — whether the
+  // released version declares them needs the runbook's `shopify app config
+  // pull` diff plus a real delivery. Warn, never fail.
+  if (
+    adminError === null &&
+    missingTopics.length === 0 &&
+    apiSatisfied.size < REQUIRED_TOPICS.length
+  ) {
+    checks.push({ check: "webhooks-release", ok: "warn", detail: "VERIFY_RELEASED_VERSION" });
+  }
   if (adminError !== null) {
     // surface the read failure once so it is greppable
     checks.push({ check: "admin-read", ok: false, detail: "ADMIN_READ_FAILED" });
@@ -203,6 +312,12 @@ export async function runPreflight(deps: PreflightDeps): Promise<PreflightCheck[
     check: "shop-flag",
     ok: settings.checkoutDiscountEnabled === true && settings.checkoutDiscountEnabledAt != null,
     detail: settings.checkoutDiscountEnabled === true ? "ON" : "OFF",
+  });
+  // Pilot method approval (operator-set, no Admin call): present+valid.
+  checks.push({
+    check: "method-approval",
+    ok: methodApprovalFromSettings(settings) !== null,
+    detail: methodApprovalFromSettings(settings) !== null ? "OK" : "UNSET",
   });
 
   // ── Protected-customer-data probe (warn, never fails) ──
