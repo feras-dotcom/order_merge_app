@@ -103,80 +103,22 @@ if (cmd === "preflight") {
   process.exit(checks.some((c) => c.ok === false) ? 1 : 0);
 }
 
-type State = Awaited<ReturnType<typeof control.readCheckoutDiscount>>;
-
-const print = (s: State) => {
-  if (!s) {
-    console.log(JSON.stringify({ found: false }));
-    return;
-  }
-  console.log(
-    JSON.stringify({
-      found: true,
-      status: s.status,
-      windowId: s.windowId,
-      percentageOk: s.percentage.length > 0,
-      messageOk: s.message === control.CHECKOUT_DISCOUNT_MESSAGE,
-      windowStartOk: s.windowStart.length > 0,
-      windowEndOk: s.windowEnd.length > 0,
-      functionId: s.functionId,
-    }),
-  );
-};
-
-if (cmd === "create") {
-  // Dry-run: prove the Function resolves and no MergeShip discount already
-  // exists, then stop — only --apply calls discountAutomaticAppCreate.
-  const fnId = await control.resolveCheckoutFunctionId(admin, functionId);
-  const existing = await control.findExistingCheckoutDiscount(admin);
-  console.log(
-    JSON.stringify({
-      action: "create",
-      functionId: fnId,
-      existingFound: existing !== null,
-      existingId: existing?.id ?? null,
-      wouldCreate: existing === null && apply,
-    }),
-  );
-  if (!apply) process.exit(0);
-}
-
-if (cmd === "status" || !apply) {
-  await print(await control.readCheckoutDiscount(admin, discountId!));
-  if (cmd === "status") process.exit(0);
-}
-
-try {
-  if (cmd === "create") {
-    const r = await control.createCheckoutDiscount({
-      admin,
-      shop: shop!,
-      functionId,
-      percentage,
-      windowDays: windowDays !== undefined ? Number(windowDays) : undefined,
-    });
-    console.log(JSON.stringify({ action: "create", ...r }));
-    if (r.created) {
-      console.log(`record the id with: prepare-enable --shop ${shop} --discount-id ${r.id} --apply`);
-    }
-  } else if (cmd === "shutdown") {
-    const r = await control.shutdownCheckoutDiscount({ admin, shop: shop!, discountId: discountId! });
-    console.log(JSON.stringify({ action: "shutdown", ...r }));
-  } else if (cmd === "prepare-enable") {
-    const r = await control.prepareEnable({ admin, shop: shop!, discountId: discountId! });
-    console.log(
-      JSON.stringify({ action: "prepare-enable", windowId: r.windowId, enabledAt: r.enabledAt.toISOString() }),
-    );
-  } else if (cmd === "activate") {
-    const r = await control.activateCheckoutDiscount({
-      admin,
-      shop: shop!,
-      discountId: discountId!,
-      expectedWindowId: expectedWindowId!,
-    });
-    console.log(JSON.stringify({ action: "activate", ...r }));
-  }
-} catch (err: any) {
-  console.error(`error: ${err?.name ?? "Error"}: ${err?.message ?? err}`);
-  process.exit(1);
-}
+// The print/dry-run/mutation decision lives in cli-dispatch.server.ts so
+// the boundary is unit-tested — without --apply no mutation may run.
+const { runCheckoutDiscountCommand } = await import(
+  "../app/lib/checkout-discount/cli-dispatch.server"
+);
+process.exit(
+  await runCheckoutDiscountCommand({
+    cmd: cmd as "status" | "shutdown" | "prepare-enable" | "activate" | "create",
+    apply,
+    admin,
+    shop: shop!,
+    discountId,
+    expectedWindowId,
+    functionId,
+    percentage,
+    windowDays: windowDays !== undefined ? Number(windowDays) : undefined,
+    control,
+  }),
+);

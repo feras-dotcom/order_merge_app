@@ -1,4 +1,4 @@
-// createCheckoutDiscount: resolves the Function by apiType+appKey (never
+// createCheckoutDiscount: resolves the Function by apiType+handle (never
 // guesses), refuses a second MergeShip discount by config message, creates
 // the automatic app discount with the inert w-unset windowId, and only
 // returns after deactivation is verified EXPIRED — an unverifiable state
@@ -36,7 +36,7 @@ const ourConfig = {
  *  verification read. `state.existing` pre-seeds one app discount whose
  *  config carries OUR message — the idempotency case. */
 const makeCreateAdmin = (init: {
-  functions?: { id: string; apiType?: string; appKey?: string | null }[];
+  functions?: { id: string; apiType?: string; appKey?: string | null; handle?: string | null }[];
   existing?: { id: string; status: string; config?: unknown } | null;
   createUserErrors?: { field?: string[]; message: string }[];
   stuckVerifyStatus?: string | null;
@@ -72,7 +72,12 @@ const makeCreateAdmin = (init: {
       }
       if (query.includes("shopifyFunctions")) {
         const nodes = (init.functions ?? [
-          { id: FN, apiType: "discount", appKey: "checkout-shipping-discount" },
+          {
+            id: FN,
+            apiType: "discount",
+            appKey: "04b77142ce8ad421f49735b05c7d0a86",
+            handle: "checkout-shipping-discount",
+          },
         ]).map((f) => ({ app: { id: APP }, title: "fn", ...f }));
         return respond({ data: { shopifyFunctions: { nodes } } });
       }
@@ -133,7 +138,7 @@ const makeCreateAdmin = (init: {
 };
 
 describe("resolveCheckoutFunctionId", () => {
-  it("finds the app's discount Function by apiType + appKey", async () => {
+  it("finds the app's discount Function by apiType + handle (real production shape)", async () => {
     const admin = makeCreateAdmin({});
     await expect(resolveCheckoutFunctionId(admin as any)).resolves.toBe(FN);
   });
@@ -143,17 +148,51 @@ describe("resolveCheckoutFunctionId", () => {
       "gid://fn/9",
     );
   });
-  it("no match errors — never guesses", async () => {
+  it("a discount Function with another handle does not match", async () => {
     const admin = makeCreateAdmin({
-      functions: [{ id: "gid://fn/other", apiType: "discount", appKey: "other-handle" }],
+      functions: [
+        {
+          id: "gid://fn/other",
+          apiType: "discount",
+          appKey: "04b77142ce8ad421f49735b05c7d0a86",
+          handle: "other-handle",
+        },
+      ],
     });
+    await expect(resolveCheckoutFunctionId(admin as any)).rejects.toThrow(DiscountStateError);
+  });
+  it("appKey carrying the handle string still does not match — handle is the key", async () => {
+    const admin = makeCreateAdmin({
+      functions: [
+        {
+          id: "gid://fn/wrong",
+          apiType: "discount",
+          appKey: "checkout-shipping-discount",
+          handle: "other-handle",
+        },
+      ],
+    });
+    await expect(resolveCheckoutFunctionId(admin as any)).rejects.toThrow(DiscountStateError);
+  });
+  it("no match errors — never guesses", async () => {
+    const admin = makeCreateAdmin({ functions: [] });
     await expect(resolveCheckoutFunctionId(admin as any)).rejects.toThrow(DiscountStateError);
   });
   it("ambiguous match errors — never guesses", async () => {
     const admin = makeCreateAdmin({
       functions: [
-        { id: "gid://fn/a", apiType: "discount", appKey: "checkout-shipping-discount" },
-        { id: "gid://fn/b", apiType: "discount", appKey: "checkout-shipping-discount" },
+        {
+          id: "gid://fn/a",
+          apiType: "discount",
+          appKey: "04b77142ce8ad421f49735b05c7d0a86",
+          handle: "checkout-shipping-discount",
+        },
+        {
+          id: "gid://fn/b",
+          apiType: "discount",
+          appKey: "04b77142ce8ad421f49735b05c7d0a86",
+          handle: "checkout-shipping-discount",
+        },
       ],
     });
     await expect(resolveCheckoutFunctionId(admin as any)).rejects.toThrow(DiscountStateError);

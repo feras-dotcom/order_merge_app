@@ -94,8 +94,9 @@ const M_UPDATE = `#graphql
   }`;
 
 // Validated against Admin 2026-04 (Shopify AI Toolkit): the app's deployed
-// Functions — apiType "discount" + appKey (the extension handle) identify
-// ours; appKey null/ambiguous/missing => never guess an id.
+// Functions — apiType "discount" + handle (the extension handle) identify
+// ours; handle null/ambiguous/missing => never guess an id. (`appKey` is
+// NOT the handle on live data — it reports the app client id.)
 const Q_FUNCTIONS = `#graphql
   query CheckoutDiscountFunctions {
     shopifyFunctions(first: 25) {
@@ -105,6 +106,7 @@ const Q_FUNCTIONS = `#graphql
         title
         app { id }
         appKey
+        handle
       }
     }
   }`;
@@ -540,10 +542,12 @@ export async function activateCheckoutDiscount(
 export { CHECKOUT_DISCOUNT_MESSAGE };
 
 /** The extension handle of the deployed shipping-discount Function — the
- *  `appKey` shopifyFunctions reports for it (the spike passed the handle
- *  itself as functionId; resolving it by apiType+appKey makes a rename or
- *  a second discount Function unguessable instead of silently wrong). */
-export const CHECKOUT_FUNCTION_APP_KEY = "checkout-shipping-discount";
+ *  `handle` field shopifyFunctions reports for it (`appKey` on live data is
+ *  the APP client id, not the handle — proven on production: node carried
+ *  appKey "04b77142ce8ad421f49735b05c7d0a86" with handle
+ *  "checkout-shipping-discount"). Resolving by apiType+handle makes a rename
+ *  or a second discount Function unguessable instead of silently wrong. */
+export const CHECKOUT_FUNCTION_HANDLE = "checkout-shipping-discount";
 
 interface FunctionsData {
   shopifyFunctions?: {
@@ -552,6 +556,7 @@ interface FunctionsData {
       apiType?: string;
       title?: string;
       appKey?: string | null;
+      handle?: string | null;
       app?: { id?: string } | null;
     }[];
   } | null;
@@ -559,7 +564,7 @@ interface FunctionsData {
 
 /** Resolve the Function id for discountAutomaticAppCreate. An explicit
  *  `functionId` wins (operator override); otherwise the app's discount
- *  Function is found by apiType + appKey. Zero or more than one match is an
+ *  Function is found by apiType + handle. Zero or more than one match is an
  *  error — an id is never guessed. */
 export async function resolveCheckoutFunctionId(
   admin: AdminClient,
@@ -568,16 +573,16 @@ export async function resolveCheckoutFunctionId(
   if (functionId) return functionId;
   const data = await gqlData<FunctionsData>(admin, "List shopify functions", Q_FUNCTIONS, {});
   const matches = (data?.shopifyFunctions?.nodes ?? []).filter(
-    (f) => f?.apiType === "discount" && f?.appKey === CHECKOUT_FUNCTION_APP_KEY,
+    (f) => f?.apiType === "discount" && f?.handle === CHECKOUT_FUNCTION_HANDLE,
   );
   if (matches.length === 0) {
     throw new DiscountStateError(
-      `no discount Function with appKey ${CHECKOUT_FUNCTION_APP_KEY} deployed — pass --function-id`,
+      `no discount Function with handle ${CHECKOUT_FUNCTION_HANDLE} deployed — pass --function-id`,
     );
   }
   if (matches.length > 1) {
     throw new DiscountStateError(
-      `${matches.length} discount Functions match appKey ${CHECKOUT_FUNCTION_APP_KEY} — pass --function-id`,
+      `${matches.length} discount Functions match handle ${CHECKOUT_FUNCTION_HANDLE} — pass --function-id`,
     );
   }
   return matches[0].id!;
