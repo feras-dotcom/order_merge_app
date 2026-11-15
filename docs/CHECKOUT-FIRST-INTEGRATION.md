@@ -1,5 +1,7 @@
 # Checkout-first shipping discount: integration architecture
 
+> Release, rollback, Shopify app version and pilot procedure: see `docs/RELEASE-CHECKLIST-CHECKOUT-FIRST.md` (supersedes sections 7-8 where they differ).
+
 Status: implementation branch for independent review. NOT merged, NOT deployed, feature OFF for every merchant.
 Baseline: `8178caf` (shipping recovery line). Validated spike: `94b6166` (branch `spike/checkout-first-shipping-discount`).
 Evidence behind the mechanism: `docs/evidence/checkout-first/` on the spike branch (`e2-recovery.md`, `e1-matrix.json`, `e6-*`).
