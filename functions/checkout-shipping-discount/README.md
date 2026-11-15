@@ -4,11 +4,13 @@ This directory holds the validated Shopify Discount Function that reads the
 customer eligibility metafield and discounts the matching shipping option at
 checkout.
 
-**It is NOT an extension of this app.** It lives outside `extensions/` so the
-Shopify CLI does not discover, build or deploy it, and `shopify.app.toml` is
-deliberately unchanged on this branch — no scopes (`write_customers`,
-`write_discounts`), no webhook topics, no Function are registered here.
-Deploying it is a separate, deliberate act done in a dev workspace (below).
+**It is not an extension of the production app version.** It lives outside
+`extensions/` so the DEFAULT config (`shopify.app.toml`, deliberately
+byte-identical to `origin/main`) does not discover, build or deploy it — no
+scopes (`write_customers`, `write_discounts`), no webhook topics, no Function
+are registered there. The named config `shopify.app.checkout-first.toml`
+carries `extension_directories = ["functions/*"]`, which makes this directory
+buildable/deployable by the CLI as a deliberate, separate act (below).
 
 ## What it does
 
@@ -73,40 +75,32 @@ mutations; `scripts/checkout-discount-control.ts` is the operator CLI.)
   shutdown path never reads this config — a missing or malformed config
   cannot block deactivation.
 
-## Building / deploying in a dev workspace
+## Building / deploying (the now-working in-repo procedure)
 
-The Function is deployed only from a disposable dev app — never from this
-repository's app directory:
-
-1. Copy this directory into a scratch Shopify app's `extensions/` (or keep it
-   standalone and point the CLI at it — it only needs to be inside the app
-   that is being deployed).
-2. Ensure that scratch app's `shopify.app.toml` requests `write_customers`
-   and `write_discounts` (customer metafield write + discount management).
-3. Build (verified commands — the toml's `build.command` is intentionally
-   empty, the CLI drives codegen + bundling + javy itself):
-   - `npm install` in the scratch extension dir (needs
-     `@shopify/shopify_function` and the codegen packages
-     `@graphql-codegen/cli`, `@graphql-codegen/typescript`,
-     `@graphql-codegen/typescript-operations`, `graphql`), then
-   - `npm run build` — i.e. `shopify app function build` run from the
-     extension directory.
-   - Artifact: `dist/function.wasm`; exported entrypoint:
-     `cart-delivery-options-discounts-generate-run` (the toml `export`).
-   - `shopify app deploy` against the **dev store only**.
-4. Create the `$app:config` metafield above (spike reference:
-   `spikes/checkout-shipping-discount/experiments/setup-discount.ts` on the
-   spike branch — do NOT copy it into this repo).
-5. Register the webhook topics (`orders/paid`, `orders/cancelled`,
-   `orders/fulfilled`, `orders/partially_fulfilled`, `orders/updated`,
-   `refunds/create`, `orders/risk_assessment_changed`) only when the feature
-   is actually being enabled — they are intentionally absent from this
-   branch.
+1. `cd functions/checkout-shipping-discount && npm ci` — installs the
+   extension's own toolchain (`@shopify/shopify_function` + codegen
+   packages) from `package-lock.json`. The repo root install is unaffected;
+   `functions/*/node_modules` and `functions/*/dist` are gitignored.
+2. `npx shopify app deploy --config checkout-first --no-release` from the
+   repo root — creates a version that is NOT released to merchants.
+   **Warning: config `checkout-first` targets the PRODUCTION client id
+   (`04b77142ce8ad421f49735b05c7d0a86`) — founder-authorized only, never run
+   casually.** Without `--no-release` the version would go live.
+3. The toml's `build.command` is intentionally empty: the CLI drives
+   codegen + esbuild + javy itself from `package.json` and emits
+   `dist/function.wasm` exporting
+   `cart-delivery-options-discounts-generate-run` (the toml `export`).
+   `npx shopify app build --config checkout-first` (repo root, no auth) is
+   the local build check — bit-reproducible between clean builds run from
+   the repo root.
+4. Create the `$app:config` metafield above
+   (`scripts/checkout-discount-control.ts create`/`prepare-enable`) and
+   verify the webhook topics are present in the deployed version (they are
+   declared in `shopify.app.checkout-first.toml`).
 
 A fresh extension MUST be given its own `uid` (Shopify-generated — deploy
 once and the CLI writes it into the toml) and the `handle` must be unique
-within the host app; the `uid` recorded in this toml belongs to the spike
-app's extension and cannot be reused by a different app.
+within the host app.
 
 The same API version note applies: this source is the spike-validated copy
 (API 2026-07 input query, identical to the deployed spike extension and to
@@ -119,12 +113,16 @@ validated input query unchanged.
 - `src/*` byte-identical to the deployed spike extension (after a CRLF
   normalization check — the bytes matched exactly) and to the spike commit.
 - `shopify.extension.toml` identical field-for-field.
-- Rebuilt in an OS-temp scratch copy via `shopify app function build` →
-  `dist/function.wasm`. The artifact hash differs from the deployed wasm
-  (build-time toolchain nondeterminism — same CLI, same sources); exports:
-  `_start`, `cart-delivery-options-discounts-generate-run`.
-- `shopify app function run` parity: **55/55** fixture cases equal between
-  the Node implementation and the built wasm.
+- Rebuilt IN this repo via `npm ci` in the extension dir +
+  `npx shopify app build --config checkout-first` → `dist/function.wasm`
+  (12,804 bytes, exports `_start` and
+  `cart-delivery-options-discounts-generate-run`). Two clean builds from the
+  repo root produce the identical sha256; the artifact hash differs from the
+  deployed spike wasm (toolchain versions differ — same sources).
+- Wasm-vs-source parity on THIS repo-built wasm (function-runner 9.2.3):
+  **55/55** fixture cases equal between the Node implementation and the
+  built wasm, every emitted result schema-valid (`selectionStrategy: "ALL"`
+  — the only value the published output schema allows).
 - Percentage type proof through the runner: `"100.0"` (string) →
   `deliveryDiscountsAdd` with `selectionStrategy: "ALL"`; `100` (number) →
   zero operations.

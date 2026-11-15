@@ -1,0 +1,84 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+#
+# Named configuration `checkout-first`: the checkout shipping-discount release.
+# Deploy a version WITHOUT releasing it to merchants:
+#   npx shopify app deploy --config checkout-first --no-release
+# Required `scopes` are byte-identical to production (changing them would
+# re-prompt every merchant). The checkout pilot scopes are optional and are
+# granted per-shop through /app/checkout-access once the global and shop
+# allowlist levers are on.
+
+client_id = "04b77142ce8ad421f49735b05c7d0a86"
+application_url = "https://upbeat-reflection-production.up.railway.app"
+embedded = true
+name = "MergeShip"
+
+# Point the CLI at the Function directory so deploy/build include
+# functions/checkout-shipping-discount (the default is "extensions").
+extension_directories = [ "functions/*" ]
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_customers,write_order_edits,write_orders,write_products"
+# Requested together from Settings only by multi-location stores, so MergeShip
+# can verify both orders are assigned to the same fulfillment location
+# (fulfillment orders + the assigned location's ID).
+# write_customers / write_discounts are the checkout pilot scopes: customer
+# metafield writes (eligibility records) and automatic app discount management.
+optional_scopes = [ "read_merchant_managed_fulfillment_orders", "read_locations", "write_customers", "write_discounts" ]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/create"
+  topics = [ "orders/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  # Checkout shipping-discount delivery subscriptions. Each URI maps to an
+  # existing app/routes/webhooks.* route.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/paid"
+  topics = [ "orders/paid" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/updated"
+  topics = [ "orders/updated" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/cancelled"
+  topics = [ "orders/cancelled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/fulfilled"
+  topics = [ "orders/fulfilled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/partially_fulfilled"
+  topics = [ "orders/partially_fulfilled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/risk_assessment_changed"
+  topics = [ "orders/risk_assessment_changed" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/refunds/create"
+  topics = [ "refunds/create" ]
+
+  [webhooks.privacy_compliance]
+  customer_data_request_url = "https://upbeat-reflection-production.up.railway.app/webhooks/customers/data_request"
+  customer_deletion_url = "https://upbeat-reflection-production.up.railway.app/webhooks/customers/redact"
+  shop_deletion_url = "https://upbeat-reflection-production.up.railway.app/webhooks/shop/redact"
+
+[auth]
+redirect_urls = [ "https://upbeat-reflection-production.up.railway.app/auth/callback" ]
+
+[build]
+automatically_update_urls_on_dev = true
